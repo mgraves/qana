@@ -41,8 +41,9 @@ pub struct TokenDef {
     pub error: bool,
     pub bracket: Option<(BracketKind, bool /* is_open */)>,
     pub action: Action,
-    /// If matched text equals a declared keyword, re-tag as this token id.
-    pub specialize_to: Option<TokenId>,
+    /// If set, matched text is looked up in the grammar's keyword map and
+    /// re-tagged to that keyword's own token id on a hit.
+    pub specialize: bool,
 }
 
 impl TokenDef {
@@ -55,7 +56,7 @@ impl TokenDef {
             error: false,
             bracket: None,
             action: Action::None,
-            specialize_to: None,
+            specialize: false,
         }
     }
     pub fn trivia(mut self) -> Self {
@@ -78,8 +79,8 @@ impl TokenDef {
         self.action = Action::Pop;
         self
     }
-    pub fn specialize(mut self, to: TokenId) -> Self {
-        self.specialize_to = Some(to);
+    pub fn specialize(mut self) -> Self {
+        self.specialize = true;
         self
     }
 }
@@ -90,7 +91,10 @@ pub struct LexGrammar {
     pub name: String,
     pub mode_names: Vec<String>,
     pub tokens: Vec<TokenDef>,
-    pub keywords: Vec<String>,
+    /// Keyword text → the token id it specializes to. Each keyword owns a
+    /// distinct id (a `Pat::Never` token def), so parsers can reference
+    /// individual keywords as terminals.
+    pub keywords: Vec<(String, TokenId)>,
     /// Maximum mode-stack depth. Required (and L2-checked) when the mode
     /// push graph is cyclic; must be ≤ [`crate::lexer::MAX_STACK`].
     pub max_stack: Option<u8>,

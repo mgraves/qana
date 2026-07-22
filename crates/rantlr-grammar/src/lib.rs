@@ -14,9 +14,15 @@ pub mod dfa;
 pub mod demo;
 pub mod lexer;
 pub mod lints;
+pub mod lr;
 pub mod model;
+pub mod parse;
 pub mod pat;
+pub mod syn;
 
 pub use lexer::{CompiledLexer, MStack, Token, MAX_STACK};
+pub use lr::{build_lr, LrAct, LrTables};
 pub use model::{Action, BracketKind, LexGrammar, TokenDef, TokenId, Vocab};
+pub use parse::{parse, sexpr, PNode, TermTok};
 pub use pat::{ClassSet, Pat};
+pub use syn::{Assoc, NtId, Sym, SynGrammar, EOF};

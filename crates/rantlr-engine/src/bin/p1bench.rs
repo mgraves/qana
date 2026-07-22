@@ -3,8 +3,8 @@
 //! two are directly comparable.
 
 use rantlr_engine::*;
-use rantlr_grammar::demo::demo_grammar;
-use rantlr_grammar::CompiledLexer;
+use rantlr_grammar::demo::{demo_grammar, demo_syn_grammar};
+use rantlr_grammar::{build_lr, CompiledLexer};
 use std::time::{Duration, Instant};
 
 struct Rng(u64);
@@ -80,14 +80,24 @@ fn main() {
     println!("rantlr P1 — GENERATED lexer on the P0 scenarios");
     println!("===============================================");
 
-    let (g, _ids) = demo_grammar();
+    let (g, ids) = demo_grammar();
     let (lexer, build_time) = time(|| CompiledLexer::build(&g).expect("demo grammar in envelope"));
     println!(
-        "grammar compile + lints:     {:>10}   (stack bound {}, line-state space {}, DFA states {:?})",
+        "lex compile + lints:         {:>10}   (stack bound {}, line-state space {}, DFA states {:?})",
         fmt_dur(build_time),
         lexer.report.stack_bound,
         lexer.report.line_state_space,
         lexer.report.dfa_states
+    );
+    let sg = demo_syn_grammar(&ids, &lexer.vocab);
+    let (tables, lr_time) = time(|| build_lr(&sg));
+    assert!(tables.conflicts.is_empty());
+    println!(
+        "LR(1) tables (canonical):    {:>10}   ({} states, {} prods, {} S/R resolved by precedence)",
+        fmt_dur(lr_time),
+        tables.n_states,
+        sg.prods.len(),
+        tables.resolved_by_prec
     );
 
     let src = generate(N_LINES);

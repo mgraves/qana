@@ -135,8 +135,46 @@ incrementally. The 305 µs compile time is the headline: **grammar
 hot-reload is real** — edit the language, recompile tables + relint, and
 open documents can relex incrementally within the same frame.
 
+## P1 — increment 2 (shipped)
+
+The syntax tier, same philosophy: `SynGrammar` is a first-class value
+(nonterminals, productions, declarative precedence/associativity — the
+envelope's only disambiguation mechanism), compiled to **canonical LR(1)
+tables** whose surviving conflicts are reported as **counterexamples**:
+the conflicting items with dots, plus an example input built from the
+shortest path to the conflict state with nonterminals expanded to their
+shortest terminal yields. The classic dangling-else grammar reports
+exactly:
+
+```
+shift/reduce on ELSE:  IF IF X · ELSE
+  [s → IF s · , ELSE]        (reduce the inner if)
+  [s → IF s · ELSE s , …]    (shift the else)
+```
+
+and is resolved by declaring `ELSE` to bind tighter — zero conflicts,
+resolution counted. A table-driven batch parser runs over the generated
+lexer's non-trivia tokens (trees rendered as s-expressions for goldens),
+and syntax errors carry **expected-token sets straight from the ACTION
+row** — the completion primitive, exercised from day one:
+
+```
+let x = ;   →  error at `;`: expected IDENT, LBRACKET, LPAREN, NUMBER, STRING
+```
+
+Demo-language numbers: 23 productions → 135 canonical LR(1) states,
+64 shift/reduce conflicts silently resolved by precedence declarations,
+6 ms table build (lex + syntax certification together: <7 ms — the
+hot-reload budget holds). End-to-end tests parse through the full
+generated pipeline (lexer → incremental buffer → parser), including
+multi-line comments dissolving into trivia invisibly to the parser.
+
+Deliberate scope notes: canonical LR(1) (Pager/IELR state-merging is a
+deferred optimization — state counts are small at DSL scale); traces are
+shortest-path examples, not full unifying derivations (Isradisaikul &
+Myers 2015 is the documented upgrade path).
+
 ## Next (P1 continued)
 
-LR(1) tables with conflict counterexamples, lossless green trees over
-these token runs, typed AST codegen — then the Wagner incremental parser
-(P2) under the same differential gate.
+Lossless green trees over these token runs + typed AST codegen — then
+the Wagner incremental parser (P2) under the same differential gate.

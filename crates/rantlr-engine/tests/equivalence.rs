@@ -34,24 +34,73 @@ impl Rng {
     }
 }
 
-/// Map a hand-lexer token kind to the generated vocab id (for non-trivia
-/// comparison) — `None` for trivia kinds.
-fn map_hand(kind: hand::TokenKind, ids: &DemoIds) -> Option<TokenId> {
+/// Comparison classes: the P0 hand lexer's granularity. The generated
+/// lexer refines it (distinct keyword ids, distinct operator ids); both
+/// sides map into these classes and must agree exactly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Class {
+    Ident,
+    Keyword,
+    Number,
+    StrTerm,
+    StrUnterm,
+    LParen,
+    RParen,
+    LBracket,
+    RBracket,
+    LBrace,
+    RBrace,
+    Punct,
+}
+
+/// Hand-lexer token kind → class (`None` for trivia kinds).
+fn class_of_hand(kind: hand::TokenKind) -> Option<Class> {
     use hand::TokenKind as K;
     Some(match kind {
         K::Whitespace | K::LineComment | K::BlockComment | K::Unknown => return None,
-        K::Ident => ids.ident,
-        K::Keyword => ids.keyword,
-        K::Number => ids.number,
-        K::Str { terminated: true } => ids.string,
-        K::Str { terminated: false } => ids.string_unterm,
-        K::LParen => ids.lparen,
-        K::RParen => ids.rparen,
-        K::LBracket => ids.lbracket,
-        K::RBracket => ids.rbracket,
-        K::LBrace => ids.lbrace,
-        K::RBrace => ids.rbrace,
-        K::Punct => ids.punct,
+        K::Ident => Class::Ident,
+        K::Keyword => Class::Keyword,
+        K::Number => Class::Number,
+        K::Str { terminated: true } => Class::StrTerm,
+        K::Str { terminated: false } => Class::StrUnterm,
+        K::LParen => Class::LParen,
+        K::RParen => Class::RParen,
+        K::LBracket => Class::LBracket,
+        K::RBracket => Class::RBracket,
+        K::LBrace => Class::LBrace,
+        K::RBrace => Class::RBrace,
+        K::Punct => Class::Punct,
+    })
+}
+
+/// Generated token id → class (`None` for trivia ids).
+fn class_of_gen(id: TokenId, ids: &DemoIds) -> Option<Class> {
+    Some(if id == ids.ident {
+        Class::Ident
+    } else if ids.is_kw(id) {
+        Class::Keyword
+    } else if id == ids.number {
+        Class::Number
+    } else if id == ids.string {
+        Class::StrTerm
+    } else if id == ids.string_unterm {
+        Class::StrUnterm
+    } else if id == ids.lparen {
+        Class::LParen
+    } else if id == ids.rparen {
+        Class::RParen
+    } else if id == ids.lbracket {
+        Class::LBracket
+    } else if id == ids.rbracket {
+        Class::RBracket
+    } else if id == ids.lbrace {
+        Class::LBrace
+    } else if id == ids.rbrace {
+        Class::RBrace
+    } else if ids.is_punct_class(id) {
+        Class::Punct
+    } else {
+        return None; // trivia (WS, comments, unknown, block pieces)
     })
 }
 
@@ -79,15 +128,16 @@ fn compare_line(
     assert_eq!(h_toks.iter().map(|t| t.len as usize).sum::<usize>(), text.len());
     assert_eq!(g_toks.iter().map(|t| t.len as usize).sum::<usize>(), text.len());
 
-    // (b) non-trivia streams identical
-    let h_sig: Vec<(TokenId, u32)> =
-        h_toks.iter().filter_map(|t| map_hand(t.kind, ids).map(|id| (id, t.len))).collect();
-    let g_sig: Vec<(TokenId, u32)> = g_toks
-        .iter()
-        .filter(|t| !lexer.is_trivia(t.id))
-        .map(|t| (t.id, t.len))
-        .collect();
+    // (b) non-trivia streams identical at class granularity
+    let h_sig: Vec<(Class, u32)> =
+        h_toks.iter().filter_map(|t| class_of_hand(t.kind).map(|c| (c, t.len))).collect();
+    let g_sig: Vec<(Class, u32)> =
+        g_toks.iter().filter_map(|t| class_of_gen(t.id, ids).map(|c| (c, t.len))).collect();
     assert_eq!(h_sig, g_sig, "non-trivia divergence on line {text:?}");
+    // Consistency: the vocab's trivia view must agree with the class map.
+    for t in &g_toks {
+        assert_eq!(class_of_gen(t.id, ids).is_none(), lexer.is_trivia(t.id));
+    }
 
     // (c) per-byte trivia flags identical
     let mut h_bytes = Vec::with_capacity(text.len());

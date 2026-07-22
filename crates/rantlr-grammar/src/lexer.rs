@@ -86,8 +86,8 @@ pub struct CompiledLexer {
     modes: Vec<ModeDfa>,
     actions: Vec<Action>,
     trivia: Vec<bool>,
-    specialize: Vec<Option<TokenId>>,
-    keywords: HashMap<String, ()>,
+    specialize: Vec<bool>,
+    keywords: HashMap<String, TokenId>,
     stack_bound: u8,
     unknown: TokenId,
 }
@@ -108,8 +108,8 @@ impl CompiledLexer {
             modes,
             actions: g.tokens.iter().map(|t| t.action).collect(),
             trivia: g.tokens.iter().map(|t| t.trivia).collect(),
-            specialize: g.tokens.iter().map(|t| t.specialize_to).collect(),
-            keywords: g.keywords.iter().map(|k| (k.clone(), ())).collect(),
+            specialize: g.tokens.iter().map(|t| t.specialize).collect(),
+            keywords: g.keywords.iter().cloned().collect(),
             unknown: g.unknown_id(),
         })
     }
@@ -145,8 +145,8 @@ impl CompiledLexer {
                     i += ch.len_utf8();
                 }
                 Some((end, mut tok)) => {
-                    if let Some(kw) = self.specialize[tok as usize] {
-                        if self.keywords.contains_key(&text[i..end]) {
+                    if self.specialize[tok as usize] {
+                        if let Some(&kw) = self.keywords.get(&text[i..end]) {
                             tok = kw;
                         }
                     }

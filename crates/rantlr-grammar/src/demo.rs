@@ -1,9 +1,17 @@
 //! The P0 spike's demo language, re-expressed as a grammar VALUE.
 //! This is the equivalence subject: the lexer generated from this value
-//! must be observationally identical to the hand-written P0 lexer.
+//! must be observationally equivalent to the hand-written P0 lexer.
+//!
+//! P1 increment 2 refines token granularity for the parser's sake:
+//! each keyword owns a distinct token id (specialized from IDENT via the
+//! keyword map), and the operators the syntax grammar references get
+//! dedicated ids ahead of the generic PUNCT class. The hand lexer sees
+//! these as `Keyword`/`Punct` classes — the equivalence gate compares at
+//! that class level (the generated lexer refines, never disagrees).
 
-use crate::model::{BracketKind, LexGrammar, TokenDef, TokenId};
+use crate::model::{BracketKind, LexGrammar, TokenDef, TokenId, Vocab};
 use crate::pat::{ClassSet, Pat};
+use crate::syn::{Assoc, Sym, SynGrammar};
 
 pub struct DemoIds {
     pub ws: TokenId,
@@ -19,14 +27,42 @@ pub struct DemoIds {
     pub rbracket: TokenId,
     pub lbrace: TokenId,
     pub rbrace: TokenId,
+    pub plus: TokenId,
+    pub minus: TokenId,
+    pub star: TokenId,
+    pub slash: TokenId,
+    pub semi: TokenId,
+    pub comma: TokenId,
+    pub eq: TokenId,
     pub punct: TokenId,
-    pub keyword: TokenId,
+    /// Keyword token ids, aligned with [`KEYWORDS`] order.
+    pub kw: Vec<TokenId>,
     pub b_open: TokenId,
     pub b_close: TokenId,
     pub b_content: TokenId,
     pub b_misc: TokenId,
     pub unknown: TokenId,
     pub block_mode: u16,
+}
+
+impl DemoIds {
+    pub fn kw_id(&self, word: &str) -> TokenId {
+        let idx = KEYWORDS.iter().position(|k| *k == word).expect("known keyword");
+        self.kw[idx]
+    }
+    pub fn is_kw(&self, id: TokenId) -> bool {
+        self.kw.contains(&id)
+    }
+    pub fn is_punct_class(&self, id: TokenId) -> bool {
+        id == self.plus
+            || id == self.minus
+            || id == self.star
+            || id == self.slash
+            || id == self.semi
+            || id == self.comma
+            || id == self.eq
+            || id == self.punct
+    }
 }
 
 pub const KEYWORDS: &[&str] = &[
@@ -38,11 +74,8 @@ pub fn demo_grammar() -> (LexGrammar, DemoIds) {
     let mut g = LexGrammar::new("Demo", &["DEFAULT", "BLOCK"]);
     const DEFAULT: u16 = 0;
     const BLOCK: u16 = 1;
-    g.keywords = KEYWORDS.iter().map(|s| s.to_string()).collect();
     g.max_stack = Some(8); // BLOCK pushes itself (nested comments): L2 bound.
 
-    // String pieces: escape = '\' followed by any non-terminator;
-    // safe = anything except quote, backslash, terminators.
     let esc = Pat::seq([Pat::lit("\\"), Pat::Class(ClassSet::any())]);
     let safe = Pat::Class(ClassSet::not_chars(&['"', '\\', '\r', '\n']));
     let body = Pat::star(Pat::alt([esc.clone(), safe.clone()]));
@@ -63,9 +96,6 @@ pub fn demo_grammar() -> (LexGrammar, DemoIds) {
         DEFAULT,
         Pat::seq([Pat::lit("\""), body.clone(), Pat::lit("\"")]),
     ));
-    // Unterminated string: a prefix (optionally ending in a dangling
-    // backslash, which the hand lexer also consumes). Loses ties to
-    // STRING at equal length; loses to STRING by maximal munch otherwise.
     let string_unterm = g.add(
         TokenDef::new(
             "STRING_UNTERM",
@@ -82,14 +112,17 @@ pub fn demo_grammar() -> (LexGrammar, DemoIds) {
             Pat::opt(Pat::seq([Pat::lit("."), Pat::plus(Pat::Class(ClassSet::digit()))])),
         ]),
     ));
-    let ident = g.add(TokenDef::new(
-        "IDENT",
-        DEFAULT,
-        Pat::seq([
-            Pat::Class(ClassSet::ident_start()),
-            Pat::star(Pat::Class(ClassSet::ident_cont())),
-        ]),
-    ));
+    let ident = g.add(
+        TokenDef::new(
+            "IDENT",
+            DEFAULT,
+            Pat::seq([
+                Pat::Class(ClassSet::ident_start()),
+                Pat::star(Pat::Class(ClassSet::ident_cont())),
+            ]),
+        )
+        .specialize(),
+    );
     let lparen = g.add(TokenDef::new("LPAREN", DEFAULT, Pat::lit("(")).bracket(BracketKind::Paren, true));
     let rparen =
         g.add(TokenDef::new("RPAREN", DEFAULT, Pat::lit(")")).bracket(BracketKind::Paren, false));
@@ -101,14 +134,31 @@ pub fn demo_grammar() -> (LexGrammar, DemoIds) {
         g.add(TokenDef::new("LBRACE", DEFAULT, Pat::lit("{")).bracket(BracketKind::Brace, true));
     let rbrace =
         g.add(TokenDef::new("RBRACE", DEFAULT, Pat::lit("}")).bracket(BracketKind::Brace, false));
-    // Generic single-char ASCII punctuation (brackets/quotes already win
-    // their ties above by declaration order).
+    // Parser-relevant operators, each with its own id.
+    let plus = g.add(TokenDef::new("PLUS", DEFAULT, Pat::lit("+")));
+    let minus = g.add(TokenDef::new("MINUS", DEFAULT, Pat::lit("-")));
+    let star = g.add(TokenDef::new("STAR", DEFAULT, Pat::lit("*")));
+    let slash = g.add(TokenDef::new("SLASH", DEFAULT, Pat::lit("/")));
+    let semi = g.add(TokenDef::new("SEMI", DEFAULT, Pat::lit(";")));
+    let comma = g.add(TokenDef::new("COMMA", DEFAULT, Pat::lit(",")));
+    let eq = g.add(TokenDef::new("EQ", DEFAULT, Pat::lit("=")));
+    // Everything else single-char ASCII punctuation.
     let punct = g.add(TokenDef::new(
         "PUNCT",
         DEFAULT,
         Pat::Class(ClassSet::ranges(&[('!', '/'), (':', '@'), ('[', '`'), ('{', '~')])),
     ));
-    let keyword = g.add(TokenDef::new("KW", DEFAULT, Pat::Never));
+
+    // One distinct token per keyword (specialization targets).
+    let kw: Vec<TokenId> = KEYWORDS
+        .iter()
+        .map(|w| g.add(TokenDef::new(&format!("KW_{}", w.to_uppercase()), DEFAULT, Pat::Never)))
+        .collect();
+    g.keywords = KEYWORDS
+        .iter()
+        .zip(&kw)
+        .map(|(w, id)| (w.to_string(), *id))
+        .collect();
 
     // BLOCK mode: nested comment interior. All trivia.
     let b_open = g.add(TokenDef::new("B_OPEN", BLOCK, Pat::lit("/*")).trivia().push(BLOCK));
@@ -122,9 +172,6 @@ pub fn demo_grammar() -> (LexGrammar, DemoIds) {
         .trivia(),
     );
     let b_misc = g.add(TokenDef::new("B_MISC", BLOCK, Pat::Class(ClassSet::chars(&['*', '/']))).trivia());
-
-    // Wire specialization after KW exists.
-    g.tokens[ident as usize].specialize_to = Some(keyword);
 
     let unknown = g.unknown_id();
     (
@@ -143,8 +190,15 @@ pub fn demo_grammar() -> (LexGrammar, DemoIds) {
             rbracket,
             lbrace,
             rbrace,
+            plus,
+            minus,
+            star,
+            slash,
+            semi,
+            comma,
+            eq,
             punct,
-            keyword,
+            kw,
             b_open,
             b_close,
             b_content,
@@ -153,4 +207,67 @@ pub fn demo_grammar() -> (LexGrammar, DemoIds) {
             block_mode: BLOCK,
         },
     )
+}
+
+/// The demo language's SYNTAX grammar (P1 increment 2): statements and
+/// precedence-resolved expressions over the lexical grammar above. Uses
+/// braces-required `if`/`else` (no dangling-else ambiguity under
+/// canonical LR(1)) and declarative operator precedence (envelope L3).
+pub fn demo_syn_grammar(ids: &DemoIds, vocab: &Vocab) -> SynGrammar {
+    let mut sg = SynGrammar::new("DemoSyn", vocab.names.clone());
+    let t = |id: TokenId| Sym::T(id);
+
+    let file = sg.nt("file");
+    let stmts = sg.nt("stmts");
+    let stmt = sg.nt("stmt");
+    let block = sg.nt("block");
+    let expr = sg.nt("expr");
+    let args = sg.nt("args");
+    let args_ne = sg.nt("args_ne");
+    sg.start = file;
+
+    sg.set_token_prec(ids.plus, 1, Assoc::Left);
+    sg.set_token_prec(ids.minus, 1, Assoc::Left);
+    sg.set_token_prec(ids.star, 2, Assoc::Left);
+    sg.set_token_prec(ids.slash, 2, Assoc::Left);
+
+    let n = |x| Sym::N(x);
+    sg.prod(file, vec![n(stmts)]);
+    sg.prod(stmts, vec![]);
+    sg.prod(stmts, vec![n(stmts), n(stmt)]);
+    sg.prod(stmt, vec![t(ids.kw_id("let")), t(ids.ident), t(ids.eq), n(expr), t(ids.semi)]);
+    sg.prod(stmt, vec![n(expr), t(ids.semi)]);
+    sg.prod(stmt, vec![n(block)]);
+    sg.prod(stmt, vec![t(ids.kw_id("if")), t(ids.lparen), n(expr), t(ids.rparen), n(block)]);
+    sg.prod(
+        stmt,
+        vec![
+            t(ids.kw_id("if")),
+            t(ids.lparen),
+            n(expr),
+            t(ids.rparen),
+            n(block),
+            t(ids.kw_id("else")),
+            n(block),
+        ],
+    );
+    sg.prod(block, vec![t(ids.lbrace), n(stmts), t(ids.rbrace)]);
+
+    sg.prod(expr, vec![n(expr), t(ids.plus), n(expr)]);
+    sg.prod(expr, vec![n(expr), t(ids.minus), n(expr)]);
+    sg.prod(expr, vec![n(expr), t(ids.star), n(expr)]);
+    sg.prod(expr, vec![n(expr), t(ids.slash), n(expr)]);
+    sg.prod(expr, vec![t(ids.number)]);
+    sg.prod(expr, vec![t(ids.string)]);
+    sg.prod(expr, vec![t(ids.ident)]);
+    sg.prod(expr, vec![t(ids.ident), t(ids.lparen), n(args), t(ids.rparen)]);
+    sg.prod(expr, vec![t(ids.lparen), n(expr), t(ids.rparen)]);
+    sg.prod(expr, vec![t(ids.lbracket), n(args), t(ids.rbracket)]);
+
+    sg.prod(args, vec![]);
+    sg.prod(args, vec![n(args_ne)]);
+    sg.prod(args_ne, vec![n(expr)]);
+    sg.prod(args_ne, vec![n(args_ne), t(ids.comma), n(expr)]);
+
+    sg
 }

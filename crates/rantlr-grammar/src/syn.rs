@@ -35,6 +35,9 @@ pub struct Prod {
     /// Explicit precedence override; defaults to the precedence of the
     /// last terminal in `rhs` (yacc semantics).
     pub prec: Option<u8>,
+    /// CamelCase variant name for the typed AST (e.g. "LetStmt").
+    /// Unnamed productions get positional names in generated code.
+    pub name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -47,6 +50,22 @@ pub struct SynGrammar {
     pub start: NtId,
     /// Token precedence: (level, assoc). Higher level binds tighter.
     pub token_prec: Vec<Option<(u8, Assoc)>>,
+}
+
+pub(crate) fn camel(s: &str) -> String {
+    let mut out = String::new();
+    let mut up = true;
+    for c in s.chars() {
+        if c == '_' || c == '-' {
+            up = true;
+        } else if up {
+            out.extend(c.to_uppercase());
+            up = false;
+        } else {
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
 }
 
 impl SynGrammar {
@@ -68,13 +87,30 @@ impl SynGrammar {
     }
 
     pub fn prod(&mut self, lhs: NtId, rhs: Vec<Sym>) -> usize {
-        self.prods.push(Prod { lhs, rhs, prec: None });
+        self.prods.push(Prod { lhs, rhs, prec: None, name: None });
+        self.prods.len() - 1
+    }
+
+    pub fn prod_named(&mut self, lhs: NtId, name: &str, rhs: Vec<Sym>) -> usize {
+        self.prods.push(Prod { lhs, rhs, prec: None, name: Some(name.to_string()) });
         self.prods.len() - 1
     }
 
     pub fn prod_prec(&mut self, lhs: NtId, rhs: Vec<Sym>, prec: u8) -> usize {
-        self.prods.push(Prod { lhs, rhs, prec: Some(prec) });
+        self.prods.push(Prod { lhs, rhs, prec: Some(prec), name: None });
         self.prods.len() - 1
+    }
+
+    /// Generated-code name for a production: declared name or positional.
+    pub fn prod_name(&self, idx: usize) -> String {
+        match &self.prods[idx].name {
+            Some(n) => n.clone(),
+            None => format!(
+                "{}V{}",
+                camel(&self.nt_names[self.prods[idx].lhs as usize]),
+                idx
+            ),
+        }
     }
 
     pub fn set_token_prec(&mut self, t: TokenId, level: u8, assoc: Assoc) {
@@ -101,6 +137,11 @@ impl SynGrammar {
                 Sym::T(t) => self.token_prec[*t as usize],
                 Sym::N(_) => None,
             })
+    }
+
+    /// CamelCase a snake/upper name: `args_ne` → `ArgsNe`.
+    pub fn camel_name(s: &str) -> String {
+        camel(s)
     }
 
     /// Render a production like `expr → expr PLUS expr`.

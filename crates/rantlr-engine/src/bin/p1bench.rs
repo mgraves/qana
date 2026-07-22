@@ -4,7 +4,7 @@
 
 use rantlr_engine::*;
 use rantlr_grammar::demo::{demo_grammar, demo_syn_grammar};
-use rantlr_grammar::{build_lr, CompiledLexer};
+use rantlr_grammar::{build_green, build_lr, parse, CompiledLexer, GreenChild, GreenNode, TermTok};
 use std::time::{Duration, Instant};
 
 struct Rng(u64);
@@ -198,5 +198,96 @@ fn main() {
         fmt_dur(singles[singles.len() * 99 / 100])
     );
 
+    // ---- P1 inc. 3: batch parse + lossless green tree at scale ----
+    // NOTE: `stmts → stmts stmt` makes a 100k-statement file a 100k-deep
+    // left spine — recursive tree walks need a deep stack. This is
+    // envelope L4 (Wagner's balanced-sequence precondition) showing up
+    // empirically; the P2 increment's auto-balanced lists make trees
+    // log-depth and retire this thread. Until then: big-stack thread,
+    // rustc-style.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(512 << 20)
+            .spawn_scoped(scope, || corpus_bench(&lexer, &sg, &tables))
+            .expect("spawn")
+            .join()
+            .expect("corpus bench");
+    });
+
     println!("\nall assertions passed.");
+}
+
+fn corpus_bench(
+    lexer: &CompiledLexer,
+    sg: &rantlr_grammar::SynGrammar,
+    tables: &rantlr_grammar::LrTables,
+) {
+    const N_LINES: usize = 100_000;
+    // Statement-only corpus (the demo SYNTAX grammar's language).
+    let mut src2 = String::with_capacity(N_LINES * 32);
+    let mut li = 0usize;
+    while li < N_LINES {
+        match li % 6 {
+            0 => src2.push_str(&format!("let v{li} = {li} + {li} * 2;\n")),
+            1 => src2.push_str(&format!("if (v{li}) {{ emit(v{li}, 1); }} else {{ skip(); }}\n")),
+            2 => src2.push_str(&format!("emit(\"s{li}\", [1, 2.5]); // note {li}\n")),
+            3 => {
+                if li % 470 == 3 {
+                    src2.push_str("/* corpus note:\n   spans lines\n   ends here */\n");
+                    li += 3;
+                    continue;
+                }
+                src2.push_str(&format!("let w{li} = (v{li} - 1) / 2;\n"));
+            }
+            4 => src2.push_str(&format!("{{ let t{li} = 3; }}\n")),
+            _ => src2.push_str(&format!("done(v{li});\n")),
+        }
+        li += 1;
+    }
+    let mb2 = src2.len() as f64 / 1e6;
+    let sbuf = LexedBuffer::new(lexer, &src2);
+    let (all, d_harvest) = time(|| full_tokens(lexer, &sbuf));
+    let terms: Vec<TermTok> = all
+        .iter()
+        .filter(|t| !t.trivia)
+        .map(|t| TermTok { id: t.id, text: t.text.clone() })
+        .collect();
+    let (pnode, d_parse) = time(|| parse(sg, tables, &terms).expect("corpus parses"));
+    let (green, d_tree) = time(|| build_green(&pnode, &all).expect("tree builds"));
+    let (txt, d_text) = time(|| green.text());
+    assert_eq!(txt, src2, "GREEN TREE LOSSLESSNESS FAILED");
+    fn count(n: &GreenNode) -> (usize, usize) {
+        let mut nodes = 1;
+        let mut toks = 0;
+        for c in &n.children {
+            match c {
+                GreenChild::Node(m) => {
+                    let (a, b) = count(m);
+                    nodes += a;
+                    toks += b;
+                }
+                GreenChild::Token(_) => toks += 1,
+            }
+        }
+        (nodes, toks)
+    }
+    let (n_nodes, n_toks) = count(&green);
+    println!(
+        "batch parse (corpus):        {:>10}   ({:.2} MB, {} terminals, {:.1} MB/s)",
+        fmt_dur(d_parse),
+        mb2,
+        terms.len(),
+        mb2 / d_parse.as_secs_f64()
+    );
+    println!(
+        "green tree build:            {:>10}   ({} nodes, {} tokens incl. trivia; harvest {})",
+        fmt_dur(d_tree),
+        n_nodes,
+        n_toks,
+        fmt_dur(d_harvest)
+    );
+    println!(
+        "green text() roundtrip:      {:>10}   (byte-identical: verified)",
+        fmt_dur(d_text)
+    );
 }

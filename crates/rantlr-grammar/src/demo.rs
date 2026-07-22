@@ -232,15 +232,24 @@ pub fn demo_syn_grammar(ids: &DemoIds, vocab: &Vocab) -> SynGrammar {
     sg.set_token_prec(ids.slash, 2, Assoc::Left);
 
     let n = |x| Sym::N(x);
-    sg.prod(file, vec![n(stmts)]);
-    sg.prod(stmts, vec![]);
-    sg.prod(stmts, vec![n(stmts), n(stmt)]);
-    sg.prod(stmt, vec![t(ids.kw_id("let")), t(ids.ident), t(ids.eq), n(expr), t(ids.semi)]);
-    sg.prod(stmt, vec![n(expr), t(ids.semi)]);
-    sg.prod(stmt, vec![n(block)]);
-    sg.prod(stmt, vec![t(ids.kw_id("if")), t(ids.lparen), n(expr), t(ids.rparen), n(block)]);
-    sg.prod(
+    sg.prod_named(file, "File", vec![n(stmts)]);
+    sg.prod_named(stmts, "StmtsEmpty", vec![]);
+    sg.prod_named(stmts, "StmtsMore", vec![n(stmts), n(stmt)]);
+    sg.prod_named(
         stmt,
+        "LetStmt",
+        vec![t(ids.kw_id("let")), t(ids.ident), t(ids.eq), n(expr), t(ids.semi)],
+    );
+    sg.prod_named(stmt, "ExprStmt", vec![n(expr), t(ids.semi)]);
+    sg.prod_named(stmt, "BlockStmt", vec![n(block)]);
+    sg.prod_named(
+        stmt,
+        "IfStmt",
+        vec![t(ids.kw_id("if")), t(ids.lparen), n(expr), t(ids.rparen), n(block)],
+    );
+    sg.prod_named(
+        stmt,
+        "IfElseStmt",
         vec![
             t(ids.kw_id("if")),
             t(ids.lparen),
@@ -251,23 +260,23 @@ pub fn demo_syn_grammar(ids: &DemoIds, vocab: &Vocab) -> SynGrammar {
             n(block),
         ],
     );
-    sg.prod(block, vec![t(ids.lbrace), n(stmts), t(ids.rbrace)]);
+    sg.prod_named(block, "Block", vec![t(ids.lbrace), n(stmts), t(ids.rbrace)]);
 
-    sg.prod(expr, vec![n(expr), t(ids.plus), n(expr)]);
-    sg.prod(expr, vec![n(expr), t(ids.minus), n(expr)]);
-    sg.prod(expr, vec![n(expr), t(ids.star), n(expr)]);
-    sg.prod(expr, vec![n(expr), t(ids.slash), n(expr)]);
-    sg.prod(expr, vec![t(ids.number)]);
-    sg.prod(expr, vec![t(ids.string)]);
-    sg.prod(expr, vec![t(ids.ident)]);
-    sg.prod(expr, vec![t(ids.ident), t(ids.lparen), n(args), t(ids.rparen)]);
-    sg.prod(expr, vec![t(ids.lparen), n(expr), t(ids.rparen)]);
-    sg.prod(expr, vec![t(ids.lbracket), n(args), t(ids.rbracket)]);
+    sg.prod_named(expr, "AddExpr", vec![n(expr), t(ids.plus), n(expr)]);
+    sg.prod_named(expr, "SubExpr", vec![n(expr), t(ids.minus), n(expr)]);
+    sg.prod_named(expr, "MulExpr", vec![n(expr), t(ids.star), n(expr)]);
+    sg.prod_named(expr, "DivExpr", vec![n(expr), t(ids.slash), n(expr)]);
+    sg.prod_named(expr, "NumLit", vec![t(ids.number)]);
+    sg.prod_named(expr, "StrLit", vec![t(ids.string)]);
+    sg.prod_named(expr, "NameRef", vec![t(ids.ident)]);
+    sg.prod_named(expr, "CallExpr", vec![t(ids.ident), t(ids.lparen), n(args), t(ids.rparen)]);
+    sg.prod_named(expr, "ParenExpr", vec![t(ids.lparen), n(expr), t(ids.rparen)]);
+    sg.prod_named(expr, "ListExpr", vec![t(ids.lbracket), n(args), t(ids.rbracket)]);
 
-    sg.prod(args, vec![]);
-    sg.prod(args, vec![n(args_ne)]);
-    sg.prod(args_ne, vec![n(expr)]);
-    sg.prod(args_ne, vec![n(args_ne), t(ids.comma), n(expr)]);
+    sg.prod_named(args, "ArgsEmpty", vec![]);
+    sg.prod_named(args, "ArgsSome", vec![n(args_ne)]);
+    sg.prod_named(args_ne, "ArgFirst", vec![n(expr)]);
+    sg.prod_named(args_ne, "ArgMore", vec![n(args_ne), t(ids.comma), n(expr)]);
 
     sg
 }

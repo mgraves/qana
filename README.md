@@ -174,7 +174,42 @@ deferred optimization — state counts are small at DSL scale); traces are
 shortest-path examples, not full unifying derivations (Isradisaikul &
 Myers 2015 is the documented upgrade path).
 
-## Next (P1 continued)
+## P1 — increment 3 (shipped)
 
-Lossless green trees over these token runs + typed AST codegen — then
-the Wagner incremental parser (P2) under the same differential gate.
+**Lossless green trees.** Rowan-lineage immutable trees built from the LR
+parse: kind = (nonterminal, production), byte widths, `Arc` children (the
+seam P2's incremental reuse splices through), and tokens carrying text +
+trivia flags — so trees are self-contained and `tree.text()` reproduces
+the source **byte-for-byte**, comments, mixed CRLF/CR/LF line endings
+(woven back as synthetic NEWLINE trivia), unicode and all. Trivia policy
+(deterministic, documented): a trivia run attaches as siblings before the
+next non-trivia token; richer ownership views are derived layers.
+`ancestor_spans` / `token_at_offset` provide the LSP `selectionRange`
+primitive — the nesting invariant is property-tested at every offset.
+
+**Typed AST codegen.** `cargo run -p rantlr-grammar --bin astgen`
+regenerates `demo_ast.rs` (checked in, 698 lines) from the grammar
+*value*: an enum per multi-production nonterminal, a struct per named
+production, an accessor per RHS symbol (trivia-transparent, token ids
+inlined). A **drift test** asserts the checked-in file matches
+regeneration — so a grammar change fails CI first, and regenerating
+surfaces every downstream use that no longer typechecks: *ramification
+as compile errors*, now enforced rather than promised.
+
+Scale numbers (100k-line statement corpus, 3.1 MB): batch parse 145 ms
+(1.05M terminals; HashMap action rows — dense-row packing is a known
+deferred optimization), green tree build 76 ms (998k nodes / 1.68M
+tokens incl. trivia), byte-identical `text()` in 14 ms.
+
+**A finding worth keeping:** the corpus's `stmts → stmts stmt` left
+recursion produces a 100k-deep tree spine, which overflows default
+stacks in recursive walks — Wagner's balanced-sequence precondition
+(envelope L4) demonstrating itself empirically. The bench runs that
+section on a rustc-style big-stack thread until P2's auto-balanced lists
+make trees log-depth and retire the workaround.
+
+## Next (P2)
+
+The Wagner incremental parser over these green trees — balanced
+sequences (L4), sentential-form reuse, multi-site edit batches — under
+the same incremental ≡ batch differential gate the lexer already obeys.

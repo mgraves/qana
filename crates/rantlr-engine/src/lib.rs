@@ -292,6 +292,43 @@ impl<'l, L: LineLexer> LexedBuffer<'l, L> {
 }
 
 // ---------------------------------------------------------------------------
+// Green-tree bridge
+// ---------------------------------------------------------------------------
+
+/// The FULL token stream for green-tree building: every lexed token with
+/// its text, in order, plus synthesized [`rantlr_grammar::NEWLINE`]
+/// trivia tokens carrying the exact line terminators (the engine's line
+/// model stores those out-of-band). Concatenating the texts reproduces
+/// the buffer byte-for-byte — which is exactly the invariant
+/// `build_green` then lifts to the tree.
+pub fn full_tokens(
+    lexer: &CompiledLexer,
+    buf: &LexedBuffer<'_, CompiledLexer>,
+) -> Vec<rantlr_grammar::TokWithText> {
+    let mut out = Vec::new();
+    for (line, lt) in buf.lines.iter().zip(&buf.lexed) {
+        let mut off = 0usize;
+        for tok in &lt.tokens {
+            let end = off + tok.len as usize;
+            out.push(rantlr_grammar::TokWithText {
+                id: tok.id,
+                trivia: lexer.is_trivia(tok.id),
+                text: line.text[off..end].to_string(),
+            });
+            off = end;
+        }
+        if line.term != LineTerm::None {
+            out.push(rantlr_grammar::TokWithText {
+                id: rantlr_grammar::NEWLINE,
+                trivia: true,
+                text: line.term.as_str().to_string(),
+            });
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Block skeleton, vocab-driven
 // ---------------------------------------------------------------------------
 

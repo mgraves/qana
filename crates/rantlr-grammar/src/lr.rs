@@ -44,6 +44,12 @@ pub struct LrTables {
     pub conflicts: Vec<Conflict>,
     /// Shift/reduce conflicts silently settled by precedence/assoc.
     pub resolved_by_prec: usize,
+    /// Productions involved in precedence-resolved conflicts (Wagner §6
+    /// "fragile" set): reused subtrees rooted at these productions must
+    /// be broken down during incremental parsing, because their shape
+    /// depends on disambiguation context the LR automaton alone doesn't
+    /// re-check on a nonterminal shift.
+    pub fragile: Vec<bool>,
 }
 
 impl LrTables {
@@ -232,6 +238,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
     let mut goto_: Vec<HashMap<u16, u16>> = vec![HashMap::new(); states.len()];
     let mut conflicts: Vec<Conflict> = Vec::new();
     let mut resolved = 0usize;
+    let mut fragile = vec![false; g.prods.len()];
 
     // Shortest path (in symbols) from state 0 to each state — for traces.
     let paths: Vec<Vec<Sym>> = {
@@ -342,9 +349,11 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
                         (Some((pl, _)), Some((tl, _))) if pl > tl => {
                             action[si].insert(la, red);
                             resolved += 1;
+                            fragile[(p - 1) as usize] = true;
                         }
                         (Some((pl, _)), Some((tl, _))) if pl < tl => {
                             resolved += 1; // keep shift
+                            fragile[(p - 1) as usize] = true;
                         }
                         (Some((pl, pa)), Some((tl, _))) => {
                             debug_assert_eq!(pl, tl);
@@ -358,6 +367,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
                                 }
                             }
                             resolved += 1;
+                            fragile[(p - 1) as usize] = true;
                         }
                         _ => {
                             let mut item_set: BTreeSet<String> = BTreeSet::new();
@@ -403,5 +413,12 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
         }
     }
 
-    LrTables { action, goto_, n_states: states.len(), conflicts, resolved_by_prec: resolved }
+    LrTables {
+        action,
+        goto_,
+        n_states: states.len(),
+        conflicts,
+        resolved_by_prec: resolved,
+        fragile,
+    }
 }

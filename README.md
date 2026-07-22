@@ -208,8 +208,43 @@ stacks in recursive walks — Wagner's balanced-sequence precondition
 section on a rustc-style big-stack thread until P2's auto-balanced lists
 make trees log-depth and retire the workaround.
 
-## Next (P2)
+## P2 — increment 1 (shipped): the Wagner incremental parser
 
-The Wagner incremental parser over these green trees — balanced
-sequences (L4), sentential-form reuse, multi-site edit batches — under
-the same incremental ≡ batch differential gate the lexer already obeys.
+Sentential-form incremental LR parsing over the green trees
+(`incremental.rs` + `IncSession` in the engine): after an edit batch, the
+lexer's damage regions map to old-token intervals; a salvage walk emits
+maximal clean subtrees interleaved with fresh tokens; the parser
+**splices whole subtrees via GOTO** (Wagner's nonterminal shift), breaks
+down dirty/unshiftable nodes, uses leftmost-terminal lookahead for
+reduces, and — critically — **breaks down subtrees rooted at FRAGILE
+productions** (those shaped by precedence resolution, Wagner §6). The
+test suite constructs the exact wrong-splice scenario this prevents:
+editing `1 + 2\n+ 9` to `1 + 2\n* 9` must NOT splice the old `Add(1,2)`
+into `Mul(Add(1,2),9)` — the gate + a typed-AST shape assertion prove it
+re-associates to `Add(1, Mul(2,9))`.
+
+**The gate is FULL TREE EQUALITY** — incremental result equals a
+from-scratch batch parse, structure *and* trivia placement (pending
+trivia is injected down spliced subtrees' left spines to match the batch
+builder byte-for-byte). Held across single edits, multi-site batches,
+insertions/deletions, comment-only edits (100% terminal reuse,
+trivia-local), block-comment state waves, error→invalidate→batch
+recovery, 300 fuzz rounds, and a 700-edit session on the 100k-line
+corpus. The gate caught two real bugs during development (an eager
+reduce that destroyed splice opportunities; transposed trivia at splice
+boundaries) — the methodology keeps paying.
+
+Numbers (100k-line corpus): **near-EOF edit 88 µs median** — the true
+spine-free incremental cost; mid-file edit 25 ms median with ~50k
+splices — the **unbalanced left-recursive list tax** (Wagner §7's
+predicted linear degeneration, measured precisely: each suffix statement
+re-wraps through `StmtsMore`). Also fixed en route: two hidden O(n)s
+(eager leftmost-terminal computation descending the whole spine;
+full per-line count recomputation per edit).
+
+## Next (P2 continued)
+
+**L4 auto-balanced sequences** — the tool detects list-shaped rules and
+represents repetition as balanced tree runs, turning the 25 ms mid-file
+tax into O(damage + log n) and retiring the big-stack thread; then
+top-down reuse + Wagner's optimality postpass, and error recovery.

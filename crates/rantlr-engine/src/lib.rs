@@ -116,12 +116,25 @@ pub struct LineEdit {
     pub replacement: Vec<Line>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+/// One damaged region: the lines relexed by an edit site (replacement +
+/// reconvergence run), in both coordinate systems. `old_lines` addresses
+/// the pre-edit buffer (for incremental-parse salvage); `new_lines` the
+/// post-edit buffer (for fresh-token harvest). A pure insertion has an
+/// empty `old_lines` range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DamageRegion {
+    pub old_lines: (usize, usize),
+    pub new_lines: (usize, usize),
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct DamageReport {
     pub sites: usize,
     pub replaced_lines: usize,
     pub relexed_lines: usize,
     pub reconverged_extra: usize,
+    /// Ascending, per-site damaged regions (may touch; consumers merge).
+    pub regions: Vec<DamageRegion>,
 }
 
 pub struct LexedBuffer<'l, L: LineLexer> {
@@ -179,6 +192,11 @@ impl<'l, L: LineLexer> LexedBuffer<'l, L> {
             new_start: usize,
             new_end: usize,
             old_exit_before_carry: S,
+            /// First replaced line in OLD coordinates.
+            old_start: usize,
+            /// Cumulative (new − old) line delta AFTER this gap's
+            /// replacement — maps carried-line indices back to old ones.
+            delta_after: isize,
         }
 
         let same_shape = edits.iter().all(|e| e.replacement.len() == e.end - e.start);
@@ -197,7 +215,13 @@ impl<'l, L: LineLexer> LexedBuffer<'l, L> {
                         self.lines[e.start + k] = l.clone();
                     }
                     report.replaced_lines += e.replacement.len();
-                    Gap { new_start: e.start, new_end: e.end, old_exit_before_carry }
+                    Gap {
+                        new_start: e.start,
+                        new_end: e.end,
+                        old_exit_before_carry,
+                        old_start: e.start,
+                        delta_after: 0,
+                    }
                 })
                 .collect()
         } else {
@@ -210,6 +234,7 @@ impl<'l, L: LineLexer> LexedBuffer<'l, L> {
             let mut old_l = old_lines.into_iter();
             let mut old_t = old_lexed.into_iter();
             let mut cursor = 0usize;
+            let mut cur_delta: isize = 0;
 
             for e in edits {
                 for _ in cursor..e.start {
@@ -229,10 +254,13 @@ impl<'l, L: LineLexer> LexedBuffer<'l, L> {
                     new_lexed.push(LineTokens { tokens: Vec::new(), exit: L::State::default() });
                 }
                 report.replaced_lines += e.replacement.len();
+                cur_delta += e.replacement.len() as isize - (e.end - e.start) as isize;
                 gaps.push(Gap {
                     new_start,
                     new_end: new_lines.len(),
                     old_exit_before_carry: prev_old_exit,
+                    old_start: e.start,
+                    delta_after: cur_delta,
                 });
                 cursor = e.end;
             }
@@ -285,6 +313,18 @@ impl<'l, L: LineLexer> LexedBuffer<'l, L> {
                 i += 1;
             }
             settled_until = i;
+
+            // Record this site's damaged region in both coordinate systems.
+            // Carried (reconverged) lines map old = new − delta_after.
+            let old_end = (i as isize - gap.delta_after) as usize;
+            let region = DamageRegion {
+                old_lines: (gap.old_start, old_end.max(gap.old_start)),
+                new_lines: (gap.new_start, i),
+            };
+            if region.old_lines.0 != region.old_lines.1 || region.new_lines.0 != region.new_lines.1
+            {
+                report.regions.push(region);
+            }
         }
 
         report
@@ -382,4 +422,193 @@ pub fn build_skeleton<L: LineLexer>(buf: &LexedBuffer<'_, L>, vocab: &Vocab) -> 
         }
     }
     sk
+}
+
+// ---------------------------------------------------------------------------
+// Incremental session: lexer damage → salvage → Wagner parse
+// ---------------------------------------------------------------------------
+
+use rantlr_grammar::{
+    batch_parse_green, incremental_parse, salvage, FreshRegion, GreenNode, IncParseError,
+    LrTables, ReuseStats, SynGrammar, TokWithText, NEWLINE,
+};
+use std::sync::Arc;
+
+/// A live document: buffer + current lossless tree, kept in sync
+/// incrementally. On a syntax error the tree is dropped and the next
+/// successful edit falls back to a full batch parse (error recovery is a
+/// later increment).
+pub struct IncSession<'l> {
+    pub buf: LexedBuffer<'l, CompiledLexer>,
+    tree: Option<Arc<GreenNode>>,
+    /// Per-line (full tokens incl. terminator, non-trivia terminals),
+    /// matching the OLD state of `tree` (used for damage alignment).
+    line_counts: Vec<(u32, u32)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EditOutcome {
+    pub damage: DamageReport,
+    pub stats: ReuseStats,
+}
+
+fn count_line(
+    lexer: &CompiledLexer,
+    buf: &LexedBuffer<'_, CompiledLexer>,
+    li: usize,
+) -> (u32, u32) {
+    let (line, lt) = (&buf.lines[li], &buf.lexed[li]);
+    let terms = lt.tokens.iter().filter(|t| !lexer.is_trivia(t.id)).count() as u32;
+    let full = lt.tokens.len() as u32 + (line.term != LineTerm::None) as u32;
+    (full, terms)
+}
+
+fn count_lines(lexer: &CompiledLexer, buf: &LexedBuffer<'_, CompiledLexer>) -> Vec<(u32, u32)> {
+    (0..buf.lines.len()).map(|li| count_line(lexer, buf, li)).collect()
+}
+
+fn harvest_lines(
+    lexer: &CompiledLexer,
+    buf: &LexedBuffer<'_, CompiledLexer>,
+    range: (usize, usize),
+) -> Vec<TokWithText> {
+    let mut out = Vec::new();
+    for li in range.0..range.1 {
+        let line = &buf.lines[li];
+        let lt = &buf.lexed[li];
+        let mut off = 0usize;
+        for tok in &lt.tokens {
+            let end = off + tok.len as usize;
+            out.push(TokWithText {
+                id: tok.id,
+                trivia: lexer.is_trivia(tok.id),
+                text: line.text[off..end].to_string(),
+            });
+            off = end;
+        }
+        if line.term != LineTerm::None {
+            out.push(TokWithText {
+                id: NEWLINE,
+                trivia: true,
+                text: line.term.as_str().to_string(),
+            });
+        }
+    }
+    out
+}
+
+fn merge_regions(regions: &[DamageRegion]) -> Vec<DamageRegion> {
+    let mut out: Vec<DamageRegion> = Vec::new();
+    for r in regions {
+        match out.last_mut() {
+            Some(prev) if r.old_lines.0 <= prev.old_lines.1 || r.new_lines.0 <= prev.new_lines.1 => {
+                prev.old_lines.1 = prev.old_lines.1.max(r.old_lines.1);
+                prev.new_lines.1 = prev.new_lines.1.max(r.new_lines.1);
+            }
+            _ => out.push(*r),
+        }
+    }
+    out
+}
+
+impl<'l> IncSession<'l> {
+    pub fn new(
+        lexer: &'l CompiledLexer,
+        sg: &SynGrammar,
+        tables: &LrTables,
+        src: &str,
+    ) -> Result<Self, IncParseError> {
+        let buf = LexedBuffer::new(lexer, src);
+        let all = full_tokens(lexer, &buf);
+        let tree = batch_parse_green(sg, tables, &all)?;
+        let line_counts = count_lines(lexer, &buf);
+        Ok(IncSession { buf, tree: Some(tree), line_counts })
+    }
+
+    pub fn tree(&self) -> Option<&Arc<GreenNode>> {
+        self.tree.as_ref()
+    }
+
+    /// Apply an edit batch and incrementally reparse. Returns damage +
+    /// reuse statistics; on a syntax error the session survives (buffer
+    /// stays current) but the tree is invalid until an edit parses again.
+    pub fn edit(
+        &mut self,
+        sg: &SynGrammar,
+        tables: &LrTables,
+        edits: &[LineEdit],
+    ) -> Result<EditOutcome, IncParseError> {
+        let lexer = self.buf.lexer;
+        let damage = self.buf.apply_edits(edits);
+        let old_counts = std::mem::take(&mut self.line_counts);
+        // Splice-update the per-line counts: only damaged lines recount
+        // (the old counts stay intact above for damage alignment).
+        let merged = merge_regions(&damage.regions);
+        let mut new_counts = old_counts.clone();
+        for r in merged.iter().rev() {
+            let fresh: Vec<(u32, u32)> =
+                (r.new_lines.0..r.new_lines.1).map(|li| count_line(lexer, &self.buf, li)).collect();
+            new_counts.splice(r.old_lines.0..r.old_lines.1, fresh);
+        }
+        debug_assert_eq!(new_counts.len(), self.buf.lines.len());
+
+        let result = match self.tree.take() {
+            Some(old_tree) => {
+                let regions = merged;
+                if regions.is_empty() {
+                    // No-op batch: tree unchanged, full reuse.
+                    let stats = ReuseStats {
+                        reused_terms: old_tree.terms,
+                        total_terms: old_tree.terms,
+                        splices: 1,
+                        breakdowns: 0,
+                    };
+                    Ok((old_tree, stats))
+                } else {
+                    // Old full-token prefix sums for damage alignment.
+                    let mut pref = Vec::with_capacity(old_counts.len() + 1);
+                    let mut acc = 0u32;
+                    pref.push(0);
+                    for (full, _) in &old_counts {
+                        acc += full;
+                        pref.push(acc);
+                    }
+                    let fresh: Vec<FreshRegion> = regions
+                        .iter()
+                        .map(|r| FreshRegion {
+                            old_toks: (pref[r.old_lines.0], pref[r.old_lines.1]),
+                            tokens: harvest_lines(lexer, &self.buf, r.new_lines),
+                        })
+                        .collect();
+                    let input = salvage(&old_tree, &fresh);
+                    incremental_parse(sg, tables, input)
+                }
+            }
+            None => {
+                // Previous edit errored: full batch reparse.
+                let all = full_tokens(lexer, &self.buf);
+                batch_parse_green(sg, tables, &all).map(|tree| {
+                    let stats = ReuseStats {
+                        reused_terms: 0,
+                        total_terms: tree.terms,
+                        splices: 0,
+                        breakdowns: 0,
+                    };
+                    (tree, stats)
+                })
+            }
+        };
+
+        self.line_counts = new_counts;
+        match result {
+            Ok((tree, stats)) => {
+                self.tree = Some(tree);
+                Ok(EditOutcome { damage, stats })
+            }
+            Err(e) => {
+                self.tree = None;
+                Err(e)
+            }
+        }
+    }
 }

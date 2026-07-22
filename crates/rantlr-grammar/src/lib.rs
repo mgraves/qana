@@ -15,6 +15,7 @@ pub mod dfa;
 pub mod demo;
 pub mod demo_ast;
 pub mod green;
+pub mod incremental;
 pub mod lexer;
 pub mod lints;
 pub mod lr;
@@ -25,6 +26,9 @@ pub mod syn;
 pub mod typed;
 
 pub use green::{build_green, GreenChild, GreenNode, GreenToken, TokWithText, NEWLINE};
+pub use incremental::{
+    batch_parse_green, incremental_parse, salvage, FreshRegion, IncParseError, Item, ReuseStats,
+};
 pub use lexer::{CompiledLexer, MStack, Token, MAX_STACK};
 pub use lr::{build_lr, LrAct, LrTables};
 pub use model::{Action, BracketKind, LexGrammar, TokenDef, TokenId, Vocab};

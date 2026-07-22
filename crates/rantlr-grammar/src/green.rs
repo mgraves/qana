@@ -56,6 +56,10 @@ pub struct GreenNode {
     pub prod: u16,
     /// Total byte width including all trivia beneath.
     pub width: u32,
+    /// Non-trivia terminals beneath (incremental-reuse bookkeeping).
+    pub terms: u32,
+    /// ALL tokens beneath, trivia included (damage-interval alignment).
+    pub n_toks: u32,
     pub children: Vec<GreenChild>,
 }
 
@@ -118,6 +122,7 @@ pub fn build_green(root: &PNode, all: &[TokWithText]) -> Result<Arc<GreenNode>, 
     while cur < all.len() && all[cur].trivia {
         let t = &all[cur];
         node.width += t.text.len() as u32;
+        node.n_toks += 1;
         node.children.push(GreenChild::Token(GreenToken {
             id: t.id,
             trivia: true,
@@ -146,6 +151,8 @@ fn build_node(
         PNode::Rule { prod, nt, children } => {
             let mut out: Vec<GreenChild> = Vec::with_capacity(children.len());
             let mut width = 0u32;
+            let mut terms = 0u32;
+            let mut n_toks = 0u32;
             for c in children {
                 match c {
                     PNode::Tok { id, .. } => {
@@ -153,6 +160,7 @@ fn build_node(
                         while *cur < all.len() && all[*cur].trivia {
                             let t = &all[*cur];
                             width += t.text.len() as u32;
+                            n_toks += 1;
                             out.push(GreenChild::Token(GreenToken {
                                 id: t.id,
                                 trivia: true,
@@ -167,6 +175,8 @@ fn build_node(
                             return Err(TreeError::Desync { expected: *id, found: Some(t.id) });
                         }
                         width += t.text.len() as u32;
+                        terms += 1;
+                        n_toks += 1;
                         out.push(GreenChild::Token(GreenToken {
                             id: t.id,
                             trivia: false,
@@ -177,6 +187,10 @@ fn build_node(
                     rule => {
                         let child = build_node(rule, all, cur)?;
                         width += child.width();
+                        if let GreenChild::Node(n) = &child {
+                            terms += n.terms;
+                            n_toks += n.n_toks;
+                        }
                         out.push(child);
                     }
                 }
@@ -185,6 +199,8 @@ fn build_node(
                 nt: *nt,
                 prod: *prod,
                 width,
+                terms,
+                n_toks,
                 children: out,
             })))
         }

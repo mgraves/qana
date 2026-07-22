@@ -290,4 +290,74 @@ fn corpus_bench(
         "green text() roundtrip:      {:>10}   (byte-identical: verified)",
         fmt_dur(d_text)
     );
+
+    // ---- P2: Wagner incremental parsing on the same corpus ----
+    let mut session = IncSession::new(lexer, sg, tables, &src2).expect("corpus parses");
+    let mut rng = Rng::new(0x1AC5E);
+    let mut times = Vec::new();
+    let mut worst_reuse: f64 = 1.0;
+    let mut total_splices = 0u64;
+    for k in 0..500usize {
+        let line = 1 + rng.below(session.buf.lines.len().saturating_sub(3));
+        // Keep edits valid: replace with a complete statement line.
+        let edit = LineEdit {
+            start: line,
+            end: line + 1,
+            replacement: vec![Line::new(format!("let inc{k} = {k} + 1;"), LineTerm::Lf)],
+        };
+        let t0 = Instant::now();
+        match session.edit(sg, tables, &[edit]) {
+            Ok(out) => {
+                times.push(t0.elapsed());
+                worst_reuse = worst_reuse.min(out.stats.reuse_fraction());
+                total_splices += out.stats.splices as u64;
+            }
+            Err(_) => {
+                // Replaced a line that was part of a multi-line construct
+                // (block comment interior/opener): repair next round.
+                let _ = session.edit(sg, tables, &[]);
+            }
+        }
+    }
+    times.sort();
+    if !times.is_empty() {
+        println!(
+            "incremental reparse (P2):    {:>10}   (median of {}; p99 {}; worst reuse {:.2}%; avg {} splices/edit)",
+            fmt_dur(times[times.len() / 2]),
+            times.len(),
+            fmt_dur(times[times.len() * 99 / 100]),
+            worst_reuse * 100.0,
+            total_splices / times.len().max(1) as u64
+        );
+    }
+
+    // Near-EOF edit: tiny suffix ⇒ the spine tax vanishes — this is the
+    // per-edit cost the L4 balanced-list increment generalizes to
+    // arbitrary positions (O(damage + log n) instead of O(suffix)).
+    let mut eof_times = Vec::new();
+    let tail = session.buf.lines.len() - 3;
+    for k in 0..200usize {
+        let edit = LineEdit {
+            start: tail,
+            end: tail + 1,
+            replacement: vec![Line::new(format!("let tail{k} = {k};"), LineTerm::Lf)],
+        };
+        let t0 = Instant::now();
+        session.edit(sg, tables, &[edit]).expect("valid");
+        eof_times.push(t0.elapsed());
+    }
+    eof_times.sort();
+    println!(
+        "incremental, near-EOF edit:  {:>10}   (median of 200 — the spine-free cost)",
+        fmt_dur(eof_times[eof_times.len() / 2])
+    );
+
+    // Differential spot-check at scale, once.
+    let all_now = full_tokens(lexer, &session.buf);
+    let batch_now = rantlr_grammar::batch_parse_green(sg, tables, &all_now).expect("parses");
+    assert!(
+        **session.tree().expect("valid") == *batch_now,
+        "P2 DIFFERENTIAL GATE FAILED AT SCALE"
+    );
+    println!("P2 gate at scale:                verified   (incremental tree == batch tree, 100k lines)");
 }

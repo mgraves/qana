@@ -17,3 +17,11 @@ version = "0.0.1"
 [[package]]
 name = "rantlr-lex"
 version = "0.0.1"
+
+[[package]]
+name = "rantlr-services"
+version = "0.0.1"
+dependencies = [
+ "rantlr-engine",
+ "rantlr-grammar",
+]

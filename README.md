@@ -281,9 +281,49 @@ chunking (semantic equality is the contract; content-defined canonical
 chunking is the documented upgrade path if full shape equality is ever
 wanted).
 
+## P2 — increment 3 (shipped): error recovery
+
+Parsing is **total** now. On error: a bounded repair search (mini-CPCT+)
+finds insert *sequences* up to length 3 (BFS over cloned state stacks,
+validated against K=3 peeked real terminals) competing with single-token
+deletion; EOF repair scores insertions by accept-reachability or strict
+stack-depth progress (missing closers heal one per round); panic-skip
+and stack-unwind guarantee termination under a repair budget. Skipped
+tokens stay in the tree inside ERROR nodes (excluded from symbol
+positions — typed accessors keep meaning); inserted tokens are
+zero-width "missing" tokens excluded from all counts, so buffer
+alignment survives and `has_err` poisoning lets salvage dissolve error
+regions while clean regions keep splicing: **typing through broken
+states holds >90% reuse**, and repaired documents still pass the
+incremental ≡ batch semantic gate. Repairs surface as diagnostics.
+
+## P3 — increment 1 (shipped): derived editor services
+
+`rantlr-services`: everything computed from artifacts the toolchain
+already generates, LSP-shaped but transport-free:
+
+- **Semantic tokens** (tier 0): token-id → legend classes, LSP quintuple
+  encoding, and **delta updates spliced from damage regions** — gated by
+  a property test (delta-applied cache must byte-equal a fresh full
+  encode, 160 random edit rounds + 200 at scale).
+- **Folding** from the block skeleton + multi-line comment runs read
+  straight off the line states.
+- **Outline** from the tree with byte spans (name selection = exact
+  ident span).
+- **Completion from the ACTION rows** — the antlr4-c3 capability as a
+  table lookup; keywords auto-lowercased for insertion.
+- **Diagnostics from repairs** (`unexpected `)`` / `missing SEMI`),
+  spans landing on the exact characters.
+- **Selection ranges** (the ancestor-span substrate, session-wrapped).
+
+At 100k lines: semantic tokens full 7.2 ms (1.14M styled tokens);
+**edit → incremental reparse + semantic delta: 563 µs median, ~35 u32s
+per delta** (vs 5.7M for a full resend); outline 12.5 ms; completion
+30.6 ms mid-file (states-only prefix run — per-line state checkpoints
+are the documented refinement).
+
 ## Next
 
-Error recovery (CPCT+-style bounded repair inside damage regions), then
-the services layer: semantic tokens with deltas, outline/folding from
-the skeleton and tree, completion from the ACTION rows — the LSP server
-(P3).
+The LSP server binary over these services (didChange → session.edit →
+publish deltas/diagnostics), a VS Code extension, and the grammar
+hot-reload playground — the "beautiful ways" demo.

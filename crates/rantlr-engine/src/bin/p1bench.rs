@@ -4,7 +4,7 @@
 
 use rantlr_engine::*;
 use rantlr_grammar::demo::{demo_grammar, demo_syn_grammar};
-use rantlr_grammar::{build_green, build_lr, parse, CompiledLexer, GreenChild, GreenNode, TermTok};
+use rantlr_grammar::{build_lr, CompiledLexer, GreenChild, GreenNode};
 use std::time::{Duration, Instant};
 
 struct Rng(u64);
@@ -198,21 +198,10 @@ fn main() {
         fmt_dur(singles[singles.len() * 99 / 100])
     );
 
-    // ---- P1 inc. 3: batch parse + lossless green tree at scale ----
-    // NOTE: `stmts → stmts stmt` makes a 100k-statement file a 100k-deep
-    // left spine — recursive tree walks need a deep stack. This is
-    // envelope L4 (Wagner's balanced-sequence precondition) showing up
-    // empirically; the P2 increment's auto-balanced lists make trees
-    // log-depth and retire this thread. Until then: big-stack thread,
-    // rustc-style.
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(512 << 20)
-            .spawn_scoped(scope, || corpus_bench(&lexer, &sg, &tables))
-            .expect("spawn")
-            .join()
-            .expect("corpus bench");
-    });
+    // ---- Corpus-scale parse + trees. L4 balanced sequences made trees
+    // log-depth, so this runs on the ordinary stack — the big-stack
+    // thread P1 increment 3 needed is retired.
+    corpus_bench(&lexer, &sg, &tables);
 
     println!("\nall assertions passed.");
 }
@@ -247,13 +236,11 @@ fn corpus_bench(
     let mb2 = src2.len() as f64 / 1e6;
     let sbuf = LexedBuffer::new(lexer, &src2);
     let (all, d_harvest) = time(|| full_tokens(lexer, &sbuf));
-    let terms: Vec<TermTok> = all
-        .iter()
-        .filter(|t| !t.trivia)
-        .map(|t| TermTok { id: t.id, text: t.text.clone() })
-        .collect();
-    let (pnode, d_parse) = time(|| parse(sg, tables, &terms).expect("corpus parses"));
-    let (green, d_tree) = time(|| build_green(&pnode, &all).expect("tree builds"));
+    let n_terms = all.iter().filter(|t| !t.trivia).count();
+    let (green, d_parse) =
+        time(|| rantlr_grammar::batch_parse_green(sg, tables, &all).expect("corpus parses"));
+    rantlr_grammar::green::check_balance(&green).expect("balanced");
+    let d_tree = std::time::Duration::ZERO; // tree built during parse now
     let (txt, d_text) = time(|| green.text());
     assert_eq!(txt, src2, "GREEN TREE LOSSLESSNESS FAILED");
     fn count(n: &GreenNode) -> (usize, usize) {
@@ -272,16 +259,16 @@ fn corpus_bench(
         (nodes, toks)
     }
     let (n_nodes, n_toks) = count(&green);
+    let _ = d_tree;
     println!(
-        "batch parse (corpus):        {:>10}   ({:.2} MB, {} terminals, {:.1} MB/s)",
+        "batch parse→tree (corpus):   {:>10}   ({:.2} MB, {} terminals, {:.1} MB/s, balanced tree built inline)",
         fmt_dur(d_parse),
         mb2,
-        terms.len(),
+        n_terms,
         mb2 / d_parse.as_secs_f64()
     );
     println!(
-        "green tree build:            {:>10}   ({} nodes, {} tokens incl. trivia; harvest {})",
-        fmt_dur(d_tree),
+        "tree stats:                             {} nodes, {} tokens incl. trivia; harvest {}",
         n_nodes,
         n_toks,
         fmt_dur(d_harvest)

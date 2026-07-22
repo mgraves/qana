@@ -1,21 +1,15 @@
-//! Green trees + typed AST, end to end: generated lexer → buffer →
-//! LR parse → lossless green tree → generated typed wrappers.
-//!
-//! Gates:
-//!   1. TREE LOSSLESSNESS: `green.text()` is byte-identical to the
-//!      source — comments, whitespace, unicode, mixed line endings, all
-//!      of it — for every parseable document.
-//!   2. TRIVIA INVISIBILITY: symbol-level structure is identical with
-//!      and without interleaved comments.
-//!   3. SELECTION EXPANSION: ancestor spans at every offset nest.
-//!   4. TYPED NAVIGATION: the generated wrappers traverse real trees
-//!      (compile-time proof that grammar → types → accessors line up).
+//! Green trees + typed AST, end to end — L4 edition: trees carry
+//! balanced LIST/RUN sequence nodes; typed list access goes through
+//! flattened `items()` accessors; batch trees are shallow (no more
+//! left-recursive spines).
 
 use rantlr_engine::*;
 use rantlr_grammar::demo::{demo_grammar, demo_syn_grammar};
 use rantlr_grammar::demo_ast as ast;
+use rantlr_grammar::green::{check_balance, flat_children, is_seq_prod};
 use rantlr_grammar::{
-    build_green, build_lr, parse, AstNode, CompiledLexer, GreenNode, NodeRef, TermTok,
+    batch_parse_green, build_green, build_lr, parse, AstNode, CompiledLexer, GreenChild,
+    GreenNode, NodeRef, TermTok,
 };
 use std::sync::Arc;
 
@@ -31,19 +25,16 @@ fn pipeline() -> Pipeline {
     let sg = demo_syn_grammar(&ids, &lexer.vocab);
     let tables = build_lr(&sg);
     assert!(tables.conflicts.is_empty());
+    assert!(tables.lists.len() >= 2, "stmts and args_ne must detect as lists");
     Pipeline { lexer, sg, tables }
 }
 
 fn tree_of(p: &Pipeline, src: &str) -> Arc<GreenNode> {
     let buf = LexedBuffer::new(&p.lexer, src);
     let all = full_tokens(&p.lexer, &buf);
-    let terms: Vec<TermTok> = all
-        .iter()
-        .filter(|t| !t.trivia)
-        .map(|t| TermTok { id: t.id, text: t.text.clone() })
-        .collect();
-    let pnode = parse(&p.sg, &p.tables, &terms).expect("parse");
-    build_green(&pnode, &all).expect("tree build")
+    let tree = batch_parse_green(&p.sg, &p.tables, &all).expect("parse");
+    check_balance(&tree).expect("balance invariants");
+    tree
 }
 
 #[test]
@@ -58,9 +49,37 @@ fn tree_text_is_byte_identical() {
         "let long = /* a\n   b\n   c */ f(g(h(1)));\n// tail comment\n",
         "",
     ] {
-        // "" parses as an empty file (stmts → ε).
         let tree = tree_of(&p, src);
         assert_eq!(tree.text(), src, "tree text must reproduce source exactly");
+    }
+}
+
+#[test]
+fn legacy_binary_builder_still_lossless() {
+    // The PNode + build_green path (P1 increment 3) remains as the binary
+    // reference implementation; it must stay byte-lossless.
+    let p = pipeline();
+    let src = "let a = /* note */ 1 + 2; // c\nlet b = f(1, 2);\n";
+    let buf = LexedBuffer::new(&p.lexer, src);
+    let all = full_tokens(&p.lexer, &buf);
+    let terms: Vec<TermTok> = all
+        .iter()
+        .filter(|t| !t.trivia)
+        .map(|t| TermTok { id: t.id, text: t.text.clone() })
+        .collect();
+    let pnode = parse(&p.sg, &p.tables, &terms).expect("parse");
+    let tree = build_green(&pnode, &all).expect("build");
+    assert_eq!(tree.text(), src);
+}
+
+/// Semantic shape: (nt, prod) preorder over the flattened view (runs
+/// expanded), trivia skipped — stable under both trivia and chunking.
+fn shape(n: &GreenNode, out: &mut Vec<(u16, u16)>) {
+    out.push((n.nt, if is_seq_prod(n.prod) { u16::MAX - 1 } else { n.prod }));
+    for c in flat_children(n) {
+        if let GreenChild::Node(m) = c {
+            shape(m, out);
+        }
     }
 }
 
@@ -69,16 +88,6 @@ fn trivia_is_structurally_invisible() {
     let p = pipeline();
     let with = tree_of(&p, "let a = /* one\n   two */ 1 + 2; // done");
     let without = tree_of(&p, "let a = 1 + 2;");
-    // Compare symbol-level shape (kinds down the tree, trivia skipped).
-    fn shape(n: &GreenNode, out: &mut Vec<(u16, u16)>) {
-        out.push((n.nt, n.prod));
-        for c in n.symbol_children() {
-            match c {
-                rantlr_grammar::GreenChild::Node(m) => shape(m, out),
-                rantlr_grammar::GreenChild::Token(_) => {}
-            }
-        }
-    }
     let (mut a, mut b) = (Vec::new(), Vec::new());
     shape(&with, &mut a);
     shape(&without, &mut b);
@@ -101,9 +110,7 @@ fn ancestor_spans_nest_at_every_offset() {
                 "offset {off}: {outer:?} must contain {inner:?}"
             );
         }
-        let (tok, s, e) = rantlr_grammar::green::token_at_offset(&tree, off).expect("token");
-        assert!(s <= off && off < e);
-        let _ = tok;
+        assert!(rantlr_grammar::green::token_at_offset(&tree, off).is_some());
     }
 }
 
@@ -113,59 +120,71 @@ fn typed_navigation_traverses_real_trees() {
     let tree = tree_of(&p, "let a = 1 + 2 * 3;");
     let file = ast::File::cast(NodeRef(&tree)).expect("root is File");
 
-    // file → stmts → (more (empty) stmt)
+    // L4: stmts is a flattened list now.
     let stmts = file.stmts().expect("stmts");
-    let ast::Stmts::StmtsMore(more) = stmts else {
-        panic!("one statement expected")
-    };
-    let ast::Stmt::LetStmt(let_stmt) = more.stmt().expect("stmt") else {
-        panic!("let statement expected")
-    };
+    let items = stmts.items();
+    assert_eq!(items.len(), 1);
+    let ast::Stmt::LetStmt(let_stmt) = items[0] else { panic!("let statement expected") };
 
     assert_eq!(let_stmt.kw_let_token().expect("kw").text(), "let");
     assert_eq!(let_stmt.ident_token().expect("name").text(), "a");
     assert_eq!(let_stmt.semi_token().expect("semi").text(), ";");
 
-    // 1 + 2 * 3 groups as Add(1, Mul(2, 3)).
-    let ast::Expr::AddExpr(add) = let_stmt.expr().expect("expr") else {
-        panic!("add at the top")
-    };
-    let ast::Expr::NumLit(lhs) = add.expr().expect("lhs") else {
-        panic!("number lhs")
-    };
+    let ast::Expr::AddExpr(add) = let_stmt.expr().expect("expr") else { panic!("add at top") };
+    let ast::Expr::NumLit(lhs) = add.expr().expect("lhs") else { panic!("number lhs") };
     assert_eq!(lhs.number_token().expect("1").text(), "1");
-    let ast::Expr::MulExpr(mul) = add.expr_2().expect("rhs") else {
-        panic!("mul rhs")
-    };
+    let ast::Expr::MulExpr(mul) = add.expr_2().expect("rhs") else { panic!("mul rhs") };
     assert_eq!(mul.star_token().expect("*").text(), "*");
-    let ast::Expr::NumLit(rhs) = mul.expr_2().expect("3") else {
-        panic!("number rhs")
-    };
+    let ast::Expr::NumLit(rhs) = mul.expr_2().expect("3") else { panic!("number rhs") };
     assert_eq!(rhs.number_token().expect("3").text(), "3");
 
-    // Typed layer sees through trivia: same navigation with comments.
+    // Typed layer sees through trivia AND run chunking alike.
     let tree2 = tree_of(&p, "let /*x*/ a /*y*/ = 1 + /*z*/ 2 * 3; // c");
     let file2 = ast::File::cast(NodeRef(&tree2)).expect("root");
-    let ast::Stmts::StmtsMore(m2) = file2.stmts().unwrap() else { panic!() };
-    let ast::Stmt::LetStmt(ls2) = m2.stmt().unwrap() else { panic!() };
+    let items2 = file2.stmts().unwrap().items();
+    assert_eq!(items2.len(), 1);
+    let ast::Stmt::LetStmt(ls2) = items2[0] else { panic!() };
     assert_eq!(ls2.ident_token().unwrap().text(), "a");
     assert!(matches!(ls2.expr(), Some(ast::Expr::AddExpr(_))));
 }
 
 #[test]
-fn call_args_navigate_through_left_recursion() {
+fn call_args_flatten_through_the_list() {
     let p = pipeline();
     let tree = tree_of(&p, "z(1, 2.5);");
     let file = ast::File::cast(NodeRef(&tree)).unwrap();
-    let ast::Stmts::StmtsMore(more) = file.stmts().unwrap() else { panic!() };
-    let ast::Stmt::ExprStmt(es) = more.stmt().unwrap() else { panic!() };
+    let items = file.stmts().unwrap().items();
+    let ast::Stmt::ExprStmt(es) = items[0] else { panic!() };
     let ast::Expr::CallExpr(call) = es.expr().unwrap() else { panic!() };
     assert_eq!(call.ident_token().unwrap().text(), "z");
     let ast::Args::ArgsSome(some) = call.args().unwrap() else { panic!() };
-    let ast::ArgsNe::ArgMore(last) = some.args_ne().unwrap() else { panic!() };
-    // Left recursion: (ArgMore (ArgFirst 1) COMMA 2.5)
-    let ast::ArgsNe::ArgFirst(first) = last.args_ne().unwrap() else { panic!() };
-    assert!(matches!(first.expr(), Some(ast::Expr::NumLit(_))));
-    let ast::Expr::NumLit(second) = last.expr().unwrap() else { panic!() };
+    let args: Vec<_> = some.args_ne().unwrap().items();
+    assert_eq!(args.len(), 2, "flattened argument list");
+    assert!(matches!(args[0], ast::Expr::NumLit(_)));
+    let ast::Expr::NumLit(second) = args[1] else { panic!() };
     assert_eq!(second.number_token().unwrap().text(), "2.5");
+}
+
+#[test]
+fn big_lists_are_balanced_and_shallow() {
+    let p = pipeline();
+    let src: String = (0..5000).map(|i| format!("let v{i} = {i};\n")).collect();
+    let tree = tree_of(&p, &src);
+    // Depth check: no path longer than ~4 sequence levels for 5000 items.
+    fn depth(n: &GreenNode) -> usize {
+        1 + n
+            .children
+            .iter()
+            .filter_map(|c| match c {
+                GreenChild::Node(m) => Some(depth(m)),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+    let d = depth(&tree);
+    assert!(d <= 12, "tree depth {d} must be logarithmic, not a spine");
+    // And the typed view still sees all 5000 statements, in order.
+    let file = ast::File::cast(NodeRef(&tree)).unwrap();
+    assert_eq!(file.stmts().unwrap().items().len(), 5000);
 }

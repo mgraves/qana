@@ -4,7 +4,7 @@
 //! mechanism by which a grammar change becomes downstream compile errors
 //! ("ramification as type errors").
 
-use crate::green::{GreenChild, GreenNode, GreenToken};
+use crate::green::{GreenChild, GreenNode, GreenToken, RUN_PROD};
 use crate::model::TokenId;
 
 #[derive(Clone, Copy, Debug)]
@@ -58,6 +58,25 @@ impl<'g> NodeRef<'g> {
             SymbolChild::Token(t) if t.0.id == expect => Some(t),
             _ => None,
         }
+    }
+
+    /// Flattened symbol children of a LIST node (envelope L4): balanced
+    /// RUN nodes are expanded inline and trivia skipped — the substrate
+    /// for generated `items()` accessors.
+    pub fn flat_symbol_children(&self) -> Vec<SymbolChild<'g>> {
+        fn go<'g>(n: &'g GreenNode, out: &mut Vec<SymbolChild<'g>>) {
+            for c in &n.children {
+                match c {
+                    GreenChild::Node(m) if m.prod == RUN_PROD => go(m, out),
+                    GreenChild::Node(m) => out.push(SymbolChild::Node(NodeRef(m))),
+                    GreenChild::Token(t) if !t.trivia => out.push(SymbolChild::Token(TokenRef(t))),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        go(self.0, &mut out);
+        out
     }
 }
 

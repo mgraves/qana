@@ -271,3 +271,107 @@ pub fn token_at_offset(root: &GreenNode, offset: u32) -> Option<(&GreenToken, u3
         return None;
     }
 }
+
+// ---------------------------------------------------------------------------
+// L4: balanced sequences — sentinel kinds, semantic equality, invariants
+// ---------------------------------------------------------------------------
+
+/// Production sentinel for a LIST node (the actual nonterminal node of a
+/// list-shaped rule; children = elements directly, or balanced RUN nodes).
+pub const LIST_PROD: u16 = u16::MAX - 1;
+/// Production sentinel for a RUN node (an internal balanced chunk of a
+/// list; same `nt` as its list; fanout ≤ [`MAX_RUN`]).
+pub const RUN_PROD: u16 = u16::MAX - 2;
+/// Maximum fanout of RUN/LIST grouping.
+pub const MAX_RUN: usize = 16;
+
+pub fn is_seq_prod(p: u16) -> bool {
+    p == LIST_PROD || p == RUN_PROD
+}
+
+/// Children with RUN nodes expanded inline — the flattened view under
+/// which list association is (by declaration) meaningless.
+pub fn flat_children(n: &GreenNode) -> Vec<&GreenChild> {
+    let mut out = Vec::new();
+    fn go<'a>(n: &'a GreenNode, out: &mut Vec<&'a GreenChild>) {
+        for c in &n.children {
+            match c {
+                GreenChild::Node(m) if m.prod == RUN_PROD => go(m, out),
+                other => out.push(other),
+            }
+        }
+    }
+    go(n, &mut out);
+    out
+}
+
+/// Semantic tree equality: full structural equality everywhere, except
+/// list nodes compare by their FLATTENED child sequences (run structure
+/// is representation, not meaning — envelope L4). Trivia text and
+/// placement still compare exactly at the flattened level.
+pub fn semantic_eq(a: &GreenNode, b: &GreenNode) -> bool {
+    if a.nt != b.nt {
+        return false;
+    }
+    let (al, bl) = (a.prod == LIST_PROD, b.prod == LIST_PROD);
+    if al != bl {
+        return false;
+    }
+    if !al && a.prod != b.prod {
+        return false;
+    }
+    let fa = flat_children(a);
+    let fb = flat_children(b);
+    if fa.len() != fb.len() {
+        return false;
+    }
+    fa.iter().zip(&fb).all(|(x, y)| match (x, y) {
+        (GreenChild::Token(t), GreenChild::Token(u)) => {
+            t.id == u.id && t.trivia == u.trivia && t.text == u.text
+        }
+        (GreenChild::Node(m), GreenChild::Node(n)) => semantic_eq(m, n),
+        _ => false,
+    })
+}
+
+/// Balance invariants: every LIST/RUN node has fanout ≤ MAX_RUN; RUN
+/// children never include LIST nodes; counts (width/terms/n_toks) are
+/// consistent everywhere.
+pub fn check_balance(n: &GreenNode) -> Result<(), String> {
+    if is_seq_prod(n.prod) && n.children.len() > MAX_RUN {
+        return Err(format!(
+            "seq node nt={} has fanout {} > {}",
+            n.nt,
+            n.children.len(),
+            MAX_RUN
+        ));
+    }
+    let (mut w, mut te, mut tk) = (0u32, 0u32, 0u32);
+    for c in &n.children {
+        match c {
+            GreenChild::Token(t) => {
+                w += t.text.len() as u32;
+                tk += 1;
+                if !t.trivia {
+                    te += 1;
+                }
+            }
+            GreenChild::Node(m) => {
+                if n.prod == RUN_PROD && m.prod == LIST_PROD {
+                    return Err("LIST node nested inside RUN".to_string());
+                }
+                check_balance(m)?;
+                w += m.width;
+                te += m.terms;
+                tk += m.n_toks;
+            }
+        }
+    }
+    if (w, te, tk) != (n.width, n.terms, n.n_toks) {
+        return Err(format!(
+            "count mismatch at nt={} prod={}: stored ({},{},{}) computed ({w},{te},{tk})",
+            n.nt, n.prod, n.width, n.terms, n.n_toks
+        ));
+    }
+    Ok(())
+}

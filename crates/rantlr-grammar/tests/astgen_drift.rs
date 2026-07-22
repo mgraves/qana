@@ -6,14 +6,15 @@
 
 use rantlr_grammar::astgen::generate;
 use rantlr_grammar::demo::{demo_grammar, demo_syn_grammar};
-use rantlr_grammar::Vocab;
+use rantlr_grammar::{build_lr, Vocab};
 
 #[test]
 fn checked_in_typed_ast_is_current() {
     let (g, ids) = demo_grammar();
     let vocab = Vocab::of(&g);
     let sg = demo_syn_grammar(&ids, &vocab);
-    let fresh = generate(&sg);
+    let tables = build_lr(&sg);
+    let fresh = generate(&sg, &tables);
     let checked_in = include_str!("../src/demo_ast.rs");
     assert!(
         fresh == checked_in,

@@ -24,7 +24,9 @@
 //! so clean-prefix splices are O(1) but suffix statements re-wrap
 //! per-item; error recovery remains out of scope.
 
-use crate::green::{GreenChild, GreenNode, GreenToken, TokWithText};
+use crate::green::{
+    is_seq_prod, GreenChild, GreenNode, GreenToken, TokWithText, LIST_PROD, MAX_RUN, RUN_PROD,
+};
 use crate::lr::{LrAct, LrTables};
 use crate::model::TokenId;
 use crate::syn::{SynGrammar, EOF};
@@ -82,10 +84,121 @@ impl std::fmt::Display for IncParseError {
     }
 }
 
+/// L4: an under-construction balanced list. Batch and incremental share
+/// this — batch appends elements one cons-reduce at a time; incremental
+/// additionally absorbs whole salvaged runs (the associative
+/// concatenation Wagner's `B → B B` nondeterministic view licenses).
+struct ListBuilder {
+    nt: u16,
+    pieces: Vec<Piece>,
+}
+
+enum Piece {
+    /// A single child (element node, separator/trivia token).
+    Loose(GreenChild),
+    /// A reused leaf run (fanout ≤ MAX_RUN, children are elements).
+    Leaf(Arc<GreenNode>),
+}
+
+impl ListBuilder {
+    fn new(nt: u16) -> Self {
+        ListBuilder { nt, pieces: Vec::new() }
+    }
+    fn push_loose(&mut self, c: GreenChild) {
+        self.pieces.push(Piece::Loose(c));
+    }
+    /// Absorb a salvaged LIST or RUN node: reused chunks flatten to leaf
+    /// runs (never to elements — that's what keeps splices O(runs)).
+    fn absorb_seq(&mut self, n: &Arc<GreenNode>) {
+        let is_leaf = n.prod == RUN_PROD
+            && n.children
+                .iter()
+                .all(|c| !matches!(c, GreenChild::Node(m) if m.prod == RUN_PROD));
+        if is_leaf {
+            self.pieces.push(Piece::Leaf(n.clone()));
+            return;
+        }
+        for c in &n.children {
+            match c {
+                GreenChild::Node(m) if m.prod == RUN_PROD => self.absorb_seq(m),
+                other => self.pieces.push(Piece::Loose(other.clone())),
+            }
+        }
+    }
+    /// Deterministic balanced form: loose pieces chunk into ≤MAX_RUN leaf
+    /// runs (small neighbors of reused runs dissolve into them), then
+    /// levels group 16-ary until one node remains. Lists of ≤MAX_RUN
+    /// loose children skip the run layer entirely.
+    fn finalize(self) -> Arc<GreenNode> {
+        let nt = self.nt;
+        if self.pieces.len() <= MAX_RUN
+            && self.pieces.iter().all(|p| matches!(p, Piece::Loose(_)))
+        {
+            let children: Vec<GreenChild> = self
+                .pieces
+                .into_iter()
+                .map(|p| match p {
+                    Piece::Loose(c) => c,
+                    Piece::Leaf(_) => unreachable!(),
+                })
+                .collect();
+            return make_node(nt, LIST_PROD, children);
+        }
+        let mut leaves: Vec<Arc<GreenNode>> = Vec::new();
+        let mut buf: Vec<GreenChild> = Vec::new();
+        fn flush(nt: u16, buf: &mut Vec<GreenChild>, leaves: &mut Vec<Arc<GreenNode>>) {
+            while !buf.is_empty() {
+                let take = buf.len().min(MAX_RUN);
+                let chunk: Vec<GreenChild> = buf.drain(..take).collect();
+                leaves.push(make_node(nt, RUN_PROD, chunk));
+            }
+        }
+        for p in self.pieces {
+            match p {
+                Piece::Loose(c) => buf.push(c),
+                Piece::Leaf(r) => {
+                    if !buf.is_empty() && buf.len() + r.children.len() <= MAX_RUN {
+                        // Dissolve the run into the pending buffer so edit
+                        // seams don't accumulate tiny runs.
+                        buf.extend(r.children.iter().cloned());
+                    } else {
+                        flush(nt, &mut buf, &mut leaves);
+                        leaves.push(r);
+                    }
+                }
+            }
+        }
+        flush(nt, &mut buf, &mut leaves);
+        let mut level: Vec<GreenChild> = leaves.into_iter().map(GreenChild::Node).collect();
+        while level.len() > MAX_RUN {
+            let mut next = Vec::with_capacity(level.len() / MAX_RUN + 1);
+            for chunk in level.chunks(MAX_RUN) {
+                next.push(GreenChild::Node(make_node(nt, RUN_PROD, chunk.to_vec())));
+            }
+            level = next;
+        }
+        make_node(nt, LIST_PROD, level)
+    }
+}
+
+enum SymSlot {
+    Child(GreenChild),
+    List(ListBuilder),
+}
+
+impl SymSlot {
+    fn into_child(self) -> GreenChild {
+        match self {
+            SymSlot::Child(c) => c,
+            SymSlot::List(b) => GreenChild::Node(b.finalize()),
+        }
+    }
+}
+
 struct Entry {
     /// Trivia preceding `sym`, flattened before it on reduce.
     leading: Vec<GreenChild>,
-    sym: GreenChild,
+    sym: SymSlot,
 }
 
 fn make_node(nt: u16, prod: u16, children: Vec<GreenChild>) -> Arc<GreenNode> {
@@ -197,21 +310,64 @@ pub fn incremental_parse(
 
     macro_rules! reduce {
         ($pidx:expr) => {{
-            let prod = &g.prods[$pidx as usize];
+            let pidx: u16 = $pidx;
+            let prod = &g.prods[pidx as usize];
             let k = prod.rhs.len();
-            let mut children: Vec<GreenChild> = Vec::new();
             let split = stack.len() - k;
-            for e in stack.drain(split..) {
-                children.extend(e.leading);
-                children.push(e.sym);
-            }
+            let popped: Vec<Entry> = stack.drain(split..).collect();
             states.truncate(states.len() - k);
             let top = *states.last().unwrap();
             let next = *t.goto_[top as usize].get(&prod.lhs).expect("goto after reduce");
-            stack.push(Entry {
-                leading: Vec::new(),
-                sym: GreenChild::Node(make_node(prod.lhs, $pidx, children)),
-            });
+            let shape = t.lists.get(&prod.lhs).copied();
+            let slot = match shape {
+                // L4 cons: append α to the open builder instead of nesting.
+                Some(sh) if pidx == sh.cons => {
+                    let mut it = popped.into_iter();
+                    let head = it.next().unwrap();
+                    debug_assert!(head.leading.is_empty(), "list slot never has leading");
+                    let mut b = match head.sym {
+                        SymSlot::List(b) => b,
+                        SymSlot::Child(GreenChild::Node(n)) if is_seq_prod(n.prod) => {
+                            let mut b = ListBuilder::new(prod.lhs);
+                            b.absorb_seq(&n);
+                            b
+                        }
+                        SymSlot::Child(other) => {
+                            let mut b = ListBuilder::new(prod.lhs);
+                            b.push_loose(other);
+                            b
+                        }
+                    };
+                    for e in it {
+                        for tr in e.leading {
+                            b.push_loose(tr);
+                        }
+                        b.push_loose(e.sym.into_child());
+                    }
+                    SymSlot::List(b)
+                }
+                // L4 seed (incl. ε): open a fresh builder with the seed.
+                Some(_) => {
+                    let mut b = ListBuilder::new(prod.lhs);
+                    for e in popped {
+                        for tr in e.leading {
+                            b.push_loose(tr);
+                        }
+                        b.push_loose(e.sym.into_child());
+                    }
+                    SymSlot::List(b)
+                }
+                // Ordinary production: build the node.
+                None => {
+                    let mut children: Vec<GreenChild> = Vec::new();
+                    for e in popped {
+                        children.extend(e.leading);
+                        children.push(e.sym.into_child());
+                    }
+                    SymSlot::Child(GreenChild::Node(make_node(prod.lhs, pidx, children)))
+                }
+            };
+            stack.push(Entry { leading: Vec::new(), sym: slot });
             states.push(next);
         }};
     }
@@ -227,7 +383,7 @@ pub fn incremental_parse(
                         debug_assert_eq!(stack.len(), 1);
                         let entry = stack.pop().unwrap();
                         debug_assert!(entry.leading.is_empty(), "leading on root entry");
-                        let GreenChild::Node(root) = entry.sym else {
+                        let GreenChild::Node(root) = entry.sym.into_child() else {
                             unreachable!("accept pops a rule node")
                         };
                         let mut root_owned = (*root).clone();
@@ -278,12 +434,63 @@ pub fn incremental_parse(
         if is_node {
             let Some(Item::Sub(GreenChild::Node(node))) = input.front() else { unreachable!() };
             let node = node.clone();
-            let fragile = t.fragile[node.prod as usize];
+            let seq = is_seq_prod(node.prod);
+
+            // L4 associative splice: a salvaged LIST/RUN of a list
+            // nonterminal either CONCATENATES into the open builder on
+            // top of the stack (Wagner's B → B B, no state change) or
+            // seeds a new builder via GOTO.
+            if seq && t.lists.contains_key(&node.nt) {
+                let continues = matches!(
+                    stack.last(),
+                    Some(Entry { sym: SymSlot::List(b), .. }) if b.nt == node.nt
+                );
+                if continues {
+                    input.pop_front();
+                    // Pending trivia belongs INSIDE the run's first
+                    // element (where batch drains it at the next token
+                    // shift) — never at list level.
+                    let spliced = if pending.is_empty() || node.terms == 0 {
+                        node.clone()
+                    } else {
+                        prepend_trivia(&node, std::mem::take(&mut pending))
+                    };
+                    stats.reused_terms += spliced.terms;
+                    stats.splices += 1;
+                    consumed_terms += spliced.terms as usize;
+                    let Some(Entry { sym: SymSlot::List(b), .. }) = stack.last_mut() else {
+                        unreachable!()
+                    };
+                    b.absorb_seq(&spliced);
+                    continue;
+                }
+                if let Some(next) = t.goto_[state as usize].get(&node.nt).copied() {
+                    input.pop_front();
+                    let spliced = if pending.is_empty() || node.terms == 0 {
+                        node.clone()
+                    } else {
+                        prepend_trivia(&node, std::mem::take(&mut pending))
+                    };
+                    let mut b = ListBuilder::new(node.nt);
+                    stats.reused_terms += spliced.terms;
+                    stats.splices += 1;
+                    consumed_terms += spliced.terms as usize;
+                    b.absorb_seq(&spliced);
+                    stack.push(Entry { leading: Vec::new(), sym: SymSlot::List(b) });
+                    states.push(next);
+                    continue;
+                }
+                // Fall through to reduce-enable/breakdown below.
+            }
+
+            let fragile = !seq
+                && (node.prod as usize) < t.fragile.len()
+                && t.fragile[node.prod as usize];
             // Wagner's order: SPLICE the moment the automaton has a GOTO
             // for this nonterminal (fragile nodes never splice); reduces
             // are only performed to ENABLE a future splice when the node
             // isn't directly shiftable.
-            if !fragile {
+            if !fragile && !seq {
                 if let Some(next) = t.goto_[state as usize].get(&node.nt).copied() {
                     input.pop_front();
                     let spliced = if pending.is_empty() || node.terms == 0 {
@@ -296,11 +503,13 @@ pub fn incremental_parse(
                     consumed_terms += spliced.terms as usize;
                     stack.push(Entry {
                         leading: Vec::new(),
-                        sym: GreenChild::Node(spliced),
+                        sym: SymSlot::Child(GreenChild::Node(spliced)),
                     });
                     states.push(next);
                     continue;
                 }
+            }
+            if !fragile {
                 // Not shiftable here — a reduce on the leftmost terminal
                 // may bring the automaton to a state where it is.
                 if let Some(la) = leftmost_term(&GreenChild::Node(node.clone())) {
@@ -337,7 +546,10 @@ pub fn incremental_parse(
                     }
                 };
                 consumed_terms += 1;
-                stack.push(Entry { leading: std::mem::take(&mut pending), sym });
+                stack.push(Entry {
+                    leading: std::mem::take(&mut pending),
+                    sym: SymSlot::Child(sym),
+                });
                 states.push(next);
             }
             Some(LrAct::Reduce(p)) => reduce!(p),

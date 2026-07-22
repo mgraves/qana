@@ -7,6 +7,7 @@
 //! a grammar change and every downstream use that no longer matches the
 //! language fails to compile, with the grammar diff as the explanation.
 
+use crate::lr::LrTables;
 use crate::syn::{camel, Sym, SynGrammar};
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -15,8 +16,11 @@ fn snake(s: &str) -> String {
     s.to_lowercase()
 }
 
-/// Generate the typed-AST module source for a grammar.
-pub fn generate(sg: &SynGrammar) -> String {
+/// Generate the typed-AST module source for a grammar. List-shaped
+/// nonterminals (envelope L4, detected in the LR tables) become structs
+/// with flattened `items()` accessors instead of cons-cell enums — the
+/// balanced run representation stays invisible to typed consumers.
+pub fn generate(sg: &SynGrammar, tables: &LrTables) -> String {
     let mut out = String::new();
     let w = &mut out;
 
@@ -41,6 +45,54 @@ pub fn generate(sg: &SynGrammar) -> String {
         let prods: Vec<usize> =
             (0..sg.prods.len()).filter(|&i| sg.prods[i].lhs as usize == nt).collect();
         let nt_ty = camel(nt_name);
+
+        if let Some(shape) = tables.lists.get(&(nt as u16)) {
+            // L4 list nonterminal: struct + flattened items().
+            let cons_rhs = &sg.prods[shape.cons as usize].rhs;
+            let item_nt = cons_rhs[1..]
+                .iter()
+                .find_map(|s| match s {
+                    Sym::N(n) => Some(*n),
+                    Sym::T(_) => None,
+                })
+                .expect("list detection guarantees one element NT");
+            let item_ty = camel(&sg.nt_names[item_nt as usize]);
+            writeln!(w).unwrap();
+            writeln!(w, "/// `{nt_name}` — balanced list of `{}` (envelope L4).", item_ty).unwrap();
+            writeln!(w, "#[derive(Clone, Copy, Debug)]").unwrap();
+            writeln!(w, "pub struct {nt_ty}<'g>(pub NodeRef<'g>);").unwrap();
+            writeln!(w).unwrap();
+            writeln!(w, "impl<'g> AstNode<'g> for {nt_ty}<'g> {{").unwrap();
+            writeln!(w, "    fn cast(node: NodeRef<'g>) -> Option<Self> {{").unwrap();
+            writeln!(
+                w,
+                "        (node.nt() == {nt} && node.prod() == crate::green::LIST_PROD).then(|| {nt_ty}(node))"
+            )
+            .unwrap();
+            writeln!(w, "    }}").unwrap();
+            writeln!(w, "    fn node(&self) -> NodeRef<'g> {{").unwrap();
+            writeln!(w, "        self.0").unwrap();
+            writeln!(w, "    }}").unwrap();
+            writeln!(w, "}}").unwrap();
+            writeln!(w).unwrap();
+            writeln!(w, "impl<'g> {nt_ty}<'g> {{").unwrap();
+            writeln!(w, "    pub fn items(&self) -> Vec<{item_ty}<'g>> {{").unwrap();
+            writeln!(w, "        self.0").unwrap();
+            writeln!(w, "            .flat_symbol_children()").unwrap();
+            writeln!(w, "            .into_iter()").unwrap();
+            writeln!(w, "            .filter_map(|c| match c {{").unwrap();
+            writeln!(
+                w,
+                "                crate::typed::SymbolChild::Node(n) => {item_ty}::cast(n),"
+            )
+            .unwrap();
+            writeln!(w, "                _ => None,").unwrap();
+            writeln!(w, "            }})").unwrap();
+            writeln!(w, "            .collect()").unwrap();
+            writeln!(w, "    }}").unwrap();
+            writeln!(w, "}}").unwrap();
+            continue; // no per-production structs for list NTs
+        }
 
         if prods.len() > 1 {
             // Enum over the productions.

@@ -23,64 +23,29 @@ impl<'g> File<'g> {
     }
 }
 
-/// `stmts` — 2 productions.
+/// `stmts` — balanced list of `Stmt` (envelope L4).
 #[derive(Clone, Copy, Debug)]
-pub enum Stmts<'g> {
-    StmtsEmpty(StmtsEmpty<'g>),
-    StmtsMore(StmtsMore<'g>),
-}
+pub struct Stmts<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for Stmts<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        if node.nt() != 1 {
-            return None;
-        }
-        match node.prod() {
-            1 => Some(Stmts::StmtsEmpty(StmtsEmpty(node))),
-            2 => Some(Stmts::StmtsMore(StmtsMore(node))),
-            _ => None,
-        }
-    }
-    fn node(&self) -> NodeRef<'g> {
-        match self {
-            Stmts::StmtsEmpty(x) => x.0,
-            Stmts::StmtsMore(x) => x.0,
-        }
-    }
-}
-
-/// `stmts → ε`
-#[derive(Clone, Copy, Debug)]
-pub struct StmtsEmpty<'g>(pub NodeRef<'g>);
-
-impl<'g> AstNode<'g> for StmtsEmpty<'g> {
-    fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 1 && node.prod() == 1).then(|| StmtsEmpty(node))
+        (node.nt() == 1 && node.prod() == crate::green::LIST_PROD).then(|| Stmts(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
     }
 }
 
-/// `stmts → stmts stmt`
-#[derive(Clone, Copy, Debug)]
-pub struct StmtsMore<'g>(pub NodeRef<'g>);
-
-impl<'g> AstNode<'g> for StmtsMore<'g> {
-    fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 1 && node.prod() == 2).then(|| StmtsMore(node))
-    }
-    fn node(&self) -> NodeRef<'g> {
+impl<'g> Stmts<'g> {
+    pub fn items(&self) -> Vec<Stmt<'g>> {
         self.0
-    }
-}
-
-impl<'g> StmtsMore<'g> {
-    pub fn stmts(&self) -> Option<Stmts<'g>> {
-        Stmts::cast(self.0.child_node(0)?)
-    }
-    pub fn stmt(&self) -> Option<Stmt<'g>> {
-        Stmt::cast(self.0.child_node(1)?)
+            .flat_symbol_children()
+            .into_iter()
+            .filter_map(|c| match c {
+                crate::typed::SymbolChild::Node(n) => Stmt::cast(n),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -627,72 +592,28 @@ impl<'g> ArgsSome<'g> {
     }
 }
 
-/// `args_ne` — 2 productions.
+/// `args_ne` — balanced list of `Expr` (envelope L4).
 #[derive(Clone, Copy, Debug)]
-pub enum ArgsNe<'g> {
-    ArgFirst(ArgFirst<'g>),
-    ArgMore(ArgMore<'g>),
-}
+pub struct ArgsNe<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for ArgsNe<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        if node.nt() != 6 {
-            return None;
-        }
-        match node.prod() {
-            21 => Some(ArgsNe::ArgFirst(ArgFirst(node))),
-            22 => Some(ArgsNe::ArgMore(ArgMore(node))),
-            _ => None,
-        }
-    }
-    fn node(&self) -> NodeRef<'g> {
-        match self {
-            ArgsNe::ArgFirst(x) => x.0,
-            ArgsNe::ArgMore(x) => x.0,
-        }
-    }
-}
-
-/// `args_ne → expr`
-#[derive(Clone, Copy, Debug)]
-pub struct ArgFirst<'g>(pub NodeRef<'g>);
-
-impl<'g> AstNode<'g> for ArgFirst<'g> {
-    fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 6 && node.prod() == 21).then(|| ArgFirst(node))
+        (node.nt() == 6 && node.prod() == crate::green::LIST_PROD).then(|| ArgsNe(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
     }
 }
 
-impl<'g> ArgFirst<'g> {
-    pub fn expr(&self) -> Option<Expr<'g>> {
-        Expr::cast(self.0.child_node(0)?)
-    }
-}
-
-/// `args_ne → args_ne COMMA expr`
-#[derive(Clone, Copy, Debug)]
-pub struct ArgMore<'g>(pub NodeRef<'g>);
-
-impl<'g> AstNode<'g> for ArgMore<'g> {
-    fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 6 && node.prod() == 22).then(|| ArgMore(node))
-    }
-    fn node(&self) -> NodeRef<'g> {
+impl<'g> ArgsNe<'g> {
+    pub fn items(&self) -> Vec<Expr<'g>> {
         self.0
-    }
-}
-
-impl<'g> ArgMore<'g> {
-    pub fn args_ne(&self) -> Option<ArgsNe<'g>> {
-        ArgsNe::cast(self.0.child_node(0)?)
-    }
-    pub fn comma_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(1, 18) // COMMA
-    }
-    pub fn expr(&self) -> Option<Expr<'g>> {
-        Expr::cast(self.0.child_node(2)?)
+            .flat_symbol_children()
+            .into_iter()
+            .filter_map(|c| match c {
+                crate::typed::SymbolChild::Node(n) => Expr::cast(n),
+                _ => None,
+            })
+            .collect()
     }
 }

@@ -50,6 +50,47 @@ pub struct LrTables {
     /// depends on disambiguation context the LR automaton alone doesn't
     /// re-check on a nonterminal shift.
     pub fragile: Vec<bool>,
+    /// List-shaped nonterminals (envelope L4): exactly one cons prod
+    /// `L → L α` (nt not recurring in α, non-fragile) and one seed prod.
+    /// Their trees use balanced LIST/RUN nodes instead of cons spines.
+    pub lists: std::collections::HashMap<u16, ListShape>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ListShape {
+    pub cons: u16,
+    pub seed: u16,
+}
+
+fn detect_lists(g: &SynGrammar, fragile: &[bool]) -> std::collections::HashMap<u16, ListShape> {
+    let mut out = std::collections::HashMap::new();
+    for nt in 0..g.nt_names.len() as u16 {
+        let prods: Vec<u16> =
+            (0..g.prods.len() as u16).filter(|&i| g.prods[i as usize].lhs == nt).collect();
+        if prods.len() != 2 {
+            continue;
+        }
+        let is_cons = |p: u16| {
+            let rhs = &g.prods[p as usize].rhs;
+            rhs.len() >= 2
+                && rhs[0] == Sym::N(nt)
+                && !rhs[1..].contains(&Sym::N(nt))
+                // Exactly one element nonterminal per repetition, so the
+                // typed items() accessor has a single well-defined type.
+                && rhs[1..].iter().filter(|s| matches!(s, Sym::N(_))).count() == 1
+        };
+        let refs_self = |p: u16| g.prods[p as usize].rhs.contains(&Sym::N(nt));
+        let (cons, seed) = match (is_cons(prods[0]), is_cons(prods[1])) {
+            (true, false) if !refs_self(prods[1]) => (prods[0], prods[1]),
+            (false, true) if !refs_self(prods[0]) => (prods[1], prods[0]),
+            _ => continue,
+        };
+        if fragile[cons as usize] || fragile[seed as usize] {
+            continue;
+        }
+        out.insert(nt, ListShape { cons, seed });
+    }
+    out
 }
 
 impl LrTables {
@@ -413,6 +454,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
         }
     }
 
+    let lists = detect_lists(g, &fragile);
     LrTables {
         action,
         goto_,
@@ -420,5 +462,6 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
         conflicts,
         resolved_by_prec: resolved,
         fragile,
+        lists,
     }
 }

@@ -36,14 +36,77 @@ fn pipeline() -> (CompiledLexer, SynGrammar, LrTables) {
     (lexer, sg, tables)
 }
 
-/// The gate: session tree == batch parse of the current buffer, fully.
+/// The gate, L4 edition: byte-identical text, SEMANTIC tree equality
+/// (full structural equality except list nodes compare by flattened
+/// contents — association is meaningless by declaration), and balance
+/// invariants on both trees.
 fn assert_gate(session: &IncSession<'_>, sg: &SynGrammar, tables: &LrTables) {
+    use rantlr_grammar::green::{check_balance, semantic_eq};
     let lexer = session.buf.lexer;
     let all = full_tokens(lexer, &session.buf);
     let batch = batch_parse_green(sg, tables, &all).expect("batch parses");
     let inc = session.tree().expect("tree valid");
     assert_eq!(inc.text(), session.buf.reproduce(), "tree text == buffer");
-    assert!(**inc == *batch, "incremental tree must equal batch tree");
+    check_balance(inc).expect("incremental tree balance");
+    check_balance(&batch).expect("batch tree balance");
+    if !semantic_eq(inc, &batch) {
+        panic!(
+            "incremental tree must semantically equal batch tree\nfirst divergence: {}\ndoc:\n{}",
+            first_diff(inc, &batch, String::new()),
+            session.buf.reproduce()
+        );
+    }
+}
+
+/// Locate the first semantic divergence, for debugging.
+fn first_diff(
+    a: &rantlr_grammar::GreenNode,
+    b: &rantlr_grammar::GreenNode,
+    path: String,
+) -> String {
+    use rantlr_grammar::green::flat_children;
+    use rantlr_grammar::GreenChild;
+    if a.nt != b.nt || (a.prod != b.prod && !(a.prod >= u16::MAX - 2 && b.prod >= u16::MAX - 2)) {
+        return format!("{path}: node kinds differ: ({},{}) vs ({},{})", a.nt, a.prod, b.nt, b.prod);
+    }
+    let fa = flat_children(a);
+    let fb = flat_children(b);
+    if fa.len() != fb.len() {
+        return format!(
+            "{path}: flattened child counts differ: {} vs {} (nt {})\n  a: {:?}\n  b: {:?}",
+            fa.len(),
+            fb.len(),
+            a.nt,
+            fa.iter().map(|c| kind_of(c)).collect::<Vec<_>>(),
+            fb.iter().map(|c| kind_of(c)).collect::<Vec<_>>()
+        );
+    }
+    for (i, (x, y)) in fa.iter().zip(&fb).enumerate() {
+        match (x, y) {
+            (GreenChild::Token(t), GreenChild::Token(u)) => {
+                if t.id != u.id || t.trivia != u.trivia || t.text != u.text {
+                    return format!(
+                        "{path}[{i}]: tokens differ: {:?}/{}/{:?} vs {:?}/{}/{:?}",
+                        t.id, t.trivia, t.text, u.id, u.trivia, u.text
+                    );
+                }
+            }
+            (GreenChild::Node(m), GreenChild::Node(n)) => {
+                if !rantlr_grammar::green::semantic_eq(m, n) {
+                    return first_diff(m, n, format!("{path}/{}#{i}", m.nt));
+                }
+            }
+            _ => return format!("{path}[{i}]: token/node mismatch"),
+        }
+    }
+    format!("{path}: (no diff found?)")
+}
+
+fn kind_of(c: &rantlr_grammar::GreenChild) -> String {
+    match c {
+        rantlr_grammar::GreenChild::Token(t) => format!("T{}:{:?}", t.id, t.text),
+        rantlr_grammar::GreenChild::Node(n) => format!("N{}p{}", n.nt, n.prod),
+    }
 }
 
 fn stmt_line(i: usize) -> Line {
@@ -132,8 +195,8 @@ fn fragile_breakdown_prevents_wrong_splice() {
     // And assert the SHAPE explicitly via the typed AST: Add(1, Mul(2,9)).
     let tree = s.tree().unwrap();
     let file = ast::File::cast(NodeRef(tree)).unwrap();
-    let ast::Stmts::StmtsMore(more) = file.stmts().unwrap() else { panic!() };
-    let ast::Stmt::LetStmt(ls) = more.stmt().unwrap() else { panic!() };
+    let items = file.stmts().unwrap().items();
+    let ast::Stmt::LetStmt(ls) = items[0] else { panic!() };
     let ast::Expr::AddExpr(add) = ls.expr().unwrap() else {
         panic!("top must be Add, not Mul — wrong splice detected")
     };

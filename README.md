@@ -242,9 +242,48 @@ re-wraps through `StmtsMore`). Also fixed en route: two hidden O(n)s
 (eager leftmost-terminal computation descending the whole spine;
 full per-line count recomputation per edit).
 
-## Next (P2 continued)
+## P2 — increment 2 (shipped): L4 auto-balanced sequences
 
-**L4 auto-balanced sequences** — the tool detects list-shaped rules and
-represents repetition as balanced tree runs, turning the 25 ms mid-file
-tax into O(damage + log n) and retiring the big-stack thread; then
-top-down reuse + Wagner's optimality postpass, and error recovery.
+List-shaped rules (`L → L α | seed`, auto-detected from the grammar
+value; fragile/expression shapes excluded) no longer build cons spines.
+Trees carry **LIST nodes with balanced ≤16-ary RUN chunks**; one
+`ListBuilder` serves batch and incremental parsing (batch appends per
+cons-reduce; incremental additionally **concatenates whole salvaged runs
+associatively** — the `B → B B` licence from Wagner §7). The typed AST
+regenerated through the drift gate: list nonterminals became structs
+with flattened `items()` accessors (cons-cell enums gone), and the
+compiler enumerated every stale usage — the ramification workflow,
+exercised for real on a semantic grammar change.
+
+The gate refined honestly: **semantic tree equality** — full structural
+equality everywhere, list nodes compared by flattened contents (run
+chunking is representation, not meaning — that is what *associative*
+declares) — plus explicit balance invariants (`check_balance`) and
+byte-identical text. The fuzz gate caught one real bug during the build:
+splice-time pending trivia landed at list level where batch places it
+inside the first element; fixed by the same left-spine injection the
+non-list path uses.
+
+The collapse, measured (100k-line corpus, 500-edit session):
+
+| | before L4 | after L4 |
+|---|---|---|
+| Mid-file edit (median) | 25 ms, ~50,238 splices | **315 µs, ~60 splices** |
+| Near-EOF edit (median) | 88 µs | 331 µs |
+| Position dependence | linear in suffix | **none** (Wagner: "location of changes does not affect running time") |
+| Tree depth at 100k stmts | ~100k (big-stack thread) | logarithmic (**thread retired**) |
+| Batch parse | 142 ms | 342 ms (ListBuilder constant factor — once-per-open cost; optimization headroom noted) |
+
+Deliberate scope notes: upper run levels rebuild per finalize (O(#runs)
+Arc clones ≈ the ~300 µs floor; B-tree-style level reuse is the next
+refinement if it matters); leaf-run seams may drift from batch's exact
+chunking (semantic equality is the contract; content-defined canonical
+chunking is the documented upgrade path if full shape equality is ever
+wanted).
+
+## Next
+
+Error recovery (CPCT+-style bounded repair inside damage regions), then
+the services layer: semantic tokens with deltas, outline/folding from
+the skeleton and tree, completion from the ACTION rows — the LSP server
+(P3).

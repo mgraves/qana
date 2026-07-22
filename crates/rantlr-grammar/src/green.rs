@@ -33,6 +33,15 @@ pub struct GreenToken {
     pub text: String,
 }
 
+impl GreenToken {
+    /// A zero-width token inserted by error repair ("the parser pretended
+    /// to see this"). Sound encoding: the empty-match lint guarantees no
+    /// real token ever has empty text.
+    pub fn is_missing(&self) -> bool {
+        !self.trivia && self.text.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GreenChild {
     Node(Arc<GreenNode>),
@@ -57,9 +66,15 @@ pub struct GreenNode {
     /// Total byte width including all trivia beneath.
     pub width: u32,
     /// Non-trivia terminals beneath (incremental-reuse bookkeeping).
+    /// Missing (repair-inserted) tokens count zero — the counts mirror
+    /// the BUFFER's real token stream exactly, which is what keeps
+    /// salvage alignment sound on repaired trees.
     pub terms: u32,
-    /// ALL tokens beneath, trivia included (damage-interval alignment).
+    /// ALL real tokens beneath, trivia included (damage alignment).
     pub n_toks: u32,
+    /// Contains error material (an ERROR node or missing token) anywhere
+    /// beneath — such nodes never splice; salvage dissolves them.
+    pub has_err: bool,
     pub children: Vec<GreenChild>,
 }
 
@@ -70,11 +85,13 @@ impl GreenNode {
         s
     }
 
-    /// Children that correspond to grammar symbols (skips trivia).
+    /// Children that correspond to grammar symbols: trivia, ERROR nodes,
+    /// and repair-inserted missing tokens are all skipped, so typed
+    /// accessors keep their positional meaning on repaired trees.
     pub fn symbol_children(&self) -> impl Iterator<Item = &GreenChild> {
         self.children.iter().filter(|c| match c {
-            GreenChild::Token(t) => !t.trivia,
-            GreenChild::Node(_) => true,
+            GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+            GreenChild::Node(n) => n.nt != ERROR_NT,
         })
     }
 }
@@ -201,6 +218,8 @@ fn build_node(
                 width,
                 terms,
                 n_toks,
+                // The PNode path parses error-free by construction.
+                has_err: false,
                 children: out,
             })))
         }
@@ -282,6 +301,11 @@ pub const LIST_PROD: u16 = u16::MAX - 1;
 /// Production sentinel for a RUN node (an internal balanced chunk of a
 /// list; same `nt` as its list; fanout ≤ [`MAX_RUN`]).
 pub const RUN_PROD: u16 = u16::MAX - 2;
+/// Kind of ERROR nodes (wrapping tokens skipped during repair). They
+/// attach like trivia, are excluded from symbol positions, and poison
+/// their ancestors' `has_err`.
+pub const ERROR_NT: u16 = u16::MAX;
+pub const ERROR_PROD: u16 = u16::MAX - 3;
 /// Maximum fanout of RUN/LIST grouping.
 pub const MAX_RUN: usize = 16;
 
@@ -350,6 +374,9 @@ pub fn check_balance(n: &GreenNode) -> Result<(), String> {
     for c in &n.children {
         match c {
             GreenChild::Token(t) => {
+                if t.is_missing() {
+                    continue; // zero-count by the repair convention
+                }
                 w += t.text.len() as u32;
                 tk += 1;
                 if !t.trivia {

@@ -205,14 +205,20 @@ fn make_node(nt: u16, prod: u16, children: Vec<GreenChild>) -> Arc<GreenNode> {
     let mut width = 0u32;
     let mut terms = 0u32;
     let mut n_toks = 0u32;
+    let mut has_err = nt == crate::green::ERROR_NT;
     for c in &children {
         match c {
             GreenChild::Node(n) => {
                 width += n.width;
                 terms += n.terms;
                 n_toks += n.n_toks;
+                has_err |= n.has_err;
             }
             GreenChild::Token(t) => {
+                if t.is_missing() {
+                    has_err = true;
+                    continue; // zero width, zero counts — not a buffer token
+                }
                 width += t.text.len() as u32;
                 n_toks += 1;
                 if !t.trivia {
@@ -221,7 +227,7 @@ fn make_node(nt: u16, prod: u16, children: Vec<GreenChild>) -> Arc<GreenNode> {
             }
         }
     }
-    Arc::new(GreenNode { nt, prod, width, terms, n_toks, children })
+    Arc::new(GreenNode { nt, prod, width, terms, n_toks, has_err, children })
 }
 
 /// Leftmost non-trivia terminal beneath a child, if any. Iterative
@@ -232,13 +238,277 @@ fn leftmost_term(c: &GreenChild) -> Option<TokenId> {
     let mut cur = c;
     loop {
         match cur {
-            GreenChild::Token(t) => return (!t.trivia).then_some(t.id),
+            GreenChild::Token(t) => return (!t.trivia && !t.is_missing()).then_some(t.id),
             GreenChild::Node(n) => {
                 cur = n.children.iter().find(|ch| match ch {
-                    GreenChild::Token(t) => !t.trivia,
+                    GreenChild::Token(t) => !t.trivia && !t.is_missing(),
                     GreenChild::Node(m) => m.terms > 0,
                 })?;
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error recovery (bounded repair; CPCT+-inspired single-op candidates)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RepairKind {
+    /// The token (with this text) was skipped into an ERROR node.
+    Deleted(String),
+    /// A zero-width token of this kind was pretended into existence.
+    Inserted(TokenId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Repair {
+    /// Terminal index (into the real terminal stream) where the repair
+    /// applied — services map this to a source span.
+    pub at_terminal: usize,
+    pub kind: RepairKind,
+}
+
+/// Peek the next `k` REAL terminal ids from the input (flattening
+/// salvaged subtrees), for repair validation.
+fn peek_terms(input: &VecDeque<Item>, k: usize) -> Vec<TokenId> {
+    fn collect(n: &GreenNode, out: &mut Vec<TokenId>, k: usize) -> bool {
+        for c in &n.children {
+            match c {
+                GreenChild::Token(t) if !t.trivia && !t.is_missing() => {
+                    out.push(t.id);
+                    if out.len() == k {
+                        return true;
+                    }
+                }
+                GreenChild::Node(m) => {
+                    if collect(m, out, k) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    let mut out = Vec::with_capacity(k);
+    for item in input {
+        match item {
+            Item::Fresh(t) => {
+                if !t.trivia {
+                    out.push(t.id);
+                }
+            }
+            Item::Sub(GreenChild::Token(t)) => {
+                if !t.trivia && !t.is_missing() {
+                    out.push(t.id);
+                }
+            }
+            Item::Sub(GreenChild::Node(n)) => {
+                collect(n, &mut out, k);
+            }
+        }
+        if out.len() >= k {
+            break;
+        }
+    }
+    out
+}
+
+/// States-only LR run over a terminal feed; returns how many feed tokens
+/// were consumed before erroring (Accept counts as consuming the rest).
+fn simulate(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) -> usize {
+    let mut states = base.to_vec();
+    let mut i = 0usize;
+    let mut steps = 0usize;
+    while i < feed.len() && steps < 400 {
+        steps += 1;
+        let s = *states.last().unwrap();
+        match t.action[s as usize].get(&feed[i]).copied() {
+            Some(LrAct::Shift(n)) => {
+                states.push(n);
+                i += 1;
+            }
+            Some(LrAct::Reduce(p)) => {
+                let prod = &g.prods[p as usize];
+                let k = prod.rhs.len();
+                if states.len() <= k {
+                    return i;
+                }
+                states.truncate(states.len() - k);
+                let top = *states.last().unwrap();
+                match t.goto_[top as usize].get(&prod.lhs) {
+                    Some(&n) => states.push(n),
+                    None => return i,
+                }
+            }
+            Some(LrAct::Accept) => return feed.len(),
+            _ => return i,
+        }
+    }
+    i
+}
+
+/// Apply one insertion on a cloned state stack (reduces, then the shift).
+fn apply_insert_sim(g: &SynGrammar, t: &LrTables, base: &[u16], x: TokenId) -> Option<Vec<u16>> {
+    let mut states = base.to_vec();
+    let mut steps = 0usize;
+    loop {
+        steps += 1;
+        if steps > 200 {
+            return None;
+        }
+        let s = *states.last().unwrap();
+        match t.action[s as usize].get(&x).copied() {
+            Some(LrAct::Shift(n)) => {
+                states.push(n);
+                return Some(states);
+            }
+            Some(LrAct::Reduce(p)) => {
+                let prod = &g.prods[p as usize];
+                let k = prod.rhs.len();
+                if states.len() <= k {
+                    return None;
+                }
+                states.truncate(states.len() - k);
+                let top = *states.last().unwrap();
+                match t.goto_[top as usize].get(&prod.lhs) {
+                    Some(&n) => states.push(n),
+                    None => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Bounded search for an INSERT SEQUENCE (length ≤ 3) that lets the parse
+/// consume ≥1 real upcoming terminal — the mini-CPCT+ core. Prefers
+/// shorter sequences, then higher real consumption, then
+/// lexicographically smaller sequences (determinism).
+fn search_inserts(
+    g: &SynGrammar,
+    t: &LrTables,
+    base: &[u16],
+    peeked: &[TokenId],
+) -> Option<(Vec<TokenId>, usize)> {
+    let mut frontier: Vec<(Vec<TokenId>, Vec<u16>)> = vec![(Vec::new(), base.to_vec())];
+    let mut budget = 600usize;
+    for _len in 1..=3usize {
+        let mut next: Vec<(Vec<TokenId>, Vec<u16>)> = Vec::new();
+        let mut best_at_len: Option<(Vec<TokenId>, usize)> = None;
+        for (seq, states) in &frontier {
+            let s = *states.last().unwrap();
+            let mut cands: Vec<TokenId> =
+                t.action[s as usize].keys().copied().filter(|&c| c != EOF).collect();
+            cands.sort_unstable();
+            cands.truncate(16);
+            for cand in cands {
+                if budget == 0 {
+                    break;
+                }
+                budget -= 1;
+                let Some(states2) = apply_insert_sim(g, t, states, cand) else { continue };
+                let mut seq2 = seq.clone();
+                seq2.push(cand);
+                let score = simulate(g, t, &states2, peeked);
+                if score >= 1 {
+                    let better = match &best_at_len {
+                        None => true,
+                        Some((bseq, bscore)) => {
+                            score > *bscore || (score == *bscore && seq2 < *bseq)
+                        }
+                    };
+                    if better {
+                        best_at_len = Some((seq2, score));
+                    }
+                } else {
+                    next.push((seq2, states2));
+                }
+            }
+        }
+        if let Some(hit) = best_at_len {
+            return Some(hit);
+        }
+        frontier = next;
+        if frontier.is_empty() || budget == 0 {
+            break;
+        }
+    }
+    None
+}
+
+fn error_node_of(tok: GreenToken) -> GreenChild {
+    GreenChild::Node(make_node(
+        crate::green::ERROR_NT,
+        crate::green::ERROR_PROD,
+        vec![GreenChild::Token(tok)],
+    ))
+}
+
+/// EOF-repair scoring: optionally insert one token, then run EOF reduces
+/// to a fixpoint. Returns (reaches accept, remaining stack depth) —
+/// `usize::MAX` depth when the insertion can't even shift.
+fn eof_progress(
+    g: &SynGrammar,
+    t: &LrTables,
+    base: &[u16],
+    insert: Option<TokenId>,
+) -> (bool, usize) {
+    let mut states = base.to_vec();
+    if let Some(x) = insert {
+        let mut steps = 0;
+        loop {
+            steps += 1;
+            if steps > 200 {
+                return (false, usize::MAX);
+            }
+            let s = *states.last().unwrap();
+            match t.action[s as usize].get(&x).copied() {
+                Some(LrAct::Shift(n)) => {
+                    states.push(n);
+                    break;
+                }
+                Some(LrAct::Reduce(p)) => {
+                    let prod = &g.prods[p as usize];
+                    let k = prod.rhs.len();
+                    if states.len() <= k {
+                        return (false, usize::MAX);
+                    }
+                    states.truncate(states.len() - k);
+                    let top = *states.last().unwrap();
+                    match t.goto_[top as usize].get(&prod.lhs) {
+                        Some(&n) => states.push(n),
+                        None => return (false, usize::MAX),
+                    }
+                }
+                _ => return (false, usize::MAX),
+            }
+        }
+    }
+    let mut steps = 0;
+    loop {
+        steps += 1;
+        if steps > 200 {
+            return (false, states.len());
+        }
+        let s = *states.last().unwrap();
+        match t.action[s as usize].get(&EOF).copied() {
+            Some(LrAct::Reduce(p)) => {
+                let prod = &g.prods[p as usize];
+                let k = prod.rhs.len();
+                if states.len() <= k {
+                    return (false, states.len());
+                }
+                states.truncate(states.len() - k);
+                let top = *states.last().unwrap();
+                match t.goto_[top as usize].get(&prod.lhs) {
+                    Some(&n) => states.push(n),
+                    None => return (false, states.len()),
+                }
+            }
+            Some(LrAct::Accept) => return (true, states.len()),
+            _ => return (false, states.len()),
         }
     }
 }
@@ -262,7 +532,7 @@ fn prepend_trivia(node: &Arc<GreenNode>, trivia: Vec<GreenChild>) -> Arc<GreenNo
         .children
         .iter()
         .position(|c| match c {
-            GreenChild::Token(t) => !t.trivia,
+            GreenChild::Token(t) => !t.trivia && !t.is_missing(),
             GreenChild::Node(m) => m.terms > 0,
         })
         .expect("terms > 0 implies a symbol child with terminals");
@@ -296,17 +566,23 @@ fn prepend_trivia(node: &Arc<GreenNode>, trivia: Vec<GreenChild>) -> Arc<GreenNo
 }
 
 /// Incremental (and batch — pass all-fresh input) LR parse producing a
-/// lossless green tree.
+/// lossless green tree. TOTAL under syntax errors: bounded repair
+/// (validated single-token insert/delete, CPCT+-flavored) keeps the parse
+/// going, skipped tokens land in ERROR nodes, inserted tokens are
+/// zero-width, and every repair is reported.
 pub fn incremental_parse(
     g: &SynGrammar,
     t: &LrTables,
     mut input: VecDeque<Item>,
-) -> Result<(Arc<GreenNode>, ReuseStats), IncParseError> {
+) -> Result<(Arc<GreenNode>, ReuseStats, Vec<Repair>), IncParseError> {
+    const K: usize = 3;
+    const MAX_REPAIRS: usize = 200;
     let mut stats = ReuseStats::default();
     let mut states: Vec<u16> = vec![0];
     let mut stack: Vec<Entry> = Vec::new();
     let mut pending: Vec<GreenChild> = Vec::new();
     let mut consumed_terms = 0usize;
+    let mut repairs: Vec<Repair> = Vec::new();
 
     macro_rules! reduce {
         ($pidx:expr) => {{
@@ -372,6 +648,193 @@ pub fn incremental_parse(
         }};
     }
 
+    macro_rules! delete_la {
+        () => {{
+            match input.pop_front() {
+                Some(Item::Fresh(tok)) => {
+                    repairs.push(Repair {
+                        at_terminal: consumed_terms,
+                        kind: RepairKind::Deleted(tok.text.clone()),
+                    });
+                    consumed_terms += 1;
+                    pending.push(error_node_of(GreenToken {
+                        id: tok.id,
+                        trivia: false,
+                        text: tok.text,
+                    }));
+                }
+                Some(Item::Sub(GreenChild::Token(tk))) => {
+                    repairs.push(Repair {
+                        at_terminal: consumed_terms,
+                        kind: RepairKind::Deleted(tk.text.clone()),
+                    });
+                    consumed_terms += 1;
+                    pending.push(error_node_of(tk));
+                }
+                _ => {}
+            }
+        }};
+    }
+
+    macro_rules! apply_insert {
+        ($x:expr) => {{
+            let x = $x;
+            loop {
+                let s2 = *states.last().unwrap();
+                match t.action[s2 as usize].get(&x).copied() {
+                    Some(LrAct::Reduce(p)) => reduce!(p),
+                    Some(LrAct::Shift(n)) => {
+                        stack.push(Entry {
+                            leading: std::mem::take(&mut pending),
+                            sym: SymSlot::Child(GreenChild::Token(GreenToken {
+                                id: x,
+                                trivia: false,
+                                text: String::new(),
+                            })),
+                        });
+                        states.push(n);
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }};
+    }
+
+    macro_rules! recover {
+        ($at_eof:expr) => {{
+            if repairs.len() >= MAX_REPAIRS && !$at_eof {
+                // Repair budget exhausted: dump the rest of the input into
+                // error material and let EOF handling finish the tree.
+                while let Some(item) = input.pop_front() {
+                    match item {
+                        Item::Fresh(tok) => {
+                            if tok.trivia {
+                                pending.push(GreenChild::Token(GreenToken {
+                                    id: tok.id,
+                                    trivia: true,
+                                    text: tok.text,
+                                }));
+                            } else {
+                                pending.push(error_node_of(GreenToken {
+                                    id: tok.id,
+                                    trivia: false,
+                                    text: tok.text,
+                                }));
+                            }
+                        }
+                        Item::Sub(GreenChild::Token(tk)) => {
+                            if tk.trivia {
+                                pending.push(GreenChild::Token(tk));
+                            } else if !tk.is_missing() {
+                                pending.push(error_node_of(tk));
+                            }
+                        }
+                        Item::Sub(GreenChild::Node(n)) => {
+                            for c in n.children.iter().rev() {
+                                input.push_front(Item::Sub(c.clone()));
+                            }
+                        }
+                    }
+                }
+            } else if $at_eof {
+                // EOF repair: prefer insertions that reach accept, then
+                // ones that strictly shrink the stack under EOF reduces
+                // (each missing closer heals one per round); otherwise
+                // unwind the stack into error material. Over budget →
+                // straight to unwind (never loop).
+                let over_budget = repairs.len() >= MAX_REPAIRS;
+                let baseline = eof_progress(g, t, &states, None).1;
+                let state_now = *states.last().unwrap();
+                let mut cands: Vec<TokenId> = t.action[state_now as usize]
+                    .keys()
+                    .copied()
+                    .filter(|&c| c != EOF)
+                    .collect();
+                cands.sort_unstable();
+                cands.truncate(24);
+                let mut best: Option<(bool, usize, TokenId)> = None;
+                if !over_budget {
+                    for cand in cands {
+                        let (acc, depth) = eof_progress(g, t, &states, Some(cand));
+                        if depth == usize::MAX {
+                            continue;
+                        }
+                        let better = match best {
+                            None => true,
+                            Some((ba, bd, bid)) => {
+                                (acc, depth, cand) != (ba, bd, bid)
+                                    && (acc && !ba
+                                        || (acc == ba
+                                            && (depth < bd || (depth == bd && cand < bid))))
+                            }
+                        };
+                        if better {
+                            best = Some((acc, depth, cand));
+                        }
+                    }
+                }
+                match best {
+                    Some((acc, depth, x)) if acc || depth < baseline => {
+                        repairs.push(Repair {
+                            at_terminal: consumed_terms,
+                            kind: RepairKind::Inserted(x),
+                        });
+                        apply_insert!(x);
+                    }
+                    _ => {
+                        if let Some(e) = stack.pop() {
+                            states.pop();
+                            let mut kids = e.leading;
+                            kids.push(e.sym.into_child());
+                            pending.insert(
+                                0,
+                                GreenChild::Node(make_node(
+                                    crate::green::ERROR_NT,
+                                    crate::green::ERROR_PROD,
+                                    kids,
+                                )),
+                            );
+                        } else {
+                            let kids = std::mem::take(&mut pending);
+                            let root =
+                                make_node(crate::green::ERROR_NT, crate::green::ERROR_PROD, kids);
+                            stats.total_terms = consumed_terms as u32;
+                            return Ok((root, stats, repairs));
+                        }
+                    }
+                }
+            } else {
+                let peeked = peek_terms(&input, K + 1);
+                let delete_score = if peeked.is_empty() {
+                    0
+                } else {
+                    simulate(g, t, &states, &peeked[1..])
+                };
+                let insert_hit = search_inserts(g, t, &states, &peeked);
+                // Choose: higher real consumption wins; ties prefer the
+                // single delete over an insert sequence (lower cost).
+                match insert_hit {
+                    Some((seq, score)) if score > delete_score => {
+                        for &x in &seq {
+                            repairs.push(Repair {
+                                at_terminal: consumed_terms,
+                                kind: RepairKind::Inserted(x),
+                            });
+                            apply_insert!(x);
+                        }
+                    }
+                    _ if delete_score > 0 => {
+                        delete_la!();
+                    }
+                    _ => {
+                        delete_la!(); // panic-skip: guaranteed progress
+                    }
+                }
+            }
+        }};
+    }
+
     loop {
         let state = *states.last().unwrap();
         match input.front() {
@@ -393,14 +856,10 @@ pub fn incremental_parse(
                             root_owned.children.push(c);
                         }
                         stats.total_terms = consumed_terms as u32;
-                        return Ok((Arc::new(root_owned), stats));
+                        return Ok((Arc::new(root_owned), stats, repairs));
                     }
                     _ => {
-                        return Err(IncParseError {
-                            at_terminal: consumed_terms,
-                            found: "<eof>".to_string(),
-                            expected: t.expected_tokens(state, g),
-                        })
+                        recover!(true);
                     }
                 }
                 continue;
@@ -555,16 +1014,7 @@ pub fn incremental_parse(
             Some(LrAct::Reduce(p)) => reduce!(p),
             Some(LrAct::Accept) => unreachable!("accept only on EOF"),
             Some(LrAct::Error) | None => {
-                let found = match input.front().unwrap() {
-                    Item::Fresh(tok) => format!("`{}`", tok.text),
-                    Item::Sub(GreenChild::Token(tk)) => format!("`{}`", tk.text),
-                    _ => unreachable!(),
-                };
-                return Err(IncParseError {
-                    at_terminal: consumed_terms,
-                    found,
-                    expected: t.expected_tokens(state, g),
-                });
+                recover!(false);
             }
         }
     }
@@ -578,7 +1028,18 @@ pub fn batch_parse_green(
     all: &[TokWithText],
 ) -> Result<Arc<GreenNode>, IncParseError> {
     let input: VecDeque<Item> = all.iter().cloned().map(Item::Fresh).collect();
-    incremental_parse(g, t, input).map(|(tree, _)| tree)
+    incremental_parse(g, t, input).map(|(tree, _, _)| tree)
+}
+
+/// Batch parse returning repairs as well (the session's fallback path
+/// and diagnostics consumers want them).
+pub fn batch_parse_full(
+    g: &SynGrammar,
+    t: &LrTables,
+    all: &[TokWithText],
+) -> Result<(Arc<GreenNode>, ReuseStats, Vec<Repair>), IncParseError> {
+    let input: VecDeque<Item> = all.iter().cloned().map(Item::Fresh).collect();
+    incremental_parse(g, t, input)
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +1110,11 @@ pub fn salvage(old: &Arc<GreenNode>, regions: &[FreshRegion]) -> VecDeque<Item> 
         flush_fresh_at(*tok_index, regions, emitted, out);
         match c {
             GreenChild::Token(t) => {
+                if t.is_missing() {
+                    // Repair-invented: zero-count, never re-emitted — the
+                    // reparse re-derives (or heals) it from real tokens.
+                    return;
+                }
                 let here = *tok_index;
                 *tok_index += 1;
                 // Skip tokens inside damaged intervals; fresh replaces them.
@@ -662,7 +1128,10 @@ pub fn salvage(old: &Arc<GreenNode>, regions: &[FreshRegion]) -> VecDeque<Item> 
             }
             GreenChild::Node(n) => {
                 let span = (*tok_index, *tok_index + n.n_toks);
-                if !dirty(span, regions) {
+                // Error-poisoned nodes always dissolve: their real tokens
+                // re-enter the parse as plain lookaheads (ERROR wrappers
+                // evaporate), so recovery re-runs against current text.
+                if !n.has_err && !dirty(span, regions) {
                     // Maximal clean subtree: emit whole.
                     out.push_back(Item::Sub(c.clone()));
                     *tok_index += n.n_toks;

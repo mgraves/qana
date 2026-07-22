@@ -428,19 +428,23 @@ pub fn build_skeleton<L: LineLexer>(buf: &LexedBuffer<'_, L>, vocab: &Vocab) -> 
 // Incremental session: lexer damage → salvage → Wagner parse
 // ---------------------------------------------------------------------------
 
+use rantlr_grammar::incremental::Repair;
 use rantlr_grammar::{
-    batch_parse_green, incremental_parse, salvage, FreshRegion, GreenNode, IncParseError,
+    batch_parse_full, incremental_parse, salvage, FreshRegion, GreenNode, IncParseError,
     LrTables, ReuseStats, SynGrammar, TokWithText, NEWLINE,
 };
 use std::sync::Arc;
 
 /// A live document: buffer + current lossless tree, kept in sync
-/// incrementally. On a syntax error the tree is dropped and the next
-/// successful edit falls back to a full batch parse (error recovery is a
-/// later increment).
+/// incrementally. Error recovery makes parsing total, so the tree stays
+/// valid while the user types through broken states; repairs are
+/// surfaced for diagnostics, and error-poisoned regions re-derive on
+/// each edit while clean regions keep splicing.
 pub struct IncSession<'l> {
     pub buf: LexedBuffer<'l, CompiledLexer>,
     tree: Option<Arc<GreenNode>>,
+    /// Repairs from the most recent parse (diagnostics substrate).
+    pub last_repairs: Vec<Repair>,
     /// Per-line (full tokens incl. terminator, non-trivia terminals),
     /// matching the OLD state of `tree` (used for damage alignment).
     line_counts: Vec<(u32, u32)>,
@@ -450,6 +454,7 @@ pub struct IncSession<'l> {
 pub struct EditOutcome {
     pub damage: DamageReport,
     pub stats: ReuseStats,
+    pub repairs: Vec<Repair>,
 }
 
 fn count_line(
@@ -520,9 +525,9 @@ impl<'l> IncSession<'l> {
     ) -> Result<Self, IncParseError> {
         let buf = LexedBuffer::new(lexer, src);
         let all = full_tokens(lexer, &buf);
-        let tree = batch_parse_green(sg, tables, &all)?;
+        let (tree, _, repairs) = batch_parse_full(sg, tables, &all)?;
         let line_counts = count_lines(lexer, &buf);
-        Ok(IncSession { buf, tree: Some(tree), line_counts })
+        Ok(IncSession { buf, tree: Some(tree), last_repairs: repairs, line_counts })
     }
 
     pub fn tree(&self) -> Option<&Arc<GreenNode>> {
@@ -563,7 +568,8 @@ impl<'l> IncSession<'l> {
                         splices: 1,
                         breakdowns: 0,
                     };
-                    Ok((old_tree, stats))
+                    let repairs = self.last_repairs.clone();
+                    Ok((old_tree, stats, repairs))
                 } else {
                     // Old full-token prefix sums for damage alignment.
                     let mut pref = Vec::with_capacity(old_counts.len() + 1);
@@ -585,25 +591,27 @@ impl<'l> IncSession<'l> {
                 }
             }
             None => {
-                // Previous edit errored: full batch reparse.
+                // Safety fallback (should not occur now that parsing is
+                // total): full batch reparse.
                 let all = full_tokens(lexer, &self.buf);
-                batch_parse_green(sg, tables, &all).map(|tree| {
+                batch_parse_full(sg, tables, &all).map(|(tree, _, repairs)| {
                     let stats = ReuseStats {
                         reused_terms: 0,
                         total_terms: tree.terms,
                         splices: 0,
                         breakdowns: 0,
                     };
-                    (tree, stats)
+                    (tree, stats, repairs)
                 })
             }
         };
 
         self.line_counts = new_counts;
         match result {
-            Ok((tree, stats)) => {
+            Ok((tree, stats, repairs)) => {
                 self.tree = Some(tree);
-                Ok(EditOutcome { damage, stats })
+                self.last_repairs = repairs.clone();
+                Ok(EditOutcome { damage, stats, repairs })
             }
             Err(e) => {
                 self.tree = None;

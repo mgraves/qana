@@ -27,7 +27,8 @@ pub mod typed;
 
 pub use green::{build_green, GreenChild, GreenNode, GreenToken, TokWithText, NEWLINE};
 pub use incremental::{
-    batch_parse_green, incremental_parse, salvage, FreshRegion, IncParseError, Item, ReuseStats,
+    batch_parse_full, batch_parse_green, incremental_parse, salvage, FreshRegion, IncParseError,
+    Item, Repair, RepairKind, ReuseStats,
 };
 pub use lexer::{CompiledLexer, MStack, Token, MAX_STACK};
 pub use lr::{build_lr, LrAct, LrTables};

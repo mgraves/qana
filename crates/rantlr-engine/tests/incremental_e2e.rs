@@ -204,19 +204,35 @@ fn fragile_breakdown_prevents_wrong_splice() {
 }
 
 #[test]
-fn error_invalidates_then_batch_recovers() {
+fn recovery_repairs_missing_expr_and_session_stays_valid() {
+    use rantlr_grammar::RepairKind;
     let (lexer, sg, tables) = pipeline();
     let src = "let a = 1;\nlet b = 2;\n";
     let mut s = IncSession::new(&lexer, &sg, &tables, src).unwrap();
-    // Break it.
-    let err = s.edit(&sg, &tables, &[LineEdit {
-        start: 0,
-        end: 1,
-        replacement: vec![Line::new("let a = ;", LineTerm::Lf)],
-    }]);
-    assert!(err.is_err());
-    assert!(s.tree().is_none(), "tree invalid after error");
-    // Fix it: full batch fallback, session healthy again.
+    // Break it: parsing is TOTAL now — the session keeps a valid tree.
+    let out = s
+        .edit(&sg, &tables, &[LineEdit {
+            start: 0,
+            end: 1,
+            replacement: vec![Line::new("let a = ;", LineTerm::Lf)],
+        }])
+        .unwrap();
+    assert!(s.tree().is_some(), "tree survives syntax errors");
+    assert!(
+        out.repairs.iter().any(|r| matches!(r.kind, RepairKind::Inserted(_))),
+        "repairs: {:?}",
+        out.repairs
+    );
+    assert_gate(&s, &sg, &tables);
+    // Text is still byte-exact through the error.
+    assert!(s.tree().unwrap().text().contains("let a = ;"));
+    // Typed view: the statement exists; its expression is a placeholder
+    // whose literal token is missing (accessor returns None).
+    let tree = s.tree().unwrap();
+    let file = ast::File::cast(NodeRef(tree)).unwrap();
+    let items = file.stmts().unwrap().items();
+    assert_eq!(items.len(), 2, "both statements survive");
+    // Fix it: repairs drain away.
     let out = s
         .edit(&sg, &tables, &[LineEdit {
             start: 0,
@@ -224,8 +240,77 @@ fn error_invalidates_then_batch_recovers() {
             replacement: vec![Line::new("let a = 42;", LineTerm::Lf)],
         }])
         .unwrap();
-    assert_eq!(out.stats.reused_terms, 0, "fallback is a full parse");
+    assert!(out.repairs.is_empty(), "healed: {:?}", out.repairs);
     assert_gate(&s, &sg, &tables);
+}
+
+#[test]
+fn recovery_skips_garbage_with_error_nodes() {
+    use rantlr_grammar::RepairKind;
+    let (lexer, sg, tables) = pipeline();
+    let src = "let a = ) 1;\nlet b = 2;\n";
+    let s = IncSession::new(&lexer, &sg, &tables, src).unwrap();
+    assert!(
+        s.last_repairs.iter().any(|r| matches!(&r.kind, RepairKind::Deleted(t) if t == ")")),
+        "repairs: {:?}",
+        s.last_repairs
+    );
+    assert_gate(&s, &sg, &tables);
+    // The skipped token is still IN the tree (lossless), inside an ERROR
+    // node that symbol accessors skip.
+    let tree = s.tree().unwrap();
+    assert!(tree.has_err);
+    assert!(tree.text().contains(") 1;"));
+    let file = ast::File::cast(NodeRef(tree)).unwrap();
+    let items = file.stmts().unwrap().items();
+    let ast::Stmt::LetStmt(ls) = items[0] else { panic!() };
+    assert!(matches!(ls.expr(), Some(ast::Expr::NumLit(_))), "expr healed to the 1");
+}
+
+#[test]
+fn recovery_inserts_missing_closer_at_eof() {
+    use rantlr_grammar::RepairKind;
+    let (lexer, sg, tables) = pipeline();
+    let src = "if (x) {\ny();\n";
+    let s = IncSession::new(&lexer, &sg, &tables, src).unwrap();
+    assert!(
+        s.last_repairs.iter().any(|r| matches!(r.kind, RepairKind::Inserted(_))),
+        "repairs: {:?}",
+        s.last_repairs
+    );
+    let tree = s.tree().unwrap();
+    assert_eq!(tree.text(), src, "zero-width insertions keep text exact");
+    let file = ast::File::cast(NodeRef(tree)).unwrap();
+    let items = file.stmts().unwrap().items();
+    assert!(
+        matches!(items[0], ast::Stmt::IfStmt(_)),
+        "if-statement healed with a virtual closer"
+    );
+}
+
+#[test]
+fn typing_through_errors_stays_incremental() {
+    let (lexer, sg, tables) = pipeline();
+    let src: String = (0..200).map(|i| format!("let v{i} = {i} + {i} * 2;\n")).collect();
+    let mut s = IncSession::new(&lexer, &sg, &tables, &src).unwrap();
+    // Simulate typing a new statement mid-file: several broken keystrokes.
+    for text in ["let mid", "let mid =", "let mid = f(", "let mid = f(1,", "let mid = f(1, 2);"] {
+        let out = s
+            .edit(&sg, &tables, &[LineEdit {
+                start: 100,
+                end: 101,
+                replacement: vec![Line::new(text, LineTerm::Lf)],
+            }])
+            .unwrap();
+        assert!(s.tree().is_some());
+        assert!(
+            out.stats.reuse_fraction() > 0.9,
+            "clean regions must keep splicing while broken: {:?} at {text:?}",
+            out.stats
+        );
+        assert_gate(&s, &sg, &tables);
+    }
+    assert!(s.last_repairs.is_empty(), "final state healed");
 }
 
 #[test]

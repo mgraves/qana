@@ -68,8 +68,12 @@ impl<'g> NodeRef<'g> {
             for c in &n.children {
                 match c {
                     GreenChild::Node(m) if m.prod == RUN_PROD => go(m, out),
-                    GreenChild::Node(m) => out.push(SymbolChild::Node(NodeRef(m))),
-                    GreenChild::Token(t) if !t.trivia => out.push(SymbolChild::Token(TokenRef(t))),
+                    GreenChild::Node(m) if m.nt != crate::green::ERROR_NT => {
+                        out.push(SymbolChild::Node(NodeRef(m)))
+                    }
+                    GreenChild::Token(t) if !t.trivia && !t.is_missing() => {
+                        out.push(SymbolChild::Token(TokenRef(t)))
+                    }
                     _ => {}
                 }
             }

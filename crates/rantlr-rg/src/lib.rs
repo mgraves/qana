@@ -86,6 +86,10 @@ pub fn rg_styles(ids: &RgIds) -> rantlr_services::Styles {
     s.set(ids.pattern_unterm, "regexp");
     s.set(ids.eq, "operator");
     s.set(ids.pipe, "operator");
+    s.set(ids.star, "operator");
+    s.set(ids.plus, "operator");
+    s.set(ids.qmark, "operator");
+    s.set(ids.percent, "operator");
     s.set(ids.colon, "punctuation");
     s.set(ids.at, "punctuation");
     s.set(ids.comma, "punctuation");
@@ -102,7 +106,9 @@ pub fn rg_outline_config(sg: &SynGrammar) -> rantlr_services::OutlineConfig {
         let entry = |name_child, kind| rantlr_services::OutlineEntry { nt, prod, name_child, kind };
         match sg.prod_name(i).as_str() {
             "ModeDecl" => cfg.entries.push(entry(1, "module")),
-            "RuleDecl" | "RuleDeclBar" => cfg.entries.push(entry(1, "struct")),
+            "RuleDecl" | "RuleDeclBar" | "RuleStar" | "RulePlus" | "RuleOpt" => {
+                cfg.entries.push(entry(1, "struct"))
+            }
             "TokenDef" => cfg.entries.push(entry(1, "constant")),
             _ => {}
         }
@@ -118,9 +124,13 @@ pub fn rg_binding_config(sg: &SynGrammar) -> rantlr_sem::BindingConfig {
     for i in 0..sg.prods.len() {
         let (nt, prod) = (sg.prods[i].lhs, i as u16);
         match sg.prod_name(i).as_str() {
-            "RuleDecl" | "RuleDeclBar" | "TokenDef" => cfg.defs.push((nt, prod, 1)),
+            "RuleDecl" | "RuleDeclBar" | "RuleStar" | "RulePlus" | "RuleOpt" | "TokenDef" => {
+                cfg.defs.push((nt, prod, 1))
+            }
             "KwDecl" | "StartDecl" => cfg.refs.push((nt, prod, 1, rantlr_sem::RefKind::Var)),
-            "TokName" | "SymName" => cfg.refs.push((nt, prod, 0, rantlr_sem::RefKind::Var)),
+            "TokName" | "SymName" | "SymNameOpt" | "SymNameStar" | "SymNamePlus" | "ElemName" => {
+                cfg.refs.push((nt, prod, 0, rantlr_sem::RefKind::Var))
+            }
             "SymLabeled" => cfg.refs.push((nt, prod, 2, rantlr_sem::RefKind::Var)),
             _ => {}
         }

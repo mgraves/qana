@@ -49,7 +49,7 @@ impl<'g> Decls<'g> {
     }
 }
 
-/// `decl` — 10 productions.
+/// `decl` — 13 productions.
 #[derive(Clone, Copy, Debug)]
 pub enum Decl<'g> {
     LangDecl(LangDecl<'g>),
@@ -62,6 +62,9 @@ pub enum Decl<'g> {
     StartDecl(StartDecl<'g>),
     RuleDecl(RuleDecl<'g>),
     RuleDeclBar(RuleDeclBar<'g>),
+    RuleStar(RuleStar<'g>),
+    RulePlus(RulePlus<'g>),
+    RuleOpt(RuleOpt<'g>),
 }
 
 impl<'g> AstNode<'g> for Decl<'g> {
@@ -80,6 +83,9 @@ impl<'g> AstNode<'g> for Decl<'g> {
             10 => Some(Decl::StartDecl(StartDecl(node))),
             11 => Some(Decl::RuleDecl(RuleDecl(node))),
             12 => Some(Decl::RuleDeclBar(RuleDeclBar(node))),
+            13 => Some(Decl::RuleStar(RuleStar(node))),
+            14 => Some(Decl::RulePlus(RulePlus(node))),
+            15 => Some(Decl::RuleOpt(RuleOpt(node))),
             _ => None,
         }
     }
@@ -95,6 +101,9 @@ impl<'g> AstNode<'g> for Decl<'g> {
             Decl::StartDecl(x) => x.0,
             Decl::RuleDecl(x) => x.0,
             Decl::RuleDeclBar(x) => x.0,
+            Decl::RuleStar(x) => x.0,
+            Decl::RulePlus(x) => x.0,
+            Decl::RuleOpt(x) => x.0,
         }
     }
 }
@@ -114,7 +123,7 @@ impl<'g> AstNode<'g> for LangDecl<'g> {
 
 impl<'g> LangDecl<'g> {
     pub fn kw_language_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 17) // KW_LANGUAGE
+        self.0.child_token(0, 21) // KW_LANGUAGE
     }
     pub fn name_token(&self) -> Option<TokenRef<'g>> {
         self.0.child_token(1, 2) // NAME
@@ -136,7 +145,7 @@ impl<'g> AstNode<'g> for MaxStackDecl<'g> {
 
 impl<'g> MaxStackDecl<'g> {
     pub fn kw_max_stack_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 18) // KW_MAX_STACK
+        self.0.child_token(0, 22) // KW_MAX_STACK
     }
     pub fn num_token(&self) -> Option<TokenRef<'g>> {
         self.0.child_token(1, 3) // NUM
@@ -158,7 +167,7 @@ impl<'g> AstNode<'g> for KwDecl<'g> {
 
 impl<'g> KwDecl<'g> {
     pub fn kw_keywords_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 19) // KW_KEYWORDS
+        self.0.child_token(0, 23) // KW_KEYWORDS
     }
     pub fn name_token(&self) -> Option<TokenRef<'g>> {
         self.0.child_token(1, 2) // NAME
@@ -205,7 +214,7 @@ impl<'g> AstNode<'g> for ModeDecl<'g> {
 
 impl<'g> ModeDecl<'g> {
     pub fn kw_mode_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 21) // KW_MODE
+        self.0.child_token(0, 25) // KW_MODE
     }
     pub fn name_token(&self) -> Option<TokenRef<'g>> {
         self.0.child_token(1, 2) // NAME
@@ -236,7 +245,7 @@ impl<'g> AstNode<'g> for PairDecl<'g> {
 
 impl<'g> PairDecl<'g> {
     pub fn kw_pair_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 22) // KW_PAIR
+        self.0.child_token(0, 26) // KW_PAIR
     }
     pub fn tok_ref(&self) -> Option<TokRef<'g>> {
         TokRef::cast(self.0.child_node(1)?)
@@ -261,7 +270,7 @@ impl<'g> AstNode<'g> for PrecDecl<'g> {
 
 impl<'g> PrecDecl<'g> {
     pub fn kw_prec_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 23) // KW_PREC
+        self.0.child_token(0, 27) // KW_PREC
     }
     pub fn assoc(&self) -> Option<Assoc<'g>> {
         Assoc::cast(self.0.child_node(1)?)
@@ -286,7 +295,7 @@ impl<'g> AstNode<'g> for StartDecl<'g> {
 
 impl<'g> StartDecl<'g> {
     pub fn kw_start_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 26) // KW_START
+        self.0.child_token(0, 30) // KW_START
     }
     pub fn name_token(&self) -> Option<TokenRef<'g>> {
         self.0.child_token(1, 2) // NAME
@@ -308,7 +317,7 @@ impl<'g> AstNode<'g> for RuleDecl<'g> {
 
 impl<'g> RuleDecl<'g> {
     pub fn kw_rule_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 27) // KW_RULE
+        self.0.child_token(0, 31) // KW_RULE
     }
     pub fn name_token(&self) -> Option<TokenRef<'g>> {
         self.0.child_token(1, 2) // NAME
@@ -336,7 +345,7 @@ impl<'g> AstNode<'g> for RuleDeclBar<'g> {
 
 impl<'g> RuleDeclBar<'g> {
     pub fn kw_rule_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 27) // KW_RULE
+        self.0.child_token(0, 31) // KW_RULE
     }
     pub fn name_token(&self) -> Option<TokenRef<'g>> {
         self.0.child_token(1, 2) // NAME
@@ -352,13 +361,112 @@ impl<'g> RuleDeclBar<'g> {
     }
 }
 
+/// `decl → KW_RULE NAME EQ elem STAR rep_sep`
+#[derive(Clone, Copy, Debug)]
+pub struct RuleStar<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for RuleStar<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 2 && node.prod() == 13).then(|| RuleStar(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> RuleStar<'g> {
+    pub fn kw_rule_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 31) // KW_RULE
+    }
+    pub fn name_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(1, 2) // NAME
+    }
+    pub fn eq_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(2, 8) // EQ
+    }
+    pub fn elem(&self) -> Option<Elem<'g>> {
+        Elem::cast(self.0.child_node(3)?)
+    }
+    pub fn star_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(4, 17) // STAR
+    }
+    pub fn rep_sep(&self) -> Option<RepSep<'g>> {
+        RepSep::cast(self.0.child_node(5)?)
+    }
+}
+
+/// `decl → KW_RULE NAME EQ elem PLUS rep_sep`
+#[derive(Clone, Copy, Debug)]
+pub struct RulePlus<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for RulePlus<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 2 && node.prod() == 14).then(|| RulePlus(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> RulePlus<'g> {
+    pub fn kw_rule_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 31) // KW_RULE
+    }
+    pub fn name_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(1, 2) // NAME
+    }
+    pub fn eq_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(2, 8) // EQ
+    }
+    pub fn elem(&self) -> Option<Elem<'g>> {
+        Elem::cast(self.0.child_node(3)?)
+    }
+    pub fn plus_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(4, 18) // PLUS
+    }
+    pub fn rep_sep(&self) -> Option<RepSep<'g>> {
+        RepSep::cast(self.0.child_node(5)?)
+    }
+}
+
+/// `decl → KW_RULE NAME EQ elem QMARK`
+#[derive(Clone, Copy, Debug)]
+pub struct RuleOpt<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for RuleOpt<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 2 && node.prod() == 15).then(|| RuleOpt(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> RuleOpt<'g> {
+    pub fn kw_rule_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 31) // KW_RULE
+    }
+    pub fn name_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(1, 2) // NAME
+    }
+    pub fn eq_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(2, 8) // EQ
+    }
+    pub fn elem(&self) -> Option<Elem<'g>> {
+        Elem::cast(self.0.child_node(3)?)
+    }
+    pub fn qmark_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(4, 19) // QMARK
+    }
+}
+
 /// `token_def → KW_TOKEN NAME EQ tok_pat attrs`
 #[derive(Clone, Copy, Debug)]
 pub struct TokenDef<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for TokenDef<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 3 && node.prod() == 13).then(|| TokenDef(node))
+        (node.nt() == 3 && node.prod() == 16).then(|| TokenDef(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -367,7 +475,7 @@ impl<'g> AstNode<'g> for TokenDef<'g> {
 
 impl<'g> TokenDef<'g> {
     pub fn kw_token_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 20) // KW_TOKEN
+        self.0.child_token(0, 24) // KW_TOKEN
     }
     pub fn name_token(&self) -> Option<TokenRef<'g>> {
         self.0.child_token(1, 2) // NAME
@@ -448,8 +556,8 @@ impl<'g> AstNode<'g> for KwItem<'g> {
             return None;
         }
         match node.prod() {
-            18 => Some(KwItem::KwName(KwName(node))),
-            19 => Some(KwItem::KwStr(KwStr(node))),
+            21 => Some(KwItem::KwName(KwName(node))),
+            22 => Some(KwItem::KwStr(KwStr(node))),
             _ => None,
         }
     }
@@ -467,7 +575,7 @@ pub struct KwName<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for KwName<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 6 && node.prod() == 18).then(|| KwName(node))
+        (node.nt() == 6 && node.prod() == 21).then(|| KwName(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -486,7 +594,7 @@ pub struct KwStr<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for KwStr<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 6 && node.prod() == 19).then(|| KwStr(node))
+        (node.nt() == 6 && node.prod() == 22).then(|| KwStr(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -512,8 +620,8 @@ impl<'g> AstNode<'g> for TokPat<'g> {
             return None;
         }
         match node.prod() {
-            20 => Some(TokPat::PatRegex(PatRegex(node))),
-            21 => Some(TokPat::PatLit(PatLit(node))),
+            23 => Some(TokPat::PatRegex(PatRegex(node))),
+            24 => Some(TokPat::PatLit(PatLit(node))),
             _ => None,
         }
     }
@@ -531,7 +639,7 @@ pub struct PatRegex<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for PatRegex<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 7 && node.prod() == 20).then(|| PatRegex(node))
+        (node.nt() == 7 && node.prod() == 23).then(|| PatRegex(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -550,7 +658,7 @@ pub struct PatLit<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for PatLit<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 7 && node.prod() == 21).then(|| PatLit(node))
+        (node.nt() == 7 && node.prod() == 24).then(|| PatLit(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -602,8 +710,8 @@ impl<'g> AstNode<'g> for Attr<'g> {
             return None;
         }
         match node.prod() {
-            24 => Some(Attr::AttrPlain(AttrPlain(node))),
-            25 => Some(Attr::AttrArgs(AttrArgs(node))),
+            27 => Some(Attr::AttrPlain(AttrPlain(node))),
+            28 => Some(Attr::AttrArgs(AttrArgs(node))),
             _ => None,
         }
     }
@@ -621,7 +729,7 @@ pub struct AttrPlain<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for AttrPlain<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 9 && node.prod() == 24).then(|| AttrPlain(node))
+        (node.nt() == 9 && node.prod() == 27).then(|| AttrPlain(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -643,7 +751,7 @@ pub struct AttrArgs<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for AttrArgs<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 9 && node.prod() == 25).then(|| AttrArgs(node))
+        (node.nt() == 9 && node.prod() == 28).then(|| AttrArgs(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -708,9 +816,9 @@ impl<'g> AstNode<'g> for Arg<'g> {
             return None;
         }
         match node.prod() {
-            28 => Some(Arg::ArgName(ArgName(node))),
-            29 => Some(Arg::ArgNum(ArgNum(node))),
-            30 => Some(Arg::ArgStr(ArgStr(node))),
+            31 => Some(Arg::ArgName(ArgName(node))),
+            32 => Some(Arg::ArgNum(ArgNum(node))),
+            33 => Some(Arg::ArgStr(ArgStr(node))),
             _ => None,
         }
     }
@@ -729,7 +837,7 @@ pub struct ArgName<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for ArgName<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 11 && node.prod() == 28).then(|| ArgName(node))
+        (node.nt() == 11 && node.prod() == 31).then(|| ArgName(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -748,7 +856,7 @@ pub struct ArgNum<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for ArgNum<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 11 && node.prod() == 29).then(|| ArgNum(node))
+        (node.nt() == 11 && node.prod() == 32).then(|| ArgNum(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -767,7 +875,7 @@ pub struct ArgStr<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for ArgStr<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 11 && node.prod() == 30).then(|| ArgStr(node))
+        (node.nt() == 11 && node.prod() == 33).then(|| ArgStr(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -793,8 +901,8 @@ impl<'g> AstNode<'g> for TokRef<'g> {
             return None;
         }
         match node.prod() {
-            31 => Some(TokRef::TokName(TokName(node))),
-            32 => Some(TokRef::TokStr(TokStr(node))),
+            34 => Some(TokRef::TokName(TokName(node))),
+            35 => Some(TokRef::TokStr(TokStr(node))),
             _ => None,
         }
     }
@@ -812,7 +920,7 @@ pub struct TokName<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for TokName<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 12 && node.prod() == 31).then(|| TokName(node))
+        (node.nt() == 12 && node.prod() == 34).then(|| TokName(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -831,7 +939,7 @@ pub struct TokStr<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for TokStr<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 12 && node.prod() == 32).then(|| TokStr(node))
+        (node.nt() == 12 && node.prod() == 35).then(|| TokStr(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -857,8 +965,8 @@ impl<'g> AstNode<'g> for Assoc<'g> {
             return None;
         }
         match node.prod() {
-            33 => Some(Assoc::AssocLeft(AssocLeft(node))),
-            34 => Some(Assoc::AssocRight(AssocRight(node))),
+            36 => Some(Assoc::AssocLeft(AssocLeft(node))),
+            37 => Some(Assoc::AssocRight(AssocRight(node))),
             _ => None,
         }
     }
@@ -876,7 +984,7 @@ pub struct AssocLeft<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for AssocLeft<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 13 && node.prod() == 33).then(|| AssocLeft(node))
+        (node.nt() == 13 && node.prod() == 36).then(|| AssocLeft(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -885,7 +993,7 @@ impl<'g> AstNode<'g> for AssocLeft<'g> {
 
 impl<'g> AssocLeft<'g> {
     pub fn kw_left_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 24) // KW_LEFT
+        self.0.child_token(0, 28) // KW_LEFT
     }
 }
 
@@ -895,7 +1003,7 @@ pub struct AssocRight<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for AssocRight<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 13 && node.prod() == 34).then(|| AssocRight(node))
+        (node.nt() == 13 && node.prod() == 37).then(|| AssocRight(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -904,7 +1012,7 @@ impl<'g> AstNode<'g> for AssocRight<'g> {
 
 impl<'g> AssocRight<'g> {
     pub fn kw_right_token(&self) -> Option<TokenRef<'g>> {
-        self.0.child_token(0, 25) // KW_RIGHT
+        self.0.child_token(0, 29) // KW_RIGHT
     }
 }
 
@@ -966,7 +1074,7 @@ pub struct Alt<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for Alt<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 16 && node.prod() == 39).then(|| Alt(node))
+        (node.nt() == 16 && node.prod() == 42).then(|| Alt(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -1014,13 +1122,19 @@ impl<'g> Syms<'g> {
     }
 }
 
-/// `sym` — 4 productions.
+/// `sym` — 10 productions.
 #[derive(Clone, Copy, Debug)]
 pub enum Sym<'g> {
     SymName(SymName<'g>),
     SymStr(SymStr<'g>),
     SymLabeled(SymLabeled<'g>),
     SymLabeledStr(SymLabeledStr<'g>),
+    SymNameOpt(SymNameOpt<'g>),
+    SymNameStar(SymNameStar<'g>),
+    SymNamePlus(SymNamePlus<'g>),
+    SymStrOpt(SymStrOpt<'g>),
+    SymStrStar(SymStrStar<'g>),
+    SymStrPlus(SymStrPlus<'g>),
 }
 
 impl<'g> AstNode<'g> for Sym<'g> {
@@ -1029,10 +1143,16 @@ impl<'g> AstNode<'g> for Sym<'g> {
             return None;
         }
         match node.prod() {
-            42 => Some(Sym::SymName(SymName(node))),
-            43 => Some(Sym::SymStr(SymStr(node))),
-            44 => Some(Sym::SymLabeled(SymLabeled(node))),
-            45 => Some(Sym::SymLabeledStr(SymLabeledStr(node))),
+            45 => Some(Sym::SymName(SymName(node))),
+            46 => Some(Sym::SymStr(SymStr(node))),
+            47 => Some(Sym::SymLabeled(SymLabeled(node))),
+            48 => Some(Sym::SymLabeledStr(SymLabeledStr(node))),
+            49 => Some(Sym::SymNameOpt(SymNameOpt(node))),
+            50 => Some(Sym::SymNameStar(SymNameStar(node))),
+            51 => Some(Sym::SymNamePlus(SymNamePlus(node))),
+            52 => Some(Sym::SymStrOpt(SymStrOpt(node))),
+            53 => Some(Sym::SymStrStar(SymStrStar(node))),
+            54 => Some(Sym::SymStrPlus(SymStrPlus(node))),
             _ => None,
         }
     }
@@ -1042,6 +1162,12 @@ impl<'g> AstNode<'g> for Sym<'g> {
             Sym::SymStr(x) => x.0,
             Sym::SymLabeled(x) => x.0,
             Sym::SymLabeledStr(x) => x.0,
+            Sym::SymNameOpt(x) => x.0,
+            Sym::SymNameStar(x) => x.0,
+            Sym::SymNamePlus(x) => x.0,
+            Sym::SymStrOpt(x) => x.0,
+            Sym::SymStrStar(x) => x.0,
+            Sym::SymStrPlus(x) => x.0,
         }
     }
 }
@@ -1052,7 +1178,7 @@ pub struct SymName<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for SymName<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 18 && node.prod() == 42).then(|| SymName(node))
+        (node.nt() == 18 && node.prod() == 45).then(|| SymName(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -1071,7 +1197,7 @@ pub struct SymStr<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for SymStr<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 18 && node.prod() == 43).then(|| SymStr(node))
+        (node.nt() == 18 && node.prod() == 46).then(|| SymStr(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -1090,7 +1216,7 @@ pub struct SymLabeled<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for SymLabeled<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 18 && node.prod() == 44).then(|| SymLabeled(node))
+        (node.nt() == 18 && node.prod() == 47).then(|| SymLabeled(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -1115,7 +1241,7 @@ pub struct SymLabeledStr<'g>(pub NodeRef<'g>);
 
 impl<'g> AstNode<'g> for SymLabeledStr<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 18 && node.prod() == 45).then(|| SymLabeledStr(node))
+        (node.nt() == 18 && node.prod() == 48).then(|| SymLabeledStr(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0
@@ -1131,5 +1257,262 @@ impl<'g> SymLabeledStr<'g> {
     }
     pub fn string_token(&self) -> Option<TokenRef<'g>> {
         self.0.child_token(2, 4) // STRING
+    }
+}
+
+/// `sym → NAME QMARK`
+#[derive(Clone, Copy, Debug)]
+pub struct SymNameOpt<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for SymNameOpt<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 18 && node.prod() == 49).then(|| SymNameOpt(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> SymNameOpt<'g> {
+    pub fn name_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 2) // NAME
+    }
+    pub fn qmark_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(1, 19) // QMARK
+    }
+}
+
+/// `sym → NAME STAR`
+#[derive(Clone, Copy, Debug)]
+pub struct SymNameStar<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for SymNameStar<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 18 && node.prod() == 50).then(|| SymNameStar(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> SymNameStar<'g> {
+    pub fn name_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 2) // NAME
+    }
+    pub fn star_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(1, 17) // STAR
+    }
+}
+
+/// `sym → NAME PLUS`
+#[derive(Clone, Copy, Debug)]
+pub struct SymNamePlus<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for SymNamePlus<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 18 && node.prod() == 51).then(|| SymNamePlus(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> SymNamePlus<'g> {
+    pub fn name_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 2) // NAME
+    }
+    pub fn plus_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(1, 18) // PLUS
+    }
+}
+
+/// `sym → STRING QMARK`
+#[derive(Clone, Copy, Debug)]
+pub struct SymStrOpt<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for SymStrOpt<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 18 && node.prod() == 52).then(|| SymStrOpt(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> SymStrOpt<'g> {
+    pub fn string_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 4) // STRING
+    }
+    pub fn qmark_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(1, 19) // QMARK
+    }
+}
+
+/// `sym → STRING STAR`
+#[derive(Clone, Copy, Debug)]
+pub struct SymStrStar<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for SymStrStar<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 18 && node.prod() == 53).then(|| SymStrStar(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> SymStrStar<'g> {
+    pub fn string_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 4) // STRING
+    }
+    pub fn star_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(1, 17) // STAR
+    }
+}
+
+/// `sym → STRING PLUS`
+#[derive(Clone, Copy, Debug)]
+pub struct SymStrPlus<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for SymStrPlus<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 18 && node.prod() == 54).then(|| SymStrPlus(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> SymStrPlus<'g> {
+    pub fn string_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 4) // STRING
+    }
+    pub fn plus_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(1, 18) // PLUS
+    }
+}
+
+/// `elem` — 2 productions.
+#[derive(Clone, Copy, Debug)]
+pub enum Elem<'g> {
+    ElemName(ElemName<'g>),
+    ElemStr(ElemStr<'g>),
+}
+
+impl<'g> AstNode<'g> for Elem<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        if node.nt() != 19 {
+            return None;
+        }
+        match node.prod() {
+            55 => Some(Elem::ElemName(ElemName(node))),
+            56 => Some(Elem::ElemStr(ElemStr(node))),
+            _ => None,
+        }
+    }
+    fn node(&self) -> NodeRef<'g> {
+        match self {
+            Elem::ElemName(x) => x.0,
+            Elem::ElemStr(x) => x.0,
+        }
+    }
+}
+
+/// `elem → NAME`
+#[derive(Clone, Copy, Debug)]
+pub struct ElemName<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for ElemName<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 19 && node.prod() == 55).then(|| ElemName(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> ElemName<'g> {
+    pub fn name_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 2) // NAME
+    }
+}
+
+/// `elem → STRING`
+#[derive(Clone, Copy, Debug)]
+pub struct ElemStr<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for ElemStr<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 19 && node.prod() == 56).then(|| ElemStr(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> ElemStr<'g> {
+    pub fn string_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 4) // STRING
+    }
+}
+
+/// `rep_sep` — 2 productions.
+#[derive(Clone, Copy, Debug)]
+pub enum RepSep<'g> {
+    RepSepNone(RepSepNone<'g>),
+    RepSepSome(RepSepSome<'g>),
+}
+
+impl<'g> AstNode<'g> for RepSep<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        if node.nt() != 20 {
+            return None;
+        }
+        match node.prod() {
+            57 => Some(RepSep::RepSepNone(RepSepNone(node))),
+            58 => Some(RepSep::RepSepSome(RepSepSome(node))),
+            _ => None,
+        }
+    }
+    fn node(&self) -> NodeRef<'g> {
+        match self {
+            RepSep::RepSepNone(x) => x.0,
+            RepSep::RepSepSome(x) => x.0,
+        }
+    }
+}
+
+/// `rep_sep → ε`
+#[derive(Clone, Copy, Debug)]
+pub struct RepSepNone<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for RepSepNone<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 20 && node.prod() == 57).then(|| RepSepNone(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+/// `rep_sep → PERCENT elem`
+#[derive(Clone, Copy, Debug)]
+pub struct RepSepSome<'g>(pub NodeRef<'g>);
+
+impl<'g> AstNode<'g> for RepSepSome<'g> {
+    fn cast(node: NodeRef<'g>) -> Option<Self> {
+        (node.nt() == 20 && node.prod() == 58).then(|| RepSepSome(node))
+    }
+    fn node(&self) -> NodeRef<'g> {
+        self.0
+    }
+}
+
+impl<'g> RepSepSome<'g> {
+    pub fn percent_token(&self) -> Option<TokenRef<'g>> {
+        self.0.child_token(0, 20) // PERCENT
+    }
+    pub fn elem(&self) -> Option<Elem<'g>> {
+        Elem::cast(self.0.child_node(1)?)
     }
 }

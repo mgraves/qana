@@ -143,12 +143,31 @@ struct TokenIr {
     attrs: Vec<AttrIr>,
 }
 
+/// An EBNF sugar operator (postfix on symbols, or a rule-level form).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum SugarOp {
+    Opt,
+    Star,
+    Plus,
+}
+
+impl SugarOp {
+    fn suffix(self) -> &'static str {
+        match self {
+            SugarOp::Opt => "opt",
+            SugarOp::Star => "star",
+            SugarOp::Plus => "plus",
+        }
+    }
+}
+
 struct SymIr {
     label: Option<String>,
     /// NAME text or unescaped STRING content.
     text: String,
     span: (u32, u32),
     is_string: bool,
+    postfix: Option<SugarOp>,
 }
 
 struct AltIr {
@@ -158,10 +177,16 @@ struct AltIr {
     attrs: Vec<AttrIr>,
 }
 
+enum RuleBody {
+    Alts(Vec<AltIr>),
+    /// `rule R = elem OP [% sep]` — desugared with deterministic names.
+    Sugar { op: SugarOp, elem: TokRefIr, sep: Option<TokRefIr> },
+}
+
 struct RuleIr {
     name: String,
     name_span: (u32, u32),
-    alts: Vec<AltIr>,
+    body: RuleBody,
 }
 
 #[derive(Clone)]
@@ -244,6 +269,13 @@ fn lower_attrs(cur: Cur<'_>, p: &RgProds) -> Vec<AttrIr> {
 fn lower_tok_ref(cur: Cur<'_>, p: &RgProds) -> Option<TokRefIr> {
     let (t, span) = cur.tok(0)?;
     let is_string = cur.n.prod == p.tok_str as u16;
+    let text = if is_string { unquote(&t.text) } else { t.text.clone() };
+    Some(TokRefIr { text, span, is_string })
+}
+
+fn lower_elem(cur: Cur<'_>, p: &RgProds) -> Option<TokRefIr> {
+    let (t, span) = cur.tok(0)?;
+    let is_string = cur.n.prod == p.elem_str as u16;
     let text = if is_string { unquote(&t.text) } else { t.text.clone() };
     Some(TokRefIr { text, span, is_string })
 }
@@ -392,17 +424,58 @@ fn lower(tree: &GreenNode, p: &RgProds, diags: &mut Vec<RgDiag>) -> FileIr {
                                 (None, 0)
                             };
                             let Some((t, span)) = s.tok(tok_at) else { continue };
-                            let is_string = sp == p.sym_str || sp == p.sym_labeled_str;
+                            let is_string = sp == p.sym_str
+                                || sp == p.sym_labeled_str
+                                || sp == p.sym_str_opt
+                                || sp == p.sym_str_star
+                                || sp == p.sym_str_plus;
+                            let postfix = if sp == p.sym_name_opt || sp == p.sym_str_opt {
+                                Some(SugarOp::Opt)
+                            } else if sp == p.sym_name_star || sp == p.sym_str_star {
+                                Some(SugarOp::Star)
+                            } else if sp == p.sym_name_plus || sp == p.sym_str_plus {
+                                Some(SugarOp::Plus)
+                            } else {
+                                None
+                            };
                             let text =
                                 if is_string { unquote(&t.text) } else { t.text.clone() };
-                            syms.push(SymIr { label: label_s, text, span, is_string });
+                            syms.push(SymIr { label: label_s, text, span, is_string, postfix });
                         }
                     }
                     let attrs = a.node(3).map(|x| lower_attrs(x, p)).unwrap_or_default();
                     alts.push(AltIr { label: label.text.clone(), label_span, syms, attrs });
                 }
             }
-            ir.rules.push(RuleIr { name: name.text.clone(), name_span, alts });
+            ir.rules.push(RuleIr {
+                name: name.text.clone(),
+                name_span,
+                body: RuleBody::Alts(alts),
+            });
+        } else if prod == p.rule_star || prod == p.rule_plus || prod == p.rule_opt {
+            let Some((name, name_span)) = d.tok(1) else { continue };
+            let op = if prod == p.rule_star {
+                SugarOp::Star
+            } else if prod == p.rule_plus {
+                SugarOp::Plus
+            } else {
+                SugarOp::Opt
+            };
+            let Some(elem) = d.node(3).and_then(|e| lower_elem(e, p)) else { continue };
+            let sep = if prod == p.rule_opt {
+                None
+            } else {
+                d.node(5).and_then(|rs| {
+                    (rs.n.prod == p.rep_sep_some as u16)
+                        .then(|| rs.node(1).and_then(|e| lower_elem(e, p)))
+                        .flatten()
+                })
+            };
+            ir.rules.push(RuleIr {
+                name: name.text.clone(),
+                name_span,
+                body: RuleBody::Sugar { op, elem, sep },
+            });
         }
     }
     ir
@@ -650,9 +723,114 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
             continue;
         }
         nt_ids.insert(r.name.clone(), sg.nt(&r.name));
+        // `X* % SEP` needs a nonempty inner list rule, declared right
+        // after its wrapper (deterministic ids; matches the hand-written
+        // `args`/`args_ne` convention).
+        if let RuleBody::Sugar { op: SugarOp::Star, sep: Some(_), .. } = &r.body {
+            let inner = format!("{}_ne", r.name);
+            if nt_ids.contains_key(&inner) || token_ids.contains_key(&inner) {
+                error(
+                    d,
+                    r.name_span,
+                    format!("generated rule `{inner}` collides with an existing declaration"),
+                );
+            } else {
+                nt_ids.insert(inner.clone(), sg.nt(&inner));
+            }
+        }
     }
     for (id, level, assoc) in &prec_list {
         sg.set_token_prec(*id, *level, *assoc);
+    }
+
+    // Symbol resolution, shared by explicit productions, sugar forms,
+    // and helper collection (`diags: None` probes silently — errors are
+    // reported once, at production emission).
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_symbol(
+        text: &str,
+        is_string: bool,
+        span: (u32, u32),
+        token_ids: &HashMap<String, TokenId>,
+        nt_ids: &HashMap<String, u16>,
+        lit_text: &HashMap<String, TokenId>,
+        kw_text: &HashMap<String, TokenId>,
+        diags: Option<&mut Vec<RgDiag>>,
+    ) -> Option<Sym> {
+        let err = |diags: Option<&mut Vec<RgDiag>>, msg: String| {
+            if let Some(dd) = diags {
+                dd.push(RgDiag { span, msg, severity: 1 });
+            }
+        };
+        if is_string {
+            match lit_text.get(text).or_else(|| kw_text.get(text)) {
+                Some(&id) => Some(Sym::T(id)),
+                None => {
+                    err(
+                        diags,
+                        format!(
+                            "`\"{text}\"` is not a declared token text or keyword — declare it (fixed token or `keywords` entry)"
+                        ),
+                    );
+                    None
+                }
+            }
+        } else if let Some(&id) = token_ids.get(text) {
+            Some(Sym::T(id))
+        } else if let Some(&nt2) = nt_ids.get(text) {
+            Some(Sym::N(nt2))
+        } else {
+            err(diags, format!("cannot find token or rule `{text}`"));
+            None
+        }
+    }
+
+    // Inline-postfix helpers: ONE shared nonterminal per (element, op),
+    // declared after every explicit rule, in first-use order — so
+    // `expr?` anywhere in the grammar is the same `expr_opt` rule.
+    struct Helper {
+        nt: u16,
+        sym: Sym,
+        op: SugarOp,
+        span: (u32, u32),
+    }
+    let mut helper_key: HashMap<(Sym, SugarOp), u16> = HashMap::new();
+    let mut helper_list: Vec<Helper> = Vec::new();
+    for r in &ir.rules {
+        let RuleBody::Alts(alts) = &r.body else { continue };
+        for alt in alts {
+            for s in &alt.syms {
+                let Some(op) = s.postfix else { continue };
+                let Some(sym) =
+                    resolve_symbol(&s.text, s.is_string, s.span, &token_ids, &nt_ids, &lit_text, &kw_text, None)
+                else {
+                    continue;
+                };
+                if op != SugarOp::Opt && matches!(sym, Sym::T(_)) {
+                    continue; // refused (with a hint) at production emission
+                }
+                if helper_key.contains_key(&(sym, op)) {
+                    continue;
+                }
+                let base = match sym {
+                    Sym::T(t) => sg.term_name(t).to_lowercase(),
+                    Sym::N(n2) => sg.nt_names[n2 as usize].clone(),
+                };
+                let hname = format!("{base}_{}", op.suffix());
+                if nt_ids.contains_key(&hname) || token_ids.contains_key(&hname) {
+                    error(
+                        d,
+                        s.span,
+                        format!("generated rule `{hname}` collides with an existing declaration"),
+                    );
+                    continue;
+                }
+                let hnt = sg.nt(&hname);
+                nt_ids.insert(hname, hnt);
+                helper_key.insert((sym, op), hnt);
+                helper_list.push(Helper { nt: hnt, sym, op, span: s.span });
+            }
+        }
     }
 
     let mut binding = BindingConfig::default();
@@ -660,9 +838,90 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
     let mut prod_spans: Vec<(u32, u32)> = Vec::new();
     let mut labels_seen: HashMap<String, ()> = HashMap::new();
 
+    fn gen_prod(
+        sg: &mut SynGrammar,
+        labels_seen: &mut HashMap<String, ()>,
+        prod_spans: &mut Vec<(u32, u32)>,
+        d: &mut Vec<RgDiag>,
+        nt: u16,
+        name: String,
+        rhs: Vec<Sym>,
+        span: (u32, u32),
+    ) {
+        if labels_seen.insert(name.clone(), ()).is_some() {
+            d.push(RgDiag {
+                span,
+                msg: format!("generated production name `{name}` collides with an existing label"),
+                severity: 1,
+            });
+        }
+        sg.prod_named(nt, &name, rhs);
+        prod_spans.push(span);
+    }
+
+    const WRAP_HINT: &str = "repetition elements must be rules — wrap the token in a single-alternative rule to get a balanced, typed list";
+
     for r in &ir.rules {
         let Some(&nt) = nt_ids.get(&r.name) else { continue };
-        for alt in &r.alts {
+        let alts = match &r.body {
+            RuleBody::Sugar { op, elem, sep } => {
+                let c = SynGrammar::camel_name(&r.name);
+                let Some(esym) = resolve_symbol(
+                    &elem.text, elem.is_string, elem.span, &token_ids, &nt_ids, &lit_text, &kw_text, Some(d),
+                ) else {
+                    continue;
+                };
+                if *op != SugarOp::Opt && matches!(esym, Sym::T(_)) {
+                    error(d, elem.span, WRAP_HINT.into());
+                    continue;
+                }
+                let sepsym = match sep {
+                    None => None,
+                    Some(sref) => match resolve_symbol(
+                        &sref.text, sref.is_string, sref.span, &token_ids, &nt_ids, &lit_text, &kw_text, Some(d),
+                    ) {
+                        Some(Sym::T(t)) => Some(t),
+                        Some(Sym::N(_)) => {
+                            error(d, sref.span, "separators must be tokens".into());
+                            continue;
+                        }
+                        None => continue,
+                    },
+                };
+                let sp = r.name_span;
+                let g = &mut sg;
+                match (op, sepsym) {
+                    (SugarOp::Opt, _) => {
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, nt, format!("{c}None"), vec![], sp);
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, nt, format!("{c}Some"), vec![esym], sp);
+                    }
+                    (SugarOp::Star, None) => {
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, nt, format!("{c}Empty"), vec![], sp);
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, nt, format!("{c}More"), vec![Sym::N(nt), esym], sp);
+                    }
+                    (SugarOp::Plus, None) => {
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, nt, format!("{c}First"), vec![esym], sp);
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, nt, format!("{c}More"), vec![Sym::N(nt), esym], sp);
+                    }
+                    (SugarOp::Plus, Some(s)) => {
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, nt, format!("{c}First"), vec![esym], sp);
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, nt, format!("{c}More"), vec![Sym::N(nt), Sym::T(s), esym], sp);
+                    }
+                    (SugarOp::Star, Some(s)) => {
+                        let inner_name = format!("{}_ne", r.name);
+                        let Some(&inner) = nt_ids.get(&inner_name) else { continue };
+                        let ci = SynGrammar::camel_name(&inner_name);
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, nt, format!("{c}None"), vec![], sp);
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, nt, format!("{c}Some"), vec![Sym::N(inner)], sp);
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, inner, format!("{ci}First"), vec![esym], sp);
+                        gen_prod(g, &mut labels_seen, &mut prod_spans, d, inner, format!("{ci}More"), vec![Sym::N(inner), Sym::T(s), esym], sp);
+                    }
+                }
+                continue;
+            }
+            RuleBody::Alts(alts) => alts,
+        };
+        for alt in alts {
             if labels_seen.insert(alt.label.clone(), ()).is_some() {
                 error(
                     d,
@@ -673,29 +932,21 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
             let mut rhs: Vec<Sym> = Vec::new();
             let mut positions: HashMap<&str, usize> = HashMap::new();
             for s in alt.syms.iter() {
-                let sym = if s.is_string {
-                    match lit_text.get(&s.text).or_else(|| kw_text.get(&s.text)) {
-                        Some(&id) => Sym::T(id),
-                        None => {
-                            error(
-                                d,
-                                s.span,
-                                format!(
-                                    "`\"{}\"` is not a declared token text or keyword — declare it (fixed token or `keywords` entry)",
-                                    s.text
-                                ),
-                            );
-                            continue;
-                        }
-                    }
-                } else if let Some(&id) = token_ids.get(&s.text) {
-                    Sym::T(id)
-                } else if let Some(&nt2) = nt_ids.get(&s.text) {
-                    Sym::N(nt2)
-                } else {
-                    error(d, s.span, format!("cannot find token or rule `{}`", s.text));
+                let Some(mut sym) = resolve_symbol(
+                    &s.text, s.is_string, s.span, &token_ids, &nt_ids, &lit_text, &kw_text, Some(d),
+                ) else {
                     continue;
                 };
+                if let Some(op) = s.postfix {
+                    if op != SugarOp::Opt && matches!(sym, Sym::T(_)) {
+                        error(d, s.span, WRAP_HINT.into());
+                        continue;
+                    }
+                    match helper_key.get(&(sym, op)) {
+                        Some(&h) => sym = Sym::N(h),
+                        None => continue, // collision reported during collection
+                    }
+                }
                 // Position = index in the FINAL rhs (robust when an
                 // earlier sym failed to resolve under errors).
                 if let Some(l) = &s.label {
@@ -804,6 +1055,27 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         ),
                     ),
                 }
+            }
+        }
+    }
+
+    // Inline-helper productions, after every explicit production.
+    for h in &helper_list {
+        let hname = sg.nt_names[h.nt as usize].clone();
+        let c = SynGrammar::camel_name(&hname);
+        let g = &mut sg;
+        match h.op {
+            SugarOp::Opt => {
+                gen_prod(g, &mut labels_seen, &mut prod_spans, d, h.nt, format!("{c}None"), vec![], h.span);
+                gen_prod(g, &mut labels_seen, &mut prod_spans, d, h.nt, format!("{c}Some"), vec![h.sym], h.span);
+            }
+            SugarOp::Star => {
+                gen_prod(g, &mut labels_seen, &mut prod_spans, d, h.nt, format!("{c}Empty"), vec![], h.span);
+                gen_prod(g, &mut labels_seen, &mut prod_spans, d, h.nt, format!("{c}More"), vec![Sym::N(h.nt), h.sym], h.span);
+            }
+            SugarOp::Plus => {
+                gen_prod(g, &mut labels_seen, &mut prod_spans, d, h.nt, format!("{c}First"), vec![h.sym], h.span);
+                gen_prod(g, &mut labels_seen, &mut prod_spans, d, h.nt, format!("{c}More"), vec![Sym::N(h.nt), h.sym], h.span);
             }
         }
     }

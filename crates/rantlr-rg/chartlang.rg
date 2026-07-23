@@ -52,9 +52,7 @@ start file
 
 rule file = File: stmts
 
-rule stmts =
-  | StmtsEmpty:
-  | StmtsMore: stmts stmt
+rule stmts = stmt*
 
 rule stmt =
   | LetStmt: "let" name:IDENT "=" expr ";" @def(name) @outline(name)
@@ -77,10 +75,6 @@ rule expr =
   | ParenExpr: "(" expr ")"
   | ListExpr: "[" args "]"
 
-rule args =
-  | ArgsEmpty:
-  | ArgsSome: args_ne
-
-rule args_ne =
-  | ArgFirst: expr
-  | ArgMore: args_ne "," expr
+// `expr* % ","` — possibly-empty comma-separated list: desugars to the
+// wrapper (ArgsNone/ArgsSome) plus a nonempty inner rule `args_ne`.
+rule args = expr* % ","

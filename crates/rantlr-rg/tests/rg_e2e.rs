@@ -138,11 +138,18 @@ fn rg_files_are_lossless_and_incremental() {
 
     // Incremental editing of a grammar file ≡ batch reparse.
     let mut session = IncSession::new(&tc.lexer, &tc.sg, &tc.tables, CHARTLANG_RG).unwrap();
+    let line_of = |needle: &str| {
+        CHARTLANG_RG
+            .lines()
+            .position(|l| l.trim_start().starts_with(needle))
+            .unwrap_or_else(|| panic!("line starting with {needle:?}"))
+    };
     let edits: &[(usize, &str)] = &[
         // Add a token declaration mid-file.
-        (22, "token CARET = \"^\" @style(operator)"),
-        // Add a rule alternative line (inside expr's alternatives).
-        (76, "  | PowExpr: expr \"^\" expr"),
+        (line_of("token PUNCT"), "token CARET = \"^\" @style(operator)"),
+        // Add a rule alternative line (inside expr's alternatives; +1
+        // for the token line inserted above it by the first edit).
+        (line_of("| CallExpr") + 1, "  | PowExpr: expr \"^\" expr"),
     ];
     for &(line, text) in edits {
         let outcome = session
@@ -226,6 +233,98 @@ rule stmt =\n  | S: \"if\" stmt\n  | SE: \"if\" stmt \"else\" stmt\n  | SX: \"x\
     assert!(out.diags.iter().any(|d| d.msg.contains("sparkly") && d.msg.contains("keyword")));
 }
 
+/// EBNF sugar desugars to EXACTLY the grammar a careful author writes
+/// by hand with the documented names — values and tables identical.
+#[test]
+fn sugar_equals_handwritten_desugaring() {
+    let tc = RgToolchain::new();
+    let check = |sugared: &str, explicit: &str, l4_nts: &[&str]| {
+        let a = compile_source(&tc, sugared);
+        let b = compile_source(&tc, explicit);
+        assert!(a.diags.is_empty(), "{:?}", a.diags);
+        assert!(b.diags.is_empty(), "{:?}", b.diags);
+        assert_eq!(
+            rantlr_rg::compile::dump_syn(&a.def.sg),
+            rantlr_rg::compile::dump_syn(&b.def.sg),
+            "sugar ≡ hand-written desugaring"
+        );
+        let (_, ta) = certify(&a.def).unwrap();
+        let (_, tb) = certify(&b.def).unwrap();
+        assert_eq!(dump_tables(&ta), dump_tables(&tb), "identical LR tables");
+        // Every generated repetition is an L4 balanced list.
+        for nt in l4_nts {
+            let id = a.def.sg.nt_names.iter().position(|n| n == nt).unwrap() as u16;
+            assert!(ta.lists.contains_key(&id), "`{nt}` must be L4-detected");
+        }
+    };
+
+    // Inline postfix: `item*` (used TWICE — one shared helper), `SEMI?`.
+    check(
+        "token A = \"a\"\ntoken B = \"b\"\ntoken SEMI = \";\"\n\
+         rule file = File: item* SEMI? B item*\n\
+         rule item = Item: A\n",
+        "token A = \"a\"\ntoken B = \"b\"\ntoken SEMI = \";\"\n\
+         rule file = File: item_star semi_opt B item_star\n\
+         rule item = Item: A\n\
+         rule item_star = | ItemStarEmpty: | ItemStarMore: item_star item\n\
+         rule semi_opt = | SemiOptNone: | SemiOptSome: SEMI\n",
+        &["item_star"],
+    );
+
+    // Rule-level forms: `b+`, `item+ % ","`, `item* % ";"`.
+    check(
+        "token A = \"a\"\ntoken B = \"b\"\ntoken SEMI = \";\"\ntoken COMMA = \",\"\n\
+         rule file = File: b_plus SEMI xs SEMI ys\n\
+         rule b_plus = b+\n\
+         rule b = BOne: B\n\
+         rule item = Item: A\n\
+         rule xs = item+ % \",\"\n\
+         rule ys = item* % \";\"\n",
+        "token A = \"a\"\ntoken B = \"b\"\ntoken SEMI = \";\"\ntoken COMMA = \",\"\n\
+         rule file = File: b_plus SEMI xs SEMI ys\n\
+         rule b_plus = | BPlusFirst: b | BPlusMore: b_plus b\n\
+         rule b = BOne: B\n\
+         rule item = Item: A\n\
+         rule xs = | XsFirst: item | XsMore: xs \",\" item\n\
+         rule ys = | YsNone: | YsSome: ys_ne\n\
+         rule ys_ne = | YsNeFirst: item | YsNeMore: ys_ne \";\" item\n",
+        &["b_plus", "xs", "ys_ne"],
+    );
+}
+
+/// Sugar refusals: token repetition (with the wrap hint), rule
+/// separators, and generated-name collisions — all span-carrying.
+#[test]
+fn sugar_refusals_explain() {
+    let tc = RgToolchain::new();
+
+    // Token element under `*` (inline and rule-level).
+    let out = compile_source(&tc, "token A = \"a\"\nrule file = File: A*\n");
+    let diag = out.diags.iter().find(|d| d.msg.contains("wrap the token")).expect("wrap hint");
+    assert_eq!(&"token A = \"a\"\nrule file = File: A*\n"[diag.span.0 as usize..diag.span.1 as usize], "A");
+    let out = compile_source(&tc, "token A = \"a\"\nrule file = File: xs\nrule xs = A+\n");
+    assert!(out.diags.iter().any(|d| d.msg.contains("wrap the token")));
+
+    // `?` on a token is fine (optional terminal).
+    let out = compile_source(&tc, "token A = \"a\"\nrule file = File: A?\n");
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    assert!(certify(&out.def).is_ok());
+
+    // Rule as separator.
+    let out = compile_source(
+        &tc,
+        "token A = \"a\"\nrule file = File: xs\nrule item = Item: A\nrule xs = item+ % item\n",
+    );
+    assert!(out.diags.iter().any(|d| d.msg.contains("separators must be tokens")));
+
+    // Generated name collides with an explicit declaration.
+    let out = compile_source(
+        &tc,
+        "token A = \"a\"\nrule file = File: item*\nrule item = Item: A\nrule item_star = X: A\n",
+    );
+    assert!(out.diags.iter().any(|d| d.msg.contains("collides")), "{:?}", out.diags);
+}
+
 #[test]
 fn rg_navigation_is_unordered() {
     let tc = RgToolchain::new();
@@ -247,6 +346,13 @@ fn rg_navigation_is_unordered() {
     let name_decl = RG_RG.find("token NAME").unwrap() + "token ".len();
     let (refs, _) = db.references("rg.rg", name_decl as u32).expect("token refs");
     assert!(refs.len() > 10, "NAME is referenced widely, got {}", refs.len());
+
+    // Sugar elements are references too: the `decl` in `rule decls =
+    // decl*` navigates to `rule decl`.
+    let elem_at = RG_RG.find("= decl*").unwrap() + "= ".len();
+    let (_, span) = db.definition("rg.rg", elem_at as u32).expect("elem resolves");
+    let decl_rule = RG_RG.find("rule decl =").unwrap() + "rule ".len();
+    assert_eq!(span.0 as usize, decl_rule, "sugar element resolves to the rule");
 
     // Completion sees every rule/token name regardless of position.
     let names = db.names_in_scope("rg.rg", 0);

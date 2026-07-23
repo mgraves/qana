@@ -459,14 +459,50 @@ reserved words are unusable as bare names in argument positions (quote
 them) — the `bracket`-vs-`@style(bracket)` collision that forced the
 `pair` keyword was itself caught by the fixed-point gate.
 
+## P5 — increment 2 (shipped): EBNF sugar on the `.rg` surface
+
+Rule-level repetition forms — `rule stmts = stmt*`, `rule kw_list =
+kw_item+`, `rule args = expr* % ","` (raku-lineage `%` for separators),
+`rule init = x?` — plus inline postfix `?`/`*`/`+` on RHS symbols (one
+shared generated helper per element/op pair: `expr?` anywhere is the
+same `expr_opt` rule). Everything desugars to the left-recursive shapes
+L4 already balances, under a DOCUMENTED naming convention
+(`Empty`/`More`, `First`/`More`, `None`/`Some`, `_ne` inners,
+`{elem}_{op}` helpers) — so the sugar is sugar, not a second grammar
+formalism: the typed AST, the balanced runs, the incremental splices,
+and the conflict counterexamples are exactly those of the equivalent
+hand-written grammar. Proven literally: the sugar gate compiles sugared
+and hand-desugared sources and asserts identical grammar values AND
+identical LR tables, with every generated repetition L4-detected.
+
+The self-hosting story deepens: `rg.rg` now uses its own sugar (eight
+list rules became one-liners; the bootstrap hand-writes the desugared
+productions under the same names, and the fixed point still holds
+exactly), and `chartlang.rg`'s `stmt*` / `expr* % ","` reproduce the
+demo grammar value-for-value (demo production names adopted the
+convention: `ArgsNone`/`ArgsNeFirst`/`ArgsNeMore` — the rename rippled
+through the drift-gated typed AST, exercising ramification once more).
+Envelope discipline for the sugar itself: repetition elements must be
+RULES (a token element would evade L4 balancing — refused with a
+wrap-it-in-a-rule hint), separators must be tokens, generated names
+collide loudly, and `?` on tokens is fine. The refusal machinery even
+caught a genuinely ambiguous grammar in this increment's own test
+suite — a possibly-empty separated list adjacent to a bare repetition —
+with a minimal counterexample (`B A · A`).
+
+Numbers hold: the sugared `chartlang.rg` is 80 lines compiling in
+235 µs (was 86 lines / 457 µs — sugar makes grammars smaller AND
+cheaper); text → certified pipeline still under 2 ms.
+
 ## Status
 
-Seven library crates + a server binary; 83 tests; the full story runs:
+Seven library crates + a server binary; 85 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + LSP, self-hosted: the grammar
 language is defined in itself, parsed by its own engine, and its files
 get the same editor intelligence as the languages it defines.**
-Remaining roadmap (per the feasibility report): EBNF sugar on the `.rg`
-surface, tree-sitter grammar emission, per-item semantic memoization /
-real salsa, and the composition/macro tiers (Part III).
+Remaining roadmap (per the feasibility report): grouping on the `.rg`
+surface (needs a typed-AST naming story), tree-sitter grammar emission,
+per-item semantic memoization / real salsa, and the composition/macro
+tiers (Part III).

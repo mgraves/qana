@@ -62,9 +62,9 @@ start file
 
 rule file = File: stmts
 
-rule stmts =
-  | StmtsEmpty:
-  | StmtsMore: stmts stmt
+// EBNF sugar: `stmt*` desugars to a left-recursive, auto-balanced list
+// (StmtsEmpty/StmtsMore). `expr* % ","` below is a comma-separated one.
+rule stmts = stmt*
 
 rule stmt =
   | LetStmt: "let" name:IDENT "=" expr ";" @def(name) @outline(name)
@@ -87,10 +87,4 @@ rule expr =
   | ParenExpr: "(" expr ")"
   | ListExpr: "[" args "]"
 
-rule args =
-  | ArgsEmpty:
-  | ArgsSome: args_ne
-
-rule args_ne =
-  | ArgFirst: expr
-  | ArgMore: args_ne "," expr
+rule args = expr* % ","

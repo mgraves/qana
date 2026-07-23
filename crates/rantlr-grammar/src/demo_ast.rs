@@ -537,7 +537,7 @@ impl<'g> ListExpr<'g> {
 /// `args` — 2 productions.
 #[derive(Clone, Copy, Debug)]
 pub enum Args<'g> {
-    ArgsEmpty(ArgsEmpty<'g>),
+    ArgsNone(ArgsNone<'g>),
     ArgsSome(ArgsSome<'g>),
 }
 
@@ -547,14 +547,14 @@ impl<'g> AstNode<'g> for Args<'g> {
             return None;
         }
         match node.prod() {
-            19 => Some(Args::ArgsEmpty(ArgsEmpty(node))),
+            19 => Some(Args::ArgsNone(ArgsNone(node))),
             20 => Some(Args::ArgsSome(ArgsSome(node))),
             _ => None,
         }
     }
     fn node(&self) -> NodeRef<'g> {
         match self {
-            Args::ArgsEmpty(x) => x.0,
+            Args::ArgsNone(x) => x.0,
             Args::ArgsSome(x) => x.0,
         }
     }
@@ -562,11 +562,11 @@ impl<'g> AstNode<'g> for Args<'g> {
 
 /// `args → ε`
 #[derive(Clone, Copy, Debug)]
-pub struct ArgsEmpty<'g>(pub NodeRef<'g>);
+pub struct ArgsNone<'g>(pub NodeRef<'g>);
 
-impl<'g> AstNode<'g> for ArgsEmpty<'g> {
+impl<'g> AstNode<'g> for ArgsNone<'g> {
     fn cast(node: NodeRef<'g>) -> Option<Self> {
-        (node.nt() == 5 && node.prod() == 19).then(|| ArgsEmpty(node))
+        (node.nt() == 5 && node.prod() == 19).then(|| ArgsNone(node))
     }
     fn node(&self) -> NodeRef<'g> {
         self.0

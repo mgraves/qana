@@ -39,6 +39,10 @@ pub struct RgIds {
     pub rparen: TokenId,
     pub lbrace: TokenId,
     pub rbrace: TokenId,
+    pub star: TokenId,
+    pub plus: TokenId,
+    pub qmark: TokenId,
+    pub percent: TokenId,
     /// Keyword ids, aligned with [`RG_KEYWORDS`].
     pub kw: Vec<TokenId>,
 }
@@ -139,6 +143,11 @@ pub fn rg_lex_grammar() -> (LexGrammar, RgIds) {
         g.add(TokenDef::new("LBRACE", DEFAULT, Pat::lit("{")).bracket(BracketKind::Brace, true));
     let rbrace =
         g.add(TokenDef::new("RBRACE", DEFAULT, Pat::lit("}")).bracket(BracketKind::Brace, false));
+    // EBNF sugar operators.
+    let star = g.add(TokenDef::new("STAR", DEFAULT, Pat::lit("*")));
+    let plus = g.add(TokenDef::new("PLUS", DEFAULT, Pat::lit("+")));
+    let qmark = g.add(TokenDef::new("QMARK", DEFAULT, Pat::lit("?")));
+    let percent = g.add(TokenDef::new("PERCENT", DEFAULT, Pat::lit("%")));
 
     let kw: Vec<TokenId> = RG_KEYWORDS
         .iter()
@@ -166,6 +175,10 @@ pub fn rg_lex_grammar() -> (LexGrammar, RgIds) {
             rparen,
             lbrace,
             rbrace,
+            star,
+            plus,
+            qmark,
+            percent,
             kw,
         },
     )
@@ -206,6 +219,20 @@ pub struct RgProds {
     pub sym_str: usize,
     pub sym_labeled: usize,
     pub sym_labeled_str: usize,
+    // EBNF sugar (P5 increment 2).
+    pub rule_star: usize,
+    pub rule_plus: usize,
+    pub rule_opt: usize,
+    pub sym_name_opt: usize,
+    pub sym_name_star: usize,
+    pub sym_name_plus: usize,
+    pub sym_str_opt: usize,
+    pub sym_str_star: usize,
+    pub sym_str_plus: usize,
+    pub elem_name: usize,
+    pub elem_str: usize,
+    pub rep_sep_none: usize,
+    pub rep_sep_some: usize,
 }
 
 pub fn rg_syn_grammar(ids: &RgIds, vocab: &Vocab) -> (SynGrammar, RgProds) {
@@ -232,6 +259,8 @@ pub fn rg_syn_grammar(ids: &RgIds, vocab: &Vocab) -> (SynGrammar, RgProds) {
     let alt = sg.nt("alt");
     let syms = sg.nt("syms");
     let sym = sg.nt("sym");
+    let elem = sg.nt("elem");
+    let rep_sep = sg.nt("rep_sep");
     sg.start = file;
     let n = |x| Sym::N(x);
 
@@ -260,6 +289,22 @@ pub fn rg_syn_grammar(ids: &RgIds, vocab: &Vocab) -> (SynGrammar, RgProds) {
         "RuleDeclBar",
         vec![k("rule"), t(ids.name), t(ids.eq), t(ids.pipe), n(alt_list)],
     );
+    // EBNF sugar rule forms: `rule R = elem* [% sep]` etc.
+    let p_rule_star = sg.prod_named(
+        decl,
+        "RuleStar",
+        vec![k("rule"), t(ids.name), t(ids.eq), n(elem), t(ids.star), n(rep_sep)],
+    );
+    let p_rule_plus = sg.prod_named(
+        decl,
+        "RulePlus",
+        vec![k("rule"), t(ids.name), t(ids.eq), n(elem), t(ids.plus), n(rep_sep)],
+    );
+    let p_rule_opt = sg.prod_named(
+        decl,
+        "RuleOpt",
+        vec![k("rule"), t(ids.name), t(ids.eq), n(elem), t(ids.qmark)],
+    );
 
     let p_token_def = sg.prod_named(
         token_def,
@@ -269,8 +314,8 @@ pub fn rg_syn_grammar(ids: &RgIds, vocab: &Vocab) -> (SynGrammar, RgProds) {
     sg.prod_named(token_defs, "TokenDefsEmpty", vec![]);
     sg.prod_named(token_defs, "TokenDefsMore", vec![n(token_defs), n(token_def)]);
 
-    sg.prod_named(kw_list, "KwFirst", vec![n(kw_item)]);
-    sg.prod_named(kw_list, "KwMore", vec![n(kw_list), n(kw_item)]);
+    sg.prod_named(kw_list, "KwListFirst", vec![n(kw_item)]);
+    sg.prod_named(kw_list, "KwListMore", vec![n(kw_list), n(kw_item)]);
     let p_kw_name = sg.prod_named(kw_item, "KwName", vec![t(ids.name)]);
     let p_kw_str = sg.prod_named(kw_item, "KwStr", vec![t(ids.string)]);
 
@@ -286,8 +331,8 @@ pub fn rg_syn_grammar(ids: &RgIds, vocab: &Vocab) -> (SynGrammar, RgProds) {
         vec![t(ids.at), t(ids.name), t(ids.lparen), n(arg_list), t(ids.rparen)],
     );
 
-    sg.prod_named(arg_list, "ArgFirst", vec![n(arg)]);
-    sg.prod_named(arg_list, "ArgMore", vec![n(arg_list), t(ids.comma), n(arg)]);
+    sg.prod_named(arg_list, "ArgListFirst", vec![n(arg)]);
+    sg.prod_named(arg_list, "ArgListMore", vec![n(arg_list), t(ids.comma), n(arg)]);
     let p_arg_name = sg.prod_named(arg, "ArgName", vec![t(ids.name)]);
     let p_arg_num = sg.prod_named(arg, "ArgNum", vec![t(ids.num)]);
     let p_arg_str = sg.prod_named(arg, "ArgStr", vec![t(ids.string)]);
@@ -301,8 +346,8 @@ pub fn rg_syn_grammar(ids: &RgIds, vocab: &Vocab) -> (SynGrammar, RgProds) {
     sg.prod_named(prec_ops, "PrecOpsFirst", vec![n(tok_ref)]);
     sg.prod_named(prec_ops, "PrecOpsMore", vec![n(prec_ops), n(tok_ref)]);
 
-    sg.prod_named(alt_list, "AltFirst", vec![n(alt)]);
-    sg.prod_named(alt_list, "AltMore", vec![n(alt_list), t(ids.pipe), n(alt)]);
+    sg.prod_named(alt_list, "AltListFirst", vec![n(alt)]);
+    sg.prod_named(alt_list, "AltListMore", vec![n(alt_list), t(ids.pipe), n(alt)]);
     let p_alt = sg.prod_named(alt, "Alt", vec![t(ids.name), t(ids.colon), n(syms), n(attrs)]);
 
     sg.prod_named(syms, "SymsEmpty", vec![]);
@@ -313,6 +358,19 @@ pub fn rg_syn_grammar(ids: &RgIds, vocab: &Vocab) -> (SynGrammar, RgProds) {
         sg.prod_named(sym, "SymLabeled", vec![t(ids.name), t(ids.colon), t(ids.name)]);
     let p_sym_labeled_str =
         sg.prod_named(sym, "SymLabeledStr", vec![t(ids.name), t(ids.colon), t(ids.string)]);
+    // Inline postfix sugar on RHS symbols.
+    let p_sym_name_opt = sg.prod_named(sym, "SymNameOpt", vec![t(ids.name), t(ids.qmark)]);
+    let p_sym_name_star = sg.prod_named(sym, "SymNameStar", vec![t(ids.name), t(ids.star)]);
+    let p_sym_name_plus = sg.prod_named(sym, "SymNamePlus", vec![t(ids.name), t(ids.plus)]);
+    let p_sym_str_opt = sg.prod_named(sym, "SymStrOpt", vec![t(ids.string), t(ids.qmark)]);
+    let p_sym_str_star = sg.prod_named(sym, "SymStrStar", vec![t(ids.string), t(ids.star)]);
+    let p_sym_str_plus = sg.prod_named(sym, "SymStrPlus", vec![t(ids.string), t(ids.plus)]);
+
+    let p_elem_name = sg.prod_named(elem, "ElemName", vec![t(ids.name)]);
+    let p_elem_str = sg.prod_named(elem, "ElemStr", vec![t(ids.string)]);
+    let p_rep_sep_none = sg.prod_named(rep_sep, "RepSepNone", vec![]);
+    let p_rep_sep_some =
+        sg.prod_named(rep_sep, "RepSepSome", vec![t(ids.percent), n(elem)]);
 
     let prods = RgProds {
         file: p_file,
@@ -347,6 +405,19 @@ pub fn rg_syn_grammar(ids: &RgIds, vocab: &Vocab) -> (SynGrammar, RgProds) {
         sym_str: p_sym_str,
         sym_labeled: p_sym_labeled,
         sym_labeled_str: p_sym_labeled_str,
+        rule_star: p_rule_star,
+        rule_plus: p_rule_plus,
+        rule_opt: p_rule_opt,
+        sym_name_opt: p_sym_name_opt,
+        sym_name_star: p_sym_name_star,
+        sym_name_plus: p_sym_name_plus,
+        sym_str_opt: p_sym_str_opt,
+        sym_str_star: p_sym_str_star,
+        sym_str_plus: p_sym_str_plus,
+        elem_name: p_elem_name,
+        elem_str: p_elem_str,
+        rep_sep_none: p_rep_sep_none,
+        rep_sep_some: p_rep_sep_some,
     };
     (sg, prods)
 }

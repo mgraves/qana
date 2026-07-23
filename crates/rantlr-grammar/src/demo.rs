@@ -304,10 +304,12 @@ pub fn demo_syn_grammar_prec(
     sg.prod_named(expr, "ParenExpr", vec![t(ids.lparen), n(expr), t(ids.rparen)]);
     sg.prod_named(expr, "ListExpr", vec![t(ids.lbracket), n(args), t(ids.rbracket)]);
 
-    sg.prod_named(args, "ArgsEmpty", vec![]);
+    // Named to match what the .rg surface's `expr* % ","` sugar
+    // generates (the text≡code gate compares production names too).
+    sg.prod_named(args, "ArgsNone", vec![]);
     sg.prod_named(args, "ArgsSome", vec![n(args_ne)]);
-    sg.prod_named(args_ne, "ArgFirst", vec![n(expr)]);
-    sg.prod_named(args_ne, "ArgMore", vec![n(args_ne), t(ids.comma), n(expr)]);
+    sg.prod_named(args_ne, "ArgsNeFirst", vec![n(expr)]);
+    sg.prod_named(args_ne, "ArgsNeMore", vec![n(args_ne), t(ids.comma), n(expr)]);
 
     sg
 }

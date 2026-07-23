@@ -1,0 +1,49 @@
+{
+  "name": "chartlang",
+  "displayName": "ChartLang (rantlr demo)",
+  "description": "Demo language served by the rantlr incremental toolchain: semantic highlighting with deltas, diagnostics from repair, outline, folding, completion, and live grammar hot-reload via chartlang.toml.",
+  "version": "0.0.1",
+  "publisher": "rantlr",
+  "private": true,
+  "engines": { "vscode": "^1.85.0" },
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "chartlang",
+        "extensions": [".cl"],
+        "aliases": ["ChartLang"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "title": "ChartLang",
+      "properties": {
+        "chartlang.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the rantlr-lsp binary (defaults to `rantlr-lsp` on PATH, or target/release/rantlr-lsp in the workspace)."
+        }
+      }
+    },
+    "semanticTokenScopes": [
+      {
+        "language": "chartlang",
+        "scopes": {
+          "keyword": ["keyword.control.chartlang"],
+          "variable": ["variable.other.chartlang"],
+          "number": ["constant.numeric.chartlang"],
+          "string": ["string.quoted.double.chartlang"],
+          "comment": ["comment.line.chartlang"],
+          "operator": ["keyword.operator.chartlang"],
+          "punctuation": ["punctuation.separator.chartlang"],
+          "bracket": ["punctuation.bracket.chartlang"]
+        }
+      }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

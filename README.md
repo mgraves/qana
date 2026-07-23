@@ -322,8 +322,49 @@ per delta** (vs 5.7M for a full resend); outline 12.5 ms; completion
 30.6 ms mid-file (states-only prefix run — per-line state checkpoints
 are the documented refinement).
 
-## Next
+## P3 — increment 2 (shipped): LSP server, VS Code extension, hot-reload
 
-The LSP server binary over these services (didChange → session.edit →
-publish deltas/diagnostics), a VS Code extension, and the grammar
-hot-reload playground — the "beautiful ways" demo.
+**`rantlr-lsp`** — a working language server (the workspace's first and
+only external dependency: `serde_json`). Hand-rolled Content-Length
+framing over stdio; a fully testable `Server::handle(msg) → messages`
+core: initialize with utf-8 position-encoding negotiation, incremental
+`didChange` (LSP ranges mapped onto line edits, terminators preserved),
+semantic tokens full **and delta with resultId anchoring** (protocol
+gate: client-side application of the returned edits must equal a fresh
+full — held), foldingRange, documentSymbol, completion, selectionRange
+(parent-chained), and publishDiagnostics from repairs (which clear when
+the document heals).
+
+**Hot-reload playground** — the "beautiful ways" demo, live: the server
+watches `chartlang.toml` (keywords + operator precedence/associativity)
+and rebuilds the ENTIRE certified pipeline on change — envelope lints,
+LR tables, conflict analysis, style legend — in milliseconds, reparses
+every open document, and asks the client to refresh tokens. Add
+`async` to the keyword list and it re-colorizes everywhere instantly.
+Remove `prec.left.2 = * /` and **the envelope refuses the reload**: the
+shift/reduce conflict — with its example-input counterexample — appears
+as an error diagnostic on `chartlang.toml`, and the last good language
+stays live. The grammar-authoring feedback loop, running in an editor.
+
+**`editor/vscode-chartlang`** — minimal extension (vanilla JS +
+`vscode-languageclient`): language registration for `.cl`, semantic
+token scope mapping, server discovery (config → workspace target/ →
+PATH), and a watcher nudging reloads on config saves. **`examples/
+playground/`** — `demo.cl` + `chartlang.toml` ready for F5.
+
+Smoke-tested end-to-end over real stdio (initialize → didOpen →
+diagnostics → tokens → shutdown/exit clean). Deliberate notes: reloads
+`Box::leak` the previous pipeline (bounded, documented; Arc-ification
+of session lifetimes is the refinement); non-utf-8 clients fall back to
+byte-counted positions (fine for ASCII demos).
+
+## Status
+
+Five library crates + a server binary; 60 tests; the full story runs:
+**one grammar value → certified lexer + LR tables + incremental
+lexing/parsing (total under errors) + lossless trees + typed AST +
+editor services + LSP — with a live, envelope-checked grammar edit
+loop.** Remaining roadmap (per the feasibility report): the textual
+`.rg` grammar surface (self-hosted), Salsa semantic layer with
+`@def/@ref` binding (P4), tree-sitter grammar emission, and the
+composition/macro tiers (Part III).

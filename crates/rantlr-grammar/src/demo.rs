@@ -35,8 +35,11 @@ pub struct DemoIds {
     pub comma: TokenId,
     pub eq: TokenId,
     pub punct: TokenId,
-    /// Keyword token ids, aligned with [`KEYWORDS`] order.
+    /// Keyword token ids, aligned with [`DemoIds::kw_names`].
     pub kw: Vec<TokenId>,
+    /// The keyword spellings this grammar instance was built with
+    /// (defaults to [`KEYWORDS`]; hot-reload builds custom sets).
+    pub kw_names: Vec<String>,
     pub b_open: TokenId,
     pub b_close: TokenId,
     pub b_content: TokenId,
@@ -47,7 +50,7 @@ pub struct DemoIds {
 
 impl DemoIds {
     pub fn kw_id(&self, word: &str) -> TokenId {
-        let idx = KEYWORDS.iter().position(|k| *k == word).expect("known keyword");
+        let idx = self.kw_names.iter().position(|k| k == word).expect("known keyword");
         self.kw[idx]
     }
     pub fn is_kw(&self, id: TokenId) -> bool {
@@ -71,6 +74,13 @@ pub const KEYWORDS: &[&str] = &[
 ];
 
 pub fn demo_grammar() -> (LexGrammar, DemoIds) {
+    demo_grammar_with_keywords(&KEYWORDS.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+}
+
+/// Hot-reload entry point: the same certified pipeline with a custom
+/// keyword set. (The syntax grammar requires `let`, `if`, `else` — the
+/// config loader validates that before calling.)
+pub fn demo_grammar_with_keywords(keywords: &[String]) -> (LexGrammar, DemoIds) {
     let mut g = LexGrammar::new("Demo", &["DEFAULT", "BLOCK"]);
     const DEFAULT: u16 = 0;
     const BLOCK: u16 = 1;
@@ -150,14 +160,14 @@ pub fn demo_grammar() -> (LexGrammar, DemoIds) {
     ));
 
     // One distinct token per keyword (specialization targets).
-    let kw: Vec<TokenId> = KEYWORDS
+    let kw: Vec<TokenId> = keywords
         .iter()
         .map(|w| g.add(TokenDef::new(&format!("KW_{}", w.to_uppercase()), DEFAULT, Pat::Never)))
         .collect();
-    g.keywords = KEYWORDS
+    g.keywords = keywords
         .iter()
         .zip(&kw)
-        .map(|(w, id)| (w.to_string(), *id))
+        .map(|(w, id)| (w.clone(), *id))
         .collect();
 
     // BLOCK mode: nested comment interior. All trivia.
@@ -199,6 +209,7 @@ pub fn demo_grammar() -> (LexGrammar, DemoIds) {
             eq,
             punct,
             kw,
+            kw_names: keywords.to_vec(),
             b_open,
             b_close,
             b_content,
@@ -214,6 +225,27 @@ pub fn demo_grammar() -> (LexGrammar, DemoIds) {
 /// braces-required `if`/`else` (no dangling-else ambiguity under
 /// canonical LR(1)) and declarative operator precedence (envelope L3).
 pub fn demo_syn_grammar(ids: &DemoIds, vocab: &Vocab) -> SynGrammar {
+    demo_syn_grammar_prec(ids, vocab, &default_prec(ids))
+}
+
+/// Default operator precedence: `+ -` level 1 left, `* /` level 2 left.
+pub fn default_prec(ids: &DemoIds) -> Vec<(TokenId, u8, Assoc)> {
+    vec![
+        (ids.plus, 1, Assoc::Left),
+        (ids.minus, 1, Assoc::Left),
+        (ids.star, 2, Assoc::Left),
+        (ids.slash, 2, Assoc::Left),
+    ]
+}
+
+/// Hot-reload entry point: same syntax grammar, custom operator
+/// precedence/associativity. Conflicting configurations are refused by
+/// `build_lr` with counterexamples — the envelope, live.
+pub fn demo_syn_grammar_prec(
+    ids: &DemoIds,
+    vocab: &Vocab,
+    prec: &[(TokenId, u8, Assoc)],
+) -> SynGrammar {
     let mut sg = SynGrammar::new("DemoSyn", vocab.names.clone());
     let t = |id: TokenId| Sym::T(id);
 
@@ -226,10 +258,9 @@ pub fn demo_syn_grammar(ids: &DemoIds, vocab: &Vocab) -> SynGrammar {
     let args_ne = sg.nt("args_ne");
     sg.start = file;
 
-    sg.set_token_prec(ids.plus, 1, Assoc::Left);
-    sg.set_token_prec(ids.minus, 1, Assoc::Left);
-    sg.set_token_prec(ids.star, 2, Assoc::Left);
-    sg.set_token_prec(ids.slash, 2, Assoc::Left);
+    for &(tok, level, assoc) in prec {
+        sg.set_token_prec(tok, level, assoc);
+    }
 
     let n = |x| Sym::N(x);
     sg.prod_named(file, "File", vec![n(stmts)]);

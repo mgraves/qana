@@ -1,0 +1,13 @@
+# ChartLang — live-reloadable language definition.
+# Edit this file while demo.cl is open: the rantlr pipeline (envelope
+# lints, LR tables, styles) rebuilds in milliseconds and open documents
+# re-colorize. Invalid definitions are REFUSED with the tool's own
+# conflict counterexample shown right here.
+
+keywords = fn let if else while for return struct enum impl match true false mut pub use
+
+# Operator precedence: higher level binds tighter.
+# Try flipping a level to `prec.right`, or delete the level-2 line and
+# watch the envelope refuse the resulting ambiguity.
+prec.left.1 = + -
+prec.left.2 = * /

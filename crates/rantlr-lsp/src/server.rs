@@ -5,6 +5,7 @@
 use crate::config::{build_pipeline, parse_config, LangConfig, Pipeline};
 use rantlr_engine::{split_lines, IncSession, Line, LineEdit};
 use rantlr_grammar::green::ancestor_spans;
+use rantlr_sem::{demo_binding_config, SemDb};
 use rantlr_services::{
     completion_at, diagnostics, folding_ranges, outline, semantic_tokens_full, FoldKind,
     SemanticTokens,
@@ -25,6 +26,7 @@ struct Doc {
 pub struct Server {
     pub pipeline: Pipeline,
     docs: HashMap<String, Doc>,
+    sem: SemDb,
     pub root: Option<PathBuf>,
     config_mtime: Option<SystemTime>,
     next_server_req: i64,
@@ -32,8 +34,11 @@ pub struct Server {
 
 impl Server {
     pub fn new() -> Self {
+        let pipeline = build_pipeline(&LangConfig::default()).expect("default config builds");
+        let sem = SemDb::new(demo_binding_config(pipeline.sg));
         Server {
-            pipeline: build_pipeline(&LangConfig::default()).expect("default config builds"),
+            pipeline,
+            sem,
             docs: HashMap::new(),
             root: None,
             config_mtime: None,
@@ -74,7 +79,10 @@ impl Server {
                     "foldingRangeProvider": true,
                     "documentSymbolProvider": true,
                     "completionProvider": {},
-                    "selectionRangeProvider": true
+                    "selectionRangeProvider": true,
+                    "definitionProvider": true,
+                    "referencesProvider": true,
+                    "renameProvider": true
                 });
                 if utf8_ok {
                     caps["positionEncoding"] = json!("utf-8");
@@ -120,6 +128,10 @@ impl Server {
                                         &self.pipeline.styles,
                                         &outcome.damage,
                                     );
+                                }
+                                if let Some(tree) = doc.session.tree() {
+                                    let tree = tree.clone();
+                                    self.sem.set_tree(&uri, tree);
                                 }
                             }
                         }
@@ -193,22 +205,93 @@ impl Server {
                 let uri = str_at(&params, "/textDocument/uri");
                 let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, json!([]))] };
                 let off = pos_to_offset(doc, params.pointer("/position").unwrap_or(&Value::Null));
-                let items: Vec<Value> = completion_at(
+                // Binding-aware names first (innermost scopes, then other
+                // files' exports), then the grammar's expected tokens.
+                let scoped = self.sem.names_in_scope(&uri, off);
+                let mut seen: std::collections::HashSet<String> = Default::default();
+                let mut items: Vec<Value> = Vec::new();
+                for (i, name) in scoped.into_iter().enumerate() {
+                    if seen.insert(name.clone()) {
+                        items.push(json!({
+                            "label": name,
+                            "kind": 6, // Variable
+                            "sortText": format!("0_{i:04}")
+                        }));
+                    }
+                }
+                let doc = self.docs.get(&uri).unwrap();
+                for i in completion_at(
                     self.pipeline.lexer,
                     &doc.session.buf,
                     self.pipeline.sg,
                     self.pipeline.tables,
                     off,
-                )
-                .into_iter()
-                .map(|i| {
-                    json!({
-                        "label": i.label,
-                        "kind": if i.is_keyword { 14 } else { 1 }
-                    })
-                })
-                .collect();
+                ) {
+                    if seen.insert(i.label.clone()) {
+                        items.push(json!({
+                            "label": i.label,
+                            "kind": if i.is_keyword { 14 } else { 1 },
+                            "sortText": format!("1_{}", i.label)
+                        }));
+                    }
+                }
                 vec![resp(id, json!(items))]
+            }
+            "textDocument/definition" => {
+                let uri = str_at(&params, "/textDocument/uri");
+                let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, Value::Null)] };
+                let off = pos_to_offset(doc, params.pointer("/position").unwrap_or(&Value::Null));
+                match self.sem.definition(&uri, off) {
+                    Some((target_uri, span)) => {
+                        let range = self.range_in(&target_uri, span);
+                        vec![resp(id, json!({"uri": target_uri, "range": range}))]
+                    }
+                    None => vec![resp(id, Value::Null)],
+                }
+            }
+            "textDocument/references" => {
+                let uri = str_at(&params, "/textDocument/uri");
+                let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, json!([]))] };
+                let off = pos_to_offset(doc, params.pointer("/position").unwrap_or(&Value::Null));
+                let include_decl = params
+                    .pointer("/context/includeDeclaration")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                match self.sem.references(&uri, off) {
+                    Some((refs, decl)) => {
+                        let mut locs: Vec<Value> = Vec::new();
+                        if include_decl {
+                            locs.push(json!({"uri": decl.0, "range": self.range_in(&decl.0, decl.1)}));
+                        }
+                        for (u, span) in refs {
+                            locs.push(json!({"uri": u, "range": self.range_in(&u, span)}));
+                        }
+                        vec![resp(id, json!(locs))]
+                    }
+                    None => vec![resp(id, json!([]))],
+                }
+            }
+            "textDocument/rename" => {
+                let uri = str_at(&params, "/textDocument/uri");
+                let new_name = str_at(&params, "/newName");
+                let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, Value::Null)] };
+                let off = pos_to_offset(doc, params.pointer("/position").unwrap_or(&Value::Null));
+                match self.sem.rename_edits(&uri, off) {
+                    Some(per_uri) => {
+                        let mut changes = serde_json::Map::new();
+                        for (u, spans) in per_uri {
+                            let edits: Vec<Value> = spans
+                                .into_iter()
+                                .map(|span| {
+                                    json!({"range": self.range_in(&u, span), "newText": new_name})
+                                })
+                                .collect();
+                            changes.insert(u, json!(edits));
+                        }
+                        vec![resp(id, json!({"changes": changes}))]
+                    }
+                    None => vec![resp(id, Value::Null)],
+                }
             }
             "textDocument/selectionRange" => {
                 let uri = str_at(&params, "/textDocument/uri");
@@ -251,6 +334,7 @@ impl Server {
         let session =
             IncSession::new(self.pipeline.lexer, self.pipeline.sg, self.pipeline.tables, text)
                 .expect("total parsing");
+        self.sem.set_tree(uri, session.tree().expect("total").clone());
         let cache = semantic_tokens_full(self.pipeline.lexer, &session.buf, &self.pipeline.styles);
         self.docs.insert(
             uri.to_string(),
@@ -259,9 +343,16 @@ impl Server {
         self.publish_diagnostics(uri)
     }
 
-    fn publish_diagnostics(&self, uri: &str) -> Vec<Value> {
+    fn range_in(&self, uri: &str, span: (u32, u32)) -> Value {
+        match self.docs.get(uri) {
+            Some(doc) => range_json(doc, span),
+            None => json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}),
+        }
+    }
+
+    fn publish_diagnostics(&mut self, uri: &str) -> Vec<Value> {
         let Some(doc) = self.docs.get(uri) else { return Vec::new() };
-        let diags: Vec<Value> = diagnostics(
+        let mut diags: Vec<Value> = diagnostics(
             self.pipeline.lexer,
             &doc.session.buf,
             self.pipeline.sg,
@@ -272,6 +363,16 @@ impl Server {
             json!({"range": range_json(doc, d.span), "severity": 1, "message": d.message})
         })
         .collect();
+        // Semantic layer: unresolved variable reads (warnings).
+        let unresolved = self.sem.unresolved(uri);
+        let doc = self.docs.get(uri).unwrap();
+        for (name, span) in unresolved {
+            diags.push(json!({
+                "range": range_json(doc, span),
+                "severity": 2,
+                "message": format!("cannot find `{name}`")
+            }));
+        }
         vec![notif(
             "textDocument/publishDiagnostics",
             json!({"uri": uri, "diagnostics": diags}),
@@ -306,6 +407,8 @@ impl Server {
             }
             Ok(pipeline) => {
                 self.pipeline = pipeline;
+                // New grammar ⇒ new binding config; trees repopulate below.
+                self.sem = SemDb::new(demo_binding_config(self.pipeline.sg));
                 let uris: Vec<String> = self.docs.keys().cloned().collect();
                 let mut out = Vec::new();
                 for uri in uris {

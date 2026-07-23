@@ -243,3 +243,71 @@ fn filetime_touch(path: &std::path::Path) {
     std::thread::sleep(std::time::Duration::from_millis(20));
     std::fs::write(path, &content).unwrap();
 }
+
+#[test]
+fn definition_references_rename_across_open_files() {
+    let mut s = Server::new();
+    init(&mut s);
+    // Two open documents; b references a's export.
+    s.handle(&json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": "file:///a.cl", "text": "let shared = 1;\nlet local = shared;\n", "version": 1}}
+    }));
+    let out_b = s.handle(&json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": "file:///b.cl", "text": "let mirror = shared;\nlet bad = nothere;\n", "version": 1}}
+    }));
+
+    // Unresolved-variable warning on b (severity 2), repairs would be 1.
+    let diags = out_b
+        .iter()
+        .find(|m| m["method"] == "textDocument/publishDiagnostics")
+        .and_then(|m| m.pointer("/params/diagnostics"))
+        .and_then(|d| d.as_array())
+        .unwrap();
+    assert!(diags
+        .iter()
+        .any(|d| d["severity"] == 2 && d["message"].as_str().unwrap().contains("nothere")));
+
+    // Definition of `shared` from b lands in a.
+    let def = s.handle(&json!({
+        "jsonrpc": "2.0", "id": 30, "method": "textDocument/definition",
+        "params": {"textDocument": {"uri": "file:///b.cl"}, "position": {"line": 0, "character": 14}}
+    }));
+    assert_eq!(def[0]["result"]["uri"], "file:///a.cl");
+    assert_eq!(def[0]["result"]["range"]["start"]["line"], 0);
+
+    // References from a's def site include b's use.
+    let refs = s.handle(&json!({
+        "jsonrpc": "2.0", "id": 31, "method": "textDocument/references",
+        "params": {"textDocument": {"uri": "file:///a.cl"}, "position": {"line": 0, "character": 5},
+                   "context": {"includeDeclaration": true}}
+    }));
+    let uris: Vec<&str> = refs[0]["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["uri"].as_str().unwrap())
+        .collect();
+    assert!(uris.contains(&"file:///a.cl") && uris.contains(&"file:///b.cl"));
+
+    // Rename produces a cross-file WorkspaceEdit.
+    let ren = s.handle(&json!({
+        "jsonrpc": "2.0", "id": 32, "method": "textDocument/rename",
+        "params": {"textDocument": {"uri": "file:///a.cl"}, "position": {"line": 0, "character": 5},
+                   "newName": "renamed"}
+    }));
+    let changes = ren[0].pointer("/result/changes").unwrap().as_object().unwrap();
+    assert!(changes.contains_key("file:///a.cl") && changes.contains_key("file:///b.cl"));
+    assert_eq!(changes["file:///a.cl"].as_array().unwrap().len(), 2, "def + local ref");
+
+    // Completion inside b offers `shared` (a's export) ranked before keywords.
+    let comp = s.handle(&json!({
+        "jsonrpc": "2.0", "id": 33, "method": "textDocument/completion",
+        "params": {"textDocument": {"uri": "file:///b.cl"}, "position": {"line": 1, "character": 10}}
+    }));
+    let items = comp[0]["result"].as_array().unwrap();
+    let shared = items.iter().find(|i| i["label"] == "shared").expect("export offered");
+    assert_eq!(shared["kind"], 6);
+    assert!(shared["sortText"].as_str().unwrap().starts_with("0_"));
+}

@@ -358,13 +358,46 @@ diagnostics → tokens → shutdown/exit clean). Deliberate notes: reloads
 of session lifetimes is the refinement); non-utf-8 clients fall back to
 byte-counted positions (fine for ASCII demos).
 
+## P4 — increment 1 (shipped): the semantic layer
+
+`rantlr-sem` — envelope commitments L8 (binding as data) and L9
+(signature/body firewalls), running. The architecture is **salsa's** —
+revisions, memoized queries, early cutoff by output comparison
+("backdating": an unchanged signature keeps its old change-revision so
+dependents stay valid) — as a minimal transparent engine (the query DAG
+is tree → symbols → signature → resolution; swapping in the salsa crate
+is the documented refinement as the workspace model grows).
+
+Binding is declarative — a `BindingConfig` of (nonterminal, production)
+entries: `LetStmt` defines, `NameRef`/callees reference, `Block` scopes
+— the `@def/@ref/@scope` annotations as data. Sequential
+definition-before-use scoping with block shadowing; a file's exported
+**signature** = its sorted top-level definition names; cross-file
+resolution goes only through signatures. Services derived: go-to-def,
+find-references, rename (cross-file WorkspaceEdit, verified by
+re-parsing the edited output), unresolved-variable warnings, and
+binding-aware completion (innermost scope first, then other files'
+exports, ranked ahead of grammar tokens via sortText). All wired into
+the LSP server (definition/references/rename capabilities + enriched
+completion + merged diagnostics), with cross-file protocol tests.
+
+**The firewall gate, proven by counters and at scale:** editing a block
+body in a 100k-line file recomputes only that file's resolution; the
+second file's answer returns memoized in **1.6 µs** (recompute count: 1).
+Editing an exported name recomputes both — and only then. Numbers:
+symbols 11.2 ms (40k defs / 160k refs / 10k scopes), resolve 8.25 ms
+(after an honest catch: the naive resolver measured 5.1 s at scale —
+name-indexing fixed it, 620×). Deliberate scope notes: resolution
+recomputes whole-file on any tree change (per-item memoization is the
+next granularity); `names_in_scope` is demo-grade positional.
+
 ## Status
 
-Five library crates + a server binary; 60 tests; the full story runs:
+Six library crates + a server binary; 68 tests; the full story runs:
 **one grammar value → certified lexer + LR tables + incremental
 lexing/parsing (total under errors) + lossless trees + typed AST +
-editor services + LSP — with a live, envelope-checked grammar edit
-loop.** Remaining roadmap (per the feasibility report): the textual
-`.rg` grammar surface (self-hosted), Salsa semantic layer with
-`@def/@ref` binding (P4), tree-sitter grammar emission, and the
-composition/macro tiers (Part III).
+editor services + semantic binding + LSP — with a live, envelope-checked
+grammar edit loop and cross-file IntelliSense.** Remaining roadmap (per
+the feasibility report): the textual `.rg` grammar surface (self-hosted),
+tree-sitter grammar emission, per-item semantic memoization / real salsa,
+and the composition/macro tiers (Part III).

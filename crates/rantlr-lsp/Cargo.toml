@@ -9,6 +9,7 @@ description = "P3: LSP server over the rantlr incremental toolchain, with live g
 rantlr-grammar = { path = "../rantlr-grammar" }
 rantlr-engine = { path = "../rantlr-engine" }
 rantlr-services = { path = "../rantlr-services" }
+rantlr-sem = { path = "../rantlr-sem" }
 serde_json = "1"
 
 [[bin]]

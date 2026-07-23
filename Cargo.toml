@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rantlr-lex", "crates/rantlr-grammar", "crates/rantlr-engine", "crates/rantlr-services", "crates/rantlr-lsp", "crates/rantlr-sem"]
+members = ["crates/rantlr-lex", "crates/rantlr-grammar", "crates/rantlr-engine", "crates/rantlr-services", "crates/rantlr-lsp", "crates/rantlr-sem", "crates/rantlr-rg"]
 
 [workspace.package]
 edition = "2021"

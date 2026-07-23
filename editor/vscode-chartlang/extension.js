@@ -26,10 +26,10 @@ function activate(context) {
     "ChartLang (rantlr)",
     { command, transport: TransportKind.stdio },
     {
-      documentSelector: [{ language: "chartlang" }],
-      // Let the server see chartlang.toml saves quickly (it also polls).
+      documentSelector: [{ language: "chartlang" }, { language: "rantlr-grammar" }],
+      // Let the server see language-definition saves quickly (it also polls).
       synchronize: {
-        fileEvents: vscode.workspace.createFileSystemWatcher("**/chartlang.toml"),
+        fileEvents: vscode.workspace.createFileSystemWatcher("**/chartlang.{rg,toml}"),
       },
     }
   );

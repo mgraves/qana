@@ -33,6 +33,9 @@ pub struct Conflict {
     /// Example input: terminal names reaching the conflict state, then
     /// `·`, then the lookahead.
     pub example: String,
+    /// User-grammar production indices involved in the conflict (for
+    /// mapping the refusal back to grammar-source spans).
+    pub prods: Vec<u16>,
 }
 
 #[derive(Debug)]
@@ -56,10 +59,30 @@ pub struct LrTables {
     pub lists: std::collections::HashMap<u16, ListShape>,
 }
 
+/// One symbol of a list's repetition unit, for splice-alignment checks:
+/// either the element nonterminal or a specific separator terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnitSym {
+    Elem,
+    Tok(TokenId),
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ListShape {
     pub cons: u16,
     pub seed: u16,
+    /// The element nonterminal (the one NT in the cons repetition).
+    pub elem: u16,
+    /// First symbol of the cons repetition α (in `L → L α`) — what a
+    /// CONTINUATION of the list must begin with.
+    pub alpha_first: UnitSym,
+    /// Last symbol of α — what any whole number of repetitions ends
+    /// with. A reused run may only splice associatively if it ends here
+    /// (Wagner §7: the LR state after the splice assumes whole units).
+    pub alpha_last: UnitSym,
+    /// First symbol of the seed production (None for an ε seed) — what
+    /// the FIRST piece of a list must begin with.
+    pub seed_first: Option<UnitSym>,
 }
 
 fn detect_lists(g: &SynGrammar, fragile: &[bool]) -> std::collections::HashMap<u16, ListShape> {
@@ -88,7 +111,26 @@ fn detect_lists(g: &SynGrammar, fragile: &[bool]) -> std::collections::HashMap<u
         if fragile[cons as usize] || fragile[seed as usize] {
             continue;
         }
-        out.insert(nt, ListShape { cons, seed });
+        let alpha = &g.prods[cons as usize].rhs[1..];
+        let unit = |s: &Sym| match s {
+            Sym::N(_) => UnitSym::Elem,
+            Sym::T(t) => UnitSym::Tok(*t),
+        };
+        let elem = alpha
+            .iter()
+            .find_map(|s| match s {
+                Sym::N(n) => Some(*n),
+                Sym::T(_) => None,
+            })
+            .expect("cons has exactly one element NT");
+        out.insert(nt, ListShape {
+            cons,
+            seed,
+            elem,
+            alpha_first: unit(&alpha[0]),
+            alpha_last: unit(alpha.last().unwrap()),
+            seed_first: g.prods[seed as usize].rhs.first().map(|s| unit(s)),
+        });
     }
     out
 }
@@ -412,6 +454,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
                         }
                         _ => {
                             let mut item_set: BTreeSet<String> = BTreeSet::new();
+                            let mut prod_set: BTreeSet<u16> = BTreeSet::new();
                             for &it in set {
                                 let (q, d, l) = it;
                                 let r = &aug[q as usize].1;
@@ -420,6 +463,9 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
                                     (d as usize) < r.len() && r[d as usize] == Sym::T(la);
                                 if reduce_side || shift_side {
                                     item_set.insert(item_display(g, &aug, it));
+                                    if q > 0 {
+                                        prod_set.insert(q - 1);
+                                    }
                                 }
                             }
                             let items: Vec<String> = item_set.into_iter().collect();
@@ -429,6 +475,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
                                 kind: "shift/reduce",
                                 items,
                                 example: example_for(si as u16, la),
+                                prods: prod_set.into_iter().collect(),
                             });
                         }
                     }
@@ -441,12 +488,16 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
                         })
                         .map(|&it| item_display(g, &aug, it))
                         .collect();
+                    let mut prods: Vec<u16> = vec![p - 1, other];
+                    prods.sort_unstable();
+                    prods.dedup();
                     conflicts.push(Conflict {
                         state: si as u16,
                         lookahead: la,
                         kind: "reduce/reduce",
                         items,
                         example: example_for(si as u16, la),
+                        prods,
                     });
                 }
                 Some(_) => {}

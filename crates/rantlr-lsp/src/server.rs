@@ -1,11 +1,21 @@
 //! The LSP server core: a pure `handle(message) -> outgoing messages`
 //! state machine over the incremental sessions — fully testable without
 //! stdio. Transport lives in main.rs.
+//!
+//! Two languages are served: the TARGET language (`.cl` documents,
+//! pipeline hot-reloaded from `chartlang.rg` — or legacy
+//! `chartlang.toml`), and the `.rg` grammar surface ITSELF (`.rg`
+//! documents get rantlr-powered highlighting, outline, navigation, and
+//! live envelope diagnostics — the dogfood loop closed).
 
-use crate::config::{build_pipeline, parse_config, LangConfig, Pipeline};
+use crate::config::{
+    build_pipeline, build_pipeline_rg, parse_config, rg_service_pipeline, LangConfig, Pipeline,
+};
 use rantlr_engine::{split_lines, IncSession, Line, LineEdit};
 use rantlr_grammar::green::ancestor_spans;
-use rantlr_sem::{demo_binding_config, SemDb};
+use rantlr_rg::compile::{certify, compile, RgDiag};
+use rantlr_rg::RgToolchain;
+use rantlr_sem::SemDb;
 use rantlr_services::{
     completion_at, diagnostics, folding_ranges, outline, semantic_tokens_full, FoldKind,
     SemanticTokens,
@@ -15,7 +25,16 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocLang {
+    /// The hot-reloadable target language.
+    Target,
+    /// A `.rg` grammar file.
+    Rg,
+}
+
 struct Doc {
+    lang: DocLang,
     session: IncSession<'static>,
     cache: SemanticTokens,
     /// Snapshot behind the last published resultId (delta anchor).
@@ -25,8 +44,11 @@ struct Doc {
 
 pub struct Server {
     pub pipeline: Pipeline,
+    rg_pipe: Pipeline,
+    tc: &'static RgToolchain,
     docs: HashMap<String, Doc>,
     sem: SemDb,
+    rg_sem: SemDb,
     pub root: Option<PathBuf>,
     config_mtime: Option<SystemTime>,
     next_server_req: i64,
@@ -35,10 +57,16 @@ pub struct Server {
 impl Server {
     pub fn new() -> Self {
         let pipeline = build_pipeline(&LangConfig::default()).expect("default config builds");
-        let sem = SemDb::new(demo_binding_config(pipeline.sg));
+        let tc: &'static RgToolchain = Box::leak(Box::new(RgToolchain::new()));
+        let rg_pipe = rg_service_pipeline(tc);
+        let sem = SemDb::new(pipeline.binding.clone());
+        let rg_sem = SemDb::new(rg_pipe.binding.clone());
         Server {
             pipeline,
+            rg_pipe,
+            tc,
             sem,
+            rg_sem,
             docs: HashMap::new(),
             root: None,
             config_mtime: None,
@@ -46,8 +74,33 @@ impl Server {
         }
     }
 
+    /// The language-definition file: `chartlang.rg` preferred,
+    /// `chartlang.toml` as the legacy fallback.
     fn config_path(&self) -> Option<PathBuf> {
-        self.root.as_ref().map(|r| r.join("chartlang.toml"))
+        let root = self.root.as_ref()?;
+        let rg = root.join("chartlang.rg");
+        if rg.exists() {
+            return Some(rg);
+        }
+        Some(root.join("chartlang.toml"))
+    }
+
+    fn pipe_of(&self, lang: DocLang) -> &Pipeline {
+        match lang {
+            DocLang::Target => &self.pipeline,
+            DocLang::Rg => &self.rg_pipe,
+        }
+    }
+
+    fn doc_lang(&self, uri: &str) -> DocLang {
+        self.docs.get(uri).map(|d| d.lang).unwrap_or(DocLang::Target)
+    }
+
+    fn sem_of(&mut self, lang: DocLang) -> &mut SemDb {
+        match lang {
+            DocLang::Target => &mut self.sem,
+            DocLang::Rg => &mut self.rg_sem,
+        }
     }
 
     /// Handle one incoming JSON-RPC message; returns outgoing messages
@@ -94,7 +147,13 @@ impl Server {
             "textDocument/didOpen" => {
                 let uri = str_at(&params, "/textDocument/uri");
                 let text = str_at(&params, "/textDocument/text");
-                let mut out = self.open_doc(&uri, &text);
+                let lang_id = str_at(&params, "/textDocument/languageId");
+                let lang = if lang_id == "rantlr-grammar" || uri.ends_with(".rg") {
+                    DocLang::Rg
+                } else {
+                    DocLang::Target
+                };
+                let mut out = self.open_doc(&uri, &text, lang);
                 out.extend(self.check_reload());
                 out
             }
@@ -110,28 +169,31 @@ impl Server {
                     let text = str_at(ch, "/text");
                     match ch.get("range") {
                         None => {
-                            // Full-content sync fallback.
-                            out.extend(self.open_doc(&uri, &text));
+                            let lang = self.doc_lang(&uri);
+                            out.extend(self.open_doc(&uri, &text, lang));
                             continue;
                         }
                         Some(range) => {
+                            let lang = self.doc_lang(&uri);
+                            let pipe = match lang {
+                                DocLang::Target => &self.pipeline,
+                                DocLang::Rg => &self.rg_pipe,
+                            };
                             if let Some(doc) = self.docs.get_mut(&uri) {
                                 let edit = range_to_line_edit(doc, range, &text);
-                                if let Ok(outcome) = doc.session.edit(
-                                    self.pipeline.sg,
-                                    self.pipeline.tables,
-                                    &[edit],
-                                ) {
+                                if let Ok(outcome) =
+                                    doc.session.edit(pipe.sg, pipe.tables, &[edit])
+                                {
                                     doc.cache.update(
-                                        self.pipeline.lexer,
+                                        pipe.lexer,
                                         &doc.session.buf,
-                                        &self.pipeline.styles,
+                                        &pipe.styles,
                                         &outcome.damage,
                                     );
                                 }
                                 if let Some(tree) = doc.session.tree() {
                                     let tree = tree.clone();
-                                    self.sem.set_tree(&uri, tree);
+                                    self.sem_of(lang).set_tree(&uri, tree);
                                 }
                             }
                         }
@@ -172,7 +234,8 @@ impl Server {
             "textDocument/foldingRange" => {
                 let uri = str_at(&params, "/textDocument/uri");
                 let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, json!([]))] };
-                let folds: Vec<Value> = folding_ranges(self.pipeline.lexer, &doc.session.buf)
+                let pipe = self.pipe_of(doc.lang);
+                let folds: Vec<Value> = folding_ranges(pipe.lexer, &doc.session.buf)
                     .into_iter()
                     .map(|f| {
                         json!({
@@ -188,12 +251,13 @@ impl Server {
                 let uri = str_at(&params, "/textDocument/uri");
                 let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, json!([]))] };
                 let Some(tree) = doc.session.tree() else { return vec![resp(id, json!([]))] };
-                let syms: Vec<Value> = outline(tree, &self.pipeline.outline_cfg)
+                let pipe = self.pipe_of(doc.lang);
+                let syms: Vec<Value> = outline(tree, &pipe.outline_cfg)
                     .into_iter()
                     .map(|s| {
                         json!({
                             "name": s.name,
-                            "kind": 13, // Variable
+                            "kind": symbol_kind(s.kind),
                             "range": range_json(doc, s.span),
                             "selectionRange": range_json(doc, s.selection)
                         })
@@ -204,10 +268,11 @@ impl Server {
             "textDocument/completion" => {
                 let uri = str_at(&params, "/textDocument/uri");
                 let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, json!([]))] };
+                let lang = doc.lang;
                 let off = pos_to_offset(doc, params.pointer("/position").unwrap_or(&Value::Null));
                 // Binding-aware names first (innermost scopes, then other
                 // files' exports), then the grammar's expected tokens.
-                let scoped = self.sem.names_in_scope(&uri, off);
+                let scoped = self.sem_of(lang).names_in_scope(&uri, off);
                 let mut seen: std::collections::HashSet<String> = Default::default();
                 let mut items: Vec<Value> = Vec::new();
                 for (i, name) in scoped.into_iter().enumerate() {
@@ -220,13 +285,8 @@ impl Server {
                     }
                 }
                 let doc = self.docs.get(&uri).unwrap();
-                for i in completion_at(
-                    self.pipeline.lexer,
-                    &doc.session.buf,
-                    self.pipeline.sg,
-                    self.pipeline.tables,
-                    off,
-                ) {
+                let pipe = self.pipe_of(lang);
+                for i in completion_at(pipe.lexer, &doc.session.buf, pipe.sg, pipe.tables, off) {
                     if seen.insert(i.label.clone()) {
                         items.push(json!({
                             "label": i.label,
@@ -240,8 +300,9 @@ impl Server {
             "textDocument/definition" => {
                 let uri = str_at(&params, "/textDocument/uri");
                 let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, Value::Null)] };
+                let lang = doc.lang;
                 let off = pos_to_offset(doc, params.pointer("/position").unwrap_or(&Value::Null));
-                match self.sem.definition(&uri, off) {
+                match self.sem_of(lang).definition(&uri, off) {
                     Some((target_uri, span)) => {
                         let range = self.range_in(&target_uri, span);
                         vec![resp(id, json!({"uri": target_uri, "range": range}))]
@@ -252,12 +313,13 @@ impl Server {
             "textDocument/references" => {
                 let uri = str_at(&params, "/textDocument/uri");
                 let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, json!([]))] };
+                let lang = doc.lang;
                 let off = pos_to_offset(doc, params.pointer("/position").unwrap_or(&Value::Null));
                 let include_decl = params
                     .pointer("/context/includeDeclaration")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                match self.sem.references(&uri, off) {
+                match self.sem_of(lang).references(&uri, off) {
                     Some((refs, decl)) => {
                         let mut locs: Vec<Value> = Vec::new();
                         if include_decl {
@@ -275,8 +337,9 @@ impl Server {
                 let uri = str_at(&params, "/textDocument/uri");
                 let new_name = str_at(&params, "/newName");
                 let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, Value::Null)] };
+                let lang = doc.lang;
                 let off = pos_to_offset(doc, params.pointer("/position").unwrap_or(&Value::Null));
-                match self.sem.rename_edits(&uri, off) {
+                match self.sem_of(lang).rename_edits(&uri, off) {
                     Some(per_uri) => {
                         let mut changes = serde_json::Map::new();
                         for (u, spans) in per_uri {
@@ -314,9 +377,6 @@ impl Server {
                         let mut node = Value::Null;
                         for span in spans {
                             let mut v = json!({"range": range_json(doc, span)});
-                            if !node.is_null() {
-                                // previous (wider) becomes parent
-                            }
                             v["parent"] = node;
                             node = v;
                         }
@@ -330,15 +390,16 @@ impl Server {
         }
     }
 
-    fn open_doc(&mut self, uri: &str, text: &str) -> Vec<Value> {
-        let session =
-            IncSession::new(self.pipeline.lexer, self.pipeline.sg, self.pipeline.tables, text)
-                .expect("total parsing");
-        self.sem.set_tree(uri, session.tree().expect("total").clone());
-        let cache = semantic_tokens_full(self.pipeline.lexer, &session.buf, &self.pipeline.styles);
+    fn open_doc(&mut self, uri: &str, text: &str, lang: DocLang) -> Vec<Value> {
+        let pipe = self.pipe_of(lang);
+        let session = IncSession::new(pipe.lexer, pipe.sg, pipe.tables, text)
+            .expect("total parsing");
+        let cache = semantic_tokens_full(pipe.lexer, &session.buf, &pipe.styles);
+        let tree = session.tree().expect("total").clone();
+        self.sem_of(lang).set_tree(uri, tree);
         self.docs.insert(
             uri.to_string(),
-            Doc { session, cache, published: None, result_counter: 0 },
+            Doc { lang, session, cache, published: None, result_counter: 0 },
         );
         self.publish_diagnostics(uri)
     }
@@ -352,10 +413,12 @@ impl Server {
 
     fn publish_diagnostics(&mut self, uri: &str) -> Vec<Value> {
         let Some(doc) = self.docs.get(uri) else { return Vec::new() };
+        let lang = doc.lang;
+        let pipe = self.pipe_of(lang);
         let mut diags: Vec<Value> = diagnostics(
-            self.pipeline.lexer,
+            pipe.lexer,
             &doc.session.buf,
-            self.pipeline.sg,
+            pipe.sg,
             &doc.session.last_repairs,
         )
         .into_iter()
@@ -363,15 +426,42 @@ impl Server {
             json!({"range": range_json(doc, d.span), "severity": 1, "message": d.message})
         })
         .collect();
-        // Semantic layer: unresolved variable reads (warnings).
-        let unresolved = self.sem.unresolved(uri);
-        let doc = self.docs.get(uri).unwrap();
-        for (name, span) in unresolved {
-            diags.push(json!({
-                "range": range_json(doc, span),
-                "severity": 2,
-                "message": format!("cannot find `{name}`")
-            }));
+        match lang {
+            DocLang::Target => {
+                // Semantic layer: unresolved variable reads (warnings).
+                let unresolved = self.sem.unresolved(uri);
+                let doc = self.docs.get(uri).unwrap();
+                for (name, span) in unresolved {
+                    diags.push(json!({
+                        "range": range_json(doc, span),
+                        "severity": 2,
+                        "message": format!("cannot find `{name}`")
+                    }));
+                }
+            }
+            DocLang::Rg => {
+                // Live grammar authoring: compile the CURRENT tree and,
+                // when it compiles, run the envelope. Refusals point at
+                // the offending construct while you type.
+                if doc.session.last_repairs.is_empty() {
+                    if let Some(tree) = doc.session.tree() {
+                        let (def, cdiags) = compile(tree, &self.tc.prods);
+                        let mut all = cdiags;
+                        if all.is_empty() {
+                            if let Err(e) = certify(&def) {
+                                all = e;
+                            }
+                        }
+                        for d in all {
+                            diags.push(json!({
+                                "range": range_json(doc, d.span),
+                                "severity": d.severity,
+                                "message": d.msg
+                            }));
+                        }
+                    }
+                }
+            }
         }
         vec![notif(
             "textDocument/publishDiagnostics",
@@ -379,11 +469,11 @@ impl Server {
         )]
     }
 
-    /// The hot-reload heartbeat: if chartlang.toml changed, rebuild the
-    /// WHOLE pipeline. Bad configs are refused with the tool's own
-    /// counterexamples as diagnostics on the config file; good ones
-    /// rebuild every open document and ask the client to re-request
-    /// semantic tokens.
+    /// The hot-reload heartbeat: if the language definition changed,
+    /// rebuild the WHOLE pipeline. Bad definitions are refused with the
+    /// tool's own counterexamples as diagnostics on the definition file
+    /// (span-accurate for `.rg`); good ones rebuild every open target
+    /// document and ask the client to re-request semantic tokens.
     pub fn check_reload(&mut self) -> Vec<Value> {
         let Some(path) = self.config_path() else { return Vec::new() };
         let Ok(meta) = std::fs::metadata(&path) else { return Vec::new() };
@@ -393,32 +483,56 @@ impl Server {
         }
         self.config_mtime = mtime;
         let config_uri = format!("file://{}", path.display());
+        let config_open = self.docs.contains_key(&config_uri);
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        match parse_config(&text).and_then(|cfg| build_pipeline(&cfg)) {
-            Err(msg) => {
+        let is_rg = path.extension().is_some_and(|e| e == "rg");
+        let built: Result<Pipeline, Vec<RgDiag>> = if is_rg {
+            build_pipeline_rg(self.tc, &text)
+        } else {
+            parse_config(&text)
+                .and_then(|cfg| build_pipeline(&cfg).map_err(|e| e))
+                .map_err(|msg| vec![RgDiag { span: (0, 1), msg, severity: 1 }])
+        };
+        match built {
+            Err(diags) => {
+                if config_open {
+                    // The open-document path owns diagnostics for it.
+                    return Vec::new();
+                }
+                let list: Vec<Value> = diags
+                    .into_iter()
+                    .map(|d| {
+                        json!({
+                            "range": range_in_text(&text, d.span),
+                            "severity": d.severity,
+                            "message": d.msg
+                        })
+                    })
+                    .collect();
                 vec![notif(
                     "textDocument/publishDiagnostics",
-                    json!({"uri": config_uri, "diagnostics": [{
-                        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
-                        "severity": 1,
-                        "message": msg
-                    }]}),
+                    json!({"uri": config_uri, "diagnostics": list}),
                 )]
             }
             Ok(pipeline) => {
                 self.pipeline = pipeline;
                 // New grammar ⇒ new binding config; trees repopulate below.
-                self.sem = SemDb::new(demo_binding_config(self.pipeline.sg));
-                let uris: Vec<String> = self.docs.keys().cloned().collect();
+                self.sem = SemDb::new(self.pipeline.binding.clone());
+                let uris: Vec<(String, DocLang)> =
+                    self.docs.iter().map(|(u, d)| (u.clone(), d.lang)).collect();
                 let mut out = Vec::new();
-                for uri in uris {
-                    let text = self.docs[&uri].session.buf.reproduce();
-                    out.extend(self.open_doc(&uri, &text));
+                for (uri, lang) in uris {
+                    if lang == DocLang::Target {
+                        let text = self.docs[&uri].session.buf.reproduce();
+                        out.extend(self.open_doc(&uri, &text, lang));
+                    }
                 }
-                out.push(notif(
-                    "textDocument/publishDiagnostics",
-                    json!({"uri": config_uri, "diagnostics": []}),
-                ));
+                if !config_open {
+                    out.push(notif(
+                        "textDocument/publishDiagnostics",
+                        json!({"uri": config_uri, "diagnostics": []}),
+                    ));
+                }
                 self.next_server_req += 1;
                 out.push(json!({
                     "jsonrpc": "2.0",
@@ -446,6 +560,18 @@ fn notif(method: &str, params: Value) -> Value {
 
 fn str_at(v: &Value, ptr: &str) -> String {
     v.pointer(ptr).and_then(|s| s.as_str()).unwrap_or("").to_string()
+}
+
+/// LSP SymbolKind numbers for the outline kinds grammars may declare.
+fn symbol_kind(kind: &str) -> u32 {
+    match kind {
+        "function" => 12,
+        "struct" => 23,
+        "module" => 2,
+        "constant" => 14,
+        "class" => 5,
+        _ => 13, // variable
+    }
 }
 
 fn line_byte_start(doc: &Doc, line: usize) -> u32 {
@@ -479,6 +605,29 @@ fn offset_to_pos(doc: &Doc, offset: u32) -> Value {
 
 fn range_json(doc: &Doc, span: (u32, u32)) -> Value {
     json!({"start": offset_to_pos(doc, span.0), "end": offset_to_pos(doc, span.1)})
+}
+
+/// Byte span → LSP range within a plain text (for files not open as
+/// documents, e.g. the config file during reload).
+fn range_in_text(text: &str, span: (u32, u32)) -> Value {
+    let pos = |off: u32| {
+        let off = (off as usize).min(text.len());
+        let mut line = 0usize;
+        let mut col = 0usize;
+        for (i, b) in text.bytes().enumerate() {
+            if i == off {
+                break;
+            }
+            if b == b'\n' {
+                line += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        json!({"line": line, "character": col})
+    };
+    json!({"start": pos(span.0), "end": pos(span.1)})
 }
 
 /// Map an LSP range+text change to a whole-line edit: replace the touched

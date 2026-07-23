@@ -244,6 +244,139 @@ fn filetime_touch(path: &std::path::Path) {
     std::fs::write(path, &content).unwrap();
 }
 
+const CHARTLANG_RG: &str = include_str!("../../rantlr-rg/chartlang.rg");
+
+/// `.rg` documents are served by the grammar surface's OWN pipeline:
+/// highlighting (including the regexp class), outline of rules and
+/// tokens, forward-reference navigation, and live envelope diagnostics
+/// with spans — the dogfood loop at the protocol level.
+#[test]
+fn rg_documents_get_grammar_services() {
+    let mut s = Server::new();
+    init(&mut s);
+    let g_uri = "file:///g.rg";
+    let text = "token A = /a+/ @style(number)\nrule file = File: items\nrule items =\n  | ItemsEmpty:\n  | ItemsMore: items A\n";
+    s.handle(&json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": g_uri, "languageId": "rantlr-grammar", "text": text, "version": 1}}
+    }));
+
+    // Semantic tokens include the regexp class for the pattern literal.
+    let toks = s.handle(&json!({
+        "jsonrpc": "2.0", "id": 40, "method": "textDocument/semanticTokens/full",
+        "params": {"textDocument": {"uri": g_uri}}
+    }));
+    let data: Vec<u64> = toks[0].pointer("/result/data").unwrap().as_array().unwrap()
+        .iter().map(|v| v.as_u64().unwrap()).collect();
+    assert!(!data.is_empty());
+    let regexp_idx = 8; // LEGEND position of "regexp"
+    assert!(
+        data.chunks(5).any(|q| q[3] == regexp_idx),
+        "pattern literal styled as regexp: {data:?}"
+    );
+
+    // Outline lists the token and the rules with their kinds.
+    let syms = s.handle(&json!({
+        "jsonrpc": "2.0", "id": 41, "method": "textDocument/documentSymbol",
+        "params": {"textDocument": {"uri": g_uri}}
+    }));
+    let names: Vec<(&str, u64)> = syms[0]["result"].as_array().unwrap()
+        .iter().map(|s| (s["name"].as_str().unwrap(), s["kind"].as_u64().unwrap())).collect();
+    assert!(names.contains(&("A", 14)), "token as constant: {names:?}");
+    assert!(names.contains(&("file", 23)) && names.contains(&("items", 23)), "rules as structs");
+
+    // Forward reference: `items` used on line 1, declared on line 2.
+    let def = s.handle(&json!({
+        "jsonrpc": "2.0", "id": 42, "method": "textDocument/definition",
+        "params": {"textDocument": {"uri": g_uri}, "position": {"line": 1, "character": 19}}
+    }));
+    assert_eq!(def[0]["result"]["uri"], g_uri);
+    assert_eq!(def[0]["result"]["range"]["start"]["line"], 2, "resolves FORWARD to the rule decl");
+
+    // Break the grammar: a dangling-else conflict. The envelope refusal
+    // arrives as a live diagnostic on the .rg document, with a span.
+    let out = s.handle(&json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": g_uri, "version": 2},
+            "contentChanges": [{
+                "range": {"start": {"line": 4, "character": 20}, "end": {"line": 4, "character": 20}},
+                "text": "\ntoken IF = \"if\"\ntoken ELSE = \"else\"\nrule s =\n  | S1: \"if\" s\n  | S2: \"if\" s \"else\" s\n  | S3: A"
+            }]
+        }
+    }));
+    let diags = out.iter()
+        .find(|m| m["method"] == "textDocument/publishDiagnostics")
+        .and_then(|m| m.pointer("/params/diagnostics")).and_then(|d| d.as_array()).unwrap();
+    let conflict = diags.iter().find(|d| d["message"].as_str().unwrap().contains("conflict"))
+        .expect("conflict diagnostic on the grammar file");
+    assert!(conflict["message"].as_str().unwrap().contains("example input"));
+    assert!(conflict["range"]["start"]["line"].as_u64().unwrap() > 0, "span points into the file");
+}
+
+/// Hot reload from `chartlang.rg`: the ENTIRE language definition is a
+/// live-editable grammar file. Good edits rebuild the pipeline; bad ones
+/// are refused with span-accurate counterexamples on the grammar file,
+/// and the old pipeline stays live.
+#[test]
+fn hot_reload_from_rg_grammar_file() {
+    let dir = std::env::temp_dir().join(format!("rantlr-lsp-rg-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("chartlang.rg");
+    std::fs::write(&cfg, CHARTLANG_RG).unwrap();
+
+    let mut s = Server::new();
+    s.root = Some(dir.clone());
+    init(&mut s);
+    open(&mut s, "let a = 1 + 2 * 3;\nasync work();\n");
+    let (_, before) = tokens_full(&mut s);
+
+    // GOOD reload: make `async` a keyword by editing the grammar text.
+    let with_async = CHARTLANG_RG.replace(
+        "keywords IDENT = fn let",
+        "keywords IDENT = async fn let",
+    );
+    std::fs::write(&cfg, &with_async).unwrap();
+    filetime_touch(&cfg);
+    let out = s.check_reload();
+    assert!(
+        out.iter().any(|m| m["method"] == "workspace/semanticTokens/refresh"),
+        "good .rg reload must request token refresh"
+    );
+    let (_, after) = tokens_full(&mut s);
+    assert_ne!(before, after, "adding a keyword via .rg must re-colorize `async`");
+
+    // BAD reload: drop the precedence declarations — the expression
+    // grammar now has unresolved conflicts. Refused with the
+    // counterexample, span-mapped into the grammar file.
+    let broken = with_async
+        .replace("prec left \"+\" \"-\"\n", "")
+        .replace("prec left \"*\" \"/\"\n", "");
+    std::fs::write(&cfg, &broken).unwrap();
+    filetime_touch(&cfg);
+    let out = s.check_reload();
+    let diag = out.iter()
+        .find(|m| {
+            m["method"] == "textDocument/publishDiagnostics"
+                && m.pointer("/params/uri").and_then(|u| u.as_str()).is_some_and(|u| u.ends_with("chartlang.rg"))
+                && !m.pointer("/params/diagnostics").unwrap().as_array().unwrap().is_empty()
+        })
+        .expect("refusal diagnostics on the grammar file");
+    let d0 = diag.pointer("/params/diagnostics/0").unwrap();
+    let msg = d0["message"].as_str().unwrap();
+    assert!(msg.contains("conflict") && msg.contains("example input"), "refusal explains: {msg}");
+    assert!(
+        d0["range"]["start"]["line"].as_u64().unwrap() > 0,
+        "span points at the offending production, not 0:0"
+    );
+
+    // Old pipeline stays live.
+    let (_, still) = tokens_full(&mut s);
+    assert_eq!(still, after, "refused reload must not change the live pipeline");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn definition_references_rename_across_open_files() {
     let mut s = Server::new();

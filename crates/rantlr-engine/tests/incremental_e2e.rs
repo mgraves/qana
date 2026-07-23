@@ -135,6 +135,78 @@ fn single_edit_reuses_bulk_of_tree() {
     assert!(out.stats.splices >= 1);
 }
 
+/// REGRESSION (found by the P5 `.rg` dogfood): balanced-list RUN chunks
+/// are arbitrary ≤MAX_RUN cuts, so an intact reused run can end with a
+/// dangling separator. Blind associative absorption then leaves the LR
+/// state one shift behind the tree, and the next item triggers a
+/// spurious repair. A multi-line comma list with enough entries forms
+/// several runs; a late insertion keeps early runs intact across the
+/// splice, exercising every boundary parity.
+#[test]
+fn multiline_separator_list_run_boundaries_hold_the_gate() {
+    let (lexer, sg, tables) = pipeline();
+    let mut src = String::from("let x = f(\n");
+    for i in 0..24 {
+        src.push_str(&format!("  a{i},\n"));
+    }
+    src.push_str("  last\n);\n");
+    // Insert (and delete) at every interior line: run boundaries land at
+    // different phases relative to the [item COMMA] repetition.
+    for line in 2..24 {
+        let mut s = IncSession::new(&lexer, &sg, &tables, &src).unwrap();
+        s.edit(&sg, &tables, &[LineEdit {
+            start: line,
+            end: line,
+            replacement: vec![Line::new("  zz9,", LineTerm::Lf)],
+        }])
+        .unwrap();
+        assert_gate(&s, &sg, &tables);
+        assert!(s.last_repairs.is_empty(), "no spurious repairs at line {line}");
+
+        let mut s = IncSession::new(&lexer, &sg, &tables, &src).unwrap();
+        s.edit(&sg, &tables, &[LineEdit { start: line, end: line + 1, replacement: vec![] }])
+            .unwrap();
+        assert_gate(&s, &sg, &tables);
+        assert!(s.last_repairs.is_empty(), "no spurious repairs deleting line {line}");
+    }
+}
+
+/// REGRESSION (found by the P5 `.rg` dogfood): Wagner right breakdown.
+/// A reused subtree's right-spine reductions assumed the OLD following
+/// lookahead. Appending an `else` branch after an existing `if` must
+/// UN-SPLICE the reused IfStmt and re-derive it as IfElseStmt — without
+/// the breakdown, recovery fabricates repairs for perfectly valid text.
+#[test]
+fn appending_else_unsplices_the_if() {
+    let (lexer, sg, tables) = pipeline();
+    let mut src = String::from("let a = 1;\n");
+    for i in 0..40 {
+        src.push_str(&format!("let v{i} = {i};\n"));
+    }
+    src.push_str("if (a) { emit(a); }\n");
+    let n_lines = 42;
+    let mut s = IncSession::new(&lexer, &sg, &tables, &src).unwrap();
+    let out = s
+        .edit(&sg, &tables, &[LineEdit {
+            start: n_lines,
+            end: n_lines,
+            replacement: vec![Line::new("else { emit(0); }", LineTerm::Lf)],
+        }])
+        .unwrap();
+    assert_gate(&s, &sg, &tables);
+    assert!(s.last_repairs.is_empty(), "valid text needs no repairs: {:?}", s.last_repairs);
+    assert!(out.stats.reused_terms > 0, "prefix still reuses");
+    // And the reverse edit: deleting the else re-derives plain IfStmt.
+    s.edit(&sg, &tables, &[LineEdit {
+        start: n_lines,
+        end: n_lines + 1,
+        replacement: vec![],
+    }])
+    .unwrap();
+    assert_gate(&s, &sg, &tables);
+    assert!(s.last_repairs.is_empty());
+}
+
 #[test]
 fn comment_only_edit_is_trivia_local() {
     let (lexer, sg, tables) = pipeline();

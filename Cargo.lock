@@ -54,9 +54,20 @@ version = "0.0.1"
 dependencies = [
  "rantlr-engine",
  "rantlr-grammar",
+ "rantlr-rg",
  "rantlr-sem",
  "rantlr-services",
  "serde_json",
+]
+
+[[package]]
+name = "rantlr-rg"
+version = "0.0.1"
+dependencies = [
+ "rantlr-engine",
+ "rantlr-grammar",
+ "rantlr-sem",
+ "rantlr-services",
 ]
 
 [[package]]

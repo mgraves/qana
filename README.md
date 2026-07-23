@@ -391,13 +391,82 @@ name-indexing fixed it, 620×). Deliberate scope notes: resolution
 recomputes whole-file on any tree change (per-item memoization is the
 next granularity); `names_in_scope` is demo-grade positional.
 
+## P5 — increment 1 (shipped): the `.rg` textual grammar surface, self-hosted
+
+`crates/rantlr-rg` is the textual surface: a `.rg` file declares the
+ENTIRE language — tokens (`/regex/` or `"literal"` patterns), modes,
+`keywords` (specialization), bracket `pair`s, `prec` lines, labeled
+productions, and the editor annotations (`@style`, `@def/@ref/@scope`,
+`@outline`) — and compiles to exactly the grammar VALUES the rest of the
+toolchain runs on. `.rg` lives inside its own envelope: line terminators
+are unwritable in patterns (negated classes and `.` exclude them by
+construction), alternatives carry mandatory labels (which name the typed
+AST — and keep the grammar LR(1)), and the whole surface is newline-
+insensitive.
+
+**Self-hosting, proven as a fixed point:** `rg.rg` — the `.rg` grammar
+written in `.rg` — is parsed by the bootstrap grammar (the same
+declarations as Rust values) and compiled; the result must reproduce the
+bootstrap EXACTLY: lexical grammar (structural equality), syntax
+grammar, LR tables, styles, outline, and binding config — and
+generation 1 re-parses its own source into the bootstrap's tree.
+Likewise `chartlang.rg` compiles to the programmatic demo grammar
+value-for-value and table-for-table, with a corpus differential on top.
+Envelope refusals are **span-mapped**: an unknown name, a bad pattern, an
+L1/L2 witness, or an LR conflict counterexample each point at the
+offending construct in the grammar file (`Conflict` now carries its
+production indices for exactly this).
+
+**Dogfooding found two real engine bugs** that seven increments of
+demo-language gates never reached, both now fixed with engine-level
+regressions:
+
+* **Dangling-separator runs (L4):** balanced-list RUN chunks are
+  arbitrary ≤16-child cuts, so a reused run can end mid repetition-unit
+  (trailing `|`). Blind associative splicing left the LR state one shift
+  behind the tree — spurious repairs on clean text. `ListShape` now
+  knows its repetition anatomy (`alpha_first/alpha_last/seed_first`) and
+  runs splice only at unit boundaries; dangles re-enter the input.
+* **Right-edge lookahead dependence (Wagner right breakdown):** a reused
+  subtree's right-spine reductions assumed the OLD following token.
+  Appending `else` to an existing `if` (or a new alternative to an
+  existing rule) must UN-SPLICE the reused subtree and re-derive it.
+  On an error immediately after reused structure, the parser now unwinds
+  the nearest reused piece (provenance-tracked; fresh reduces never
+  unwind, so it terminates) and re-parses its children under the actual
+  lookahead — repair is the fallback, not the first answer.
+
+**The editor loop, closed:** the LSP now serves TWO languages — the
+target language (pipeline hot-reloaded from `chartlang.rg`, with
+`chartlang.toml` as legacy fallback) and `.rg` files themselves
+(highlighting incl. a `regexp` class, outline of rules/tokens/modes with
+LSP kinds, forward-reference go-to-definition via the new UNORDERED
+binding mode in rantlr-sem, and live envelope diagnostics as you type —
+conflicts pointing at productions). The playground's config is now the
+full grammar file. Protocol tests cover both (.rg services + .rg
+hot-reload with span-accurate refusal).
+
+Numbers (M-series, release): bootstrap toolchain 1.78 ms; `rg.rg`
+parse+compile 637 µs + certify 1.58 ms; `chartlang.rg` 457 µs + 3.24 ms
+(the whole language, text → certified pipeline, under 4 ms); a
+1302-line synthetic grammar (300 tokens, 800 prods) compiles in 4.67 ms
+of which the compile pass is 474 µs — the text surface is noise next to
+the table build. A keystroke edit in that grammar file reparses in
+**21 µs** (99.9% reuse) vs 1.80 ms batch. Deliberate scope notes: BNF
+only (EBNF sugar desugars later), literals must be declared (no silent
+keyword auto-derivation), `pair` brackets fixed to `()[]{}`, and .rg's
+reserved words are unusable as bare names in argument positions (quote
+them) — the `bracket`-vs-`@style(bracket)` collision that forced the
+`pair` keyword was itself caught by the fixed-point gate.
+
 ## Status
 
-Six library crates + a server binary; 68 tests; the full story runs:
-**one grammar value → certified lexer + LR tables + incremental
-lexing/parsing (total under errors) + lossless trees + typed AST +
-editor services + semantic binding + LSP — with a live, envelope-checked
-grammar edit loop and cross-file IntelliSense.** Remaining roadmap (per
-the feasibility report): the textual `.rg` grammar surface (self-hosted),
-tree-sitter grammar emission, per-item semantic memoization / real salsa,
-and the composition/macro tiers (Part III).
+Seven library crates + a server binary; 83 tests; the full story runs:
+**one grammar — now a text file — → certified lexer + LR tables +
+incremental lexing/parsing (total under errors) + lossless trees + typed
+AST + editor services + semantic binding + LSP, self-hosted: the grammar
+language is defined in itself, parsed by its own engine, and its files
+get the same editor intelligence as the languages it defines.**
+Remaining roadmap (per the feasibility report): EBNF sugar on the `.rg`
+surface, tree-sitter grammar emission, per-item semantic memoization /
+real salsa, and the composition/macro tiers (Part III).

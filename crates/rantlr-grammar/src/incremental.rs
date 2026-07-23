@@ -25,9 +25,10 @@
 //! per-item; error recovery remains out of scope.
 
 use crate::green::{
-    is_seq_prod, GreenChild, GreenNode, GreenToken, TokWithText, LIST_PROD, MAX_RUN, RUN_PROD,
+    flat_children, is_seq_prod, GreenChild, GreenNode, GreenToken, TokWithText, LIST_PROD,
+    MAX_RUN, RUN_PROD,
 };
-use crate::lr::{LrAct, LrTables};
+use crate::lr::{ListShape, LrAct, LrTables, UnitSym};
 use crate::model::TokenId;
 use crate::syn::{SynGrammar, EOF};
 use std::collections::VecDeque;
@@ -94,8 +95,10 @@ struct ListBuilder {
 }
 
 enum Piece {
-    /// A single child (element node, separator/trivia token).
-    Loose(GreenChild),
+    /// A single child (element node, separator/trivia token). The flag
+    /// records REUSED provenance: only reused pieces may unwind on a
+    /// right-edge error (fresh reduces are lookahead-correct).
+    Loose(GreenChild, bool),
     /// A reused leaf run (fanout ≤ MAX_RUN, children are elements).
     Leaf(Arc<GreenNode>),
 }
@@ -104,8 +107,8 @@ impl ListBuilder {
     fn new(nt: u16) -> Self {
         ListBuilder { nt, pieces: Vec::new() }
     }
-    fn push_loose(&mut self, c: GreenChild) {
-        self.pieces.push(Piece::Loose(c));
+    fn push_loose(&mut self, c: GreenChild, spliced: bool) {
+        self.pieces.push(Piece::Loose(c, spliced));
     }
     /// Absorb a salvaged LIST or RUN node: reused chunks flatten to leaf
     /// runs (never to elements — that's what keeps splices O(runs)).
@@ -121,7 +124,7 @@ impl ListBuilder {
         for c in &n.children {
             match c {
                 GreenChild::Node(m) if m.prod == RUN_PROD => self.absorb_seq(m),
-                other => self.pieces.push(Piece::Loose(other.clone())),
+                other => self.pieces.push(Piece::Loose(other.clone(), true)),
             }
         }
     }
@@ -132,13 +135,13 @@ impl ListBuilder {
     fn finalize(self) -> Arc<GreenNode> {
         let nt = self.nt;
         if self.pieces.len() <= MAX_RUN
-            && self.pieces.iter().all(|p| matches!(p, Piece::Loose(_)))
+            && self.pieces.iter().all(|p| matches!(p, Piece::Loose(..)))
         {
             let children: Vec<GreenChild> = self
                 .pieces
                 .into_iter()
                 .map(|p| match p {
-                    Piece::Loose(c) => c,
+                    Piece::Loose(c, _) => c,
                     Piece::Leaf(_) => unreachable!(),
                 })
                 .collect();
@@ -155,7 +158,7 @@ impl ListBuilder {
         }
         for p in self.pieces {
             match p {
-                Piece::Loose(c) => buf.push(c),
+                Piece::Loose(c, _) => buf.push(c),
                 Piece::Leaf(r) => {
                     if !buf.is_empty() && buf.len() + r.children.len() <= MAX_RUN {
                         // Dissolve the run into the pending buffer so edit
@@ -181,6 +184,63 @@ impl ListBuilder {
     }
 }
 
+/// How a salvaged RUN chunk may enter an associative list splice.
+///
+/// Runs are arbitrary ≤MAX_RUN cuts of a list's flattened children, so a
+/// chunk can begin or end MID repetition-unit (e.g. a dangling trailing
+/// separator). The blind splice is sound only for whole units — the LR
+/// state does not advance over absorbed content (Wagner §7), so a
+/// dangling separator would leave the automaton one shift behind the
+/// tree and surface as a spurious repair (or a silently wrong tree).
+enum RunFit {
+    /// Aligned: absorb the whole node (trailing trivia included).
+    /// `tail = 0`; otherwise absorb the flat prefix as loose pieces and
+    /// push the last `tail` flattened children back onto the input for
+    /// ordinary state-checked shifting.
+    Take { tail: usize },
+    /// Misaligned start or no unit boundary at all: break down instead.
+    Reject,
+}
+
+fn unit_matches(c: &GreenChild, want: UnitSym, elem: u16) -> bool {
+    match (c, want) {
+        (GreenChild::Node(n), UnitSym::Elem) => n.nt == elem,
+        (GreenChild::Token(t), UnitSym::Tok(id)) => {
+            !t.trivia && !t.is_missing() && t.id == id
+        }
+        _ => false,
+    }
+}
+
+fn is_symbol(c: &GreenChild) -> bool {
+    match c {
+        GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+        GreenChild::Node(_) => true,
+    }
+}
+
+/// Alignment of a salvaged RUN against its list's repetition unit.
+/// `lead` is what the chunk must begin with in the current position
+/// (α-first when continuing an open list, seed-first when starting one).
+fn run_fit(node: &GreenNode, shape: &ListShape, lead: UnitSym) -> RunFit {
+    if node.terms == 0 {
+        return RunFit::Take { tail: 0 }; // pure trivia: no state impact
+    }
+    let flat = flat_children(node);
+    match flat.iter().find(|c| is_symbol(c)) {
+        Some(first) if unit_matches(first, lead, shape.elem) => {}
+        _ => return RunFit::Reject,
+    }
+    let Some(i) = flat.iter().rposition(|c| unit_matches(c, shape.alpha_last, shape.elem)) else {
+        return RunFit::Reject;
+    };
+    if flat[i + 1..].iter().all(|c| !is_symbol(c)) {
+        RunFit::Take { tail: 0 } // dangle is trivia-only: absorb whole
+    } else {
+        RunFit::Take { tail: flat.len() - 1 - i }
+    }
+}
+
 enum SymSlot {
     Child(GreenChild),
     List(ListBuilder),
@@ -199,6 +259,11 @@ struct Entry {
     /// Trivia preceding `sym`, flattened before it on reduce.
     leading: Vec<GreenChild>,
     sym: SymSlot,
+    /// True when `sym` is a subtree REUSED from the previous tree (a
+    /// nonterminal splice). Reused subtrees' right-spine reductions
+    /// assumed the OLD following lookahead, so they may unwind (Wagner
+    /// right breakdown) when the parse errors just after them.
+    spliced: bool,
 }
 
 fn make_node(nt: u16, prod: u16, children: Vec<GreenChild>) -> Arc<GreenNode> {
@@ -610,15 +675,17 @@ pub fn incremental_parse(
                         }
                         SymSlot::Child(other) => {
                             let mut b = ListBuilder::new(prod.lhs);
-                            b.push_loose(other);
+                            let spliced = head.spliced;
+                            b.push_loose(other, spliced);
                             b
                         }
                     };
                     for e in it {
                         for tr in e.leading {
-                            b.push_loose(tr);
+                            b.push_loose(tr, false);
                         }
-                        b.push_loose(e.sym.into_child());
+                        let spliced = e.spliced;
+                        b.push_loose(e.sym.into_child(), spliced);
                     }
                     SymSlot::List(b)
                 }
@@ -627,9 +694,10 @@ pub fn incremental_parse(
                     let mut b = ListBuilder::new(prod.lhs);
                     for e in popped {
                         for tr in e.leading {
-                            b.push_loose(tr);
+                            b.push_loose(tr, false);
                         }
-                        b.push_loose(e.sym.into_child());
+                        let spliced = e.spliced;
+                        b.push_loose(e.sym.into_child(), spliced);
                     }
                     SymSlot::List(b)
                 }
@@ -643,8 +711,104 @@ pub fn incremental_parse(
                     SymSlot::Child(GreenChild::Node(make_node(prod.lhs, pidx, children)))
                 }
             };
-            stack.push(Entry { leading: Vec::new(), sym: slot });
+            stack.push(Entry { leading: Vec::new(), sym: slot, spliced: false });
             states.push(next);
+        }};
+    }
+
+    // Wagner right breakdown: a reused subtree's right-spine reductions
+    // assumed the OLD tree's following lookahead. If the parse errors
+    // immediately after reused structure, un-splice the nearest reused
+    // piece (top spliced value-stack entry, or the open list builder's
+    // trailing reused piece) and push its CHILDREN back onto the input:
+    // they re-parse under the ACTUAL lookahead. Only reused provenance
+    // unwinds — fresh reduces are lookahead-correct by construction —
+    // and every unwind replaces a node by its children, so the total
+    // work is bounded by the reused subtree's size. Yields `true` if
+    // something was unwound (caller retries before invoking repair).
+    macro_rules! try_unwind {
+        () => {{
+            let mut done = false;
+            match stack.last_mut() {
+                Some(Entry { sym: SymSlot::List(b), .. }) => {
+                    // Step over trailing trivia pieces (state-inert) to
+                    // reach the last structural piece.
+                    let mut trailing: Vec<GreenChild> = Vec::new();
+                    while matches!(
+                        b.pieces.last(),
+                        Some(Piece::Loose(GreenChild::Token(tk), _)) if tk.trivia
+                    ) {
+                        let Some(Piece::Loose(c, _)) = b.pieces.pop() else { unreachable!() };
+                        trailing.push(c);
+                    }
+                    let unwound: Option<Vec<GreenChild>> = match b.pieces.last() {
+                        Some(Piece::Leaf(_)) => {
+                            let Some(Piece::Leaf(run)) = b.pieces.pop() else { unreachable!() };
+                            consumed_terms -= run.terms as usize;
+                            stats.reused_terms -= run.terms;
+                            Some(run.children.clone())
+                        }
+                        Some(Piece::Loose(GreenChild::Node(n), true)) => {
+                            let terms = n.terms;
+                            let Some(Piece::Loose(GreenChild::Node(n), _)) = b.pieces.pop()
+                            else {
+                                unreachable!()
+                            };
+                            consumed_terms -= terms as usize;
+                            stats.reused_terms -= terms;
+                            Some(n.children.clone())
+                        }
+                        _ => None,
+                    };
+                    match unwound {
+                        Some(children) => {
+                            // Byte order: children, then the trailing
+                            // trivia we stepped over, then any pending
+                            // trivia already read PAST the unwound node.
+                            let pend = std::mem::take(&mut pending);
+                            for c in pend.into_iter().rev() {
+                                input.push_front(Item::Sub(c));
+                            }
+                            for c in trailing.into_iter() {
+                                input.push_front(Item::Sub(c));
+                            }
+                            for c in children.into_iter().rev() {
+                                input.push_front(Item::Sub(c));
+                            }
+                            done = true;
+                        }
+                        None => {
+                            // Not unwindable: restore the trivia.
+                            for c in trailing.into_iter().rev() {
+                                b.pieces.push(Piece::Loose(c, false));
+                            }
+                        }
+                    }
+                }
+                Some(Entry { spliced: true, sym: SymSlot::Child(GreenChild::Node(_)), .. }) => {
+                    let Some(Entry { leading, sym: SymSlot::Child(GreenChild::Node(n)), .. }) =
+                        stack.pop()
+                    else {
+                        unreachable!()
+                    };
+                    states.pop();
+                    consumed_terms -= n.terms as usize;
+                    stats.reused_terms -= n.terms;
+                    let pend = std::mem::take(&mut pending);
+                    for c in pend.into_iter().rev() {
+                        input.push_front(Item::Sub(c));
+                    }
+                    for c in n.children.iter().rev() {
+                        input.push_front(Item::Sub(c.clone()));
+                    }
+                    for tr in leading.into_iter().rev() {
+                        input.push_front(Item::Sub(tr));
+                    }
+                    done = true;
+                }
+                _ => {}
+            }
+            done
         }};
     }
 
@@ -691,6 +855,7 @@ pub fn incremental_parse(
                                 trivia: false,
                                 text: String::new(),
                             })),
+                            spliced: false,
                         });
                         states.push(n);
                         break;
@@ -859,7 +1024,9 @@ pub fn incremental_parse(
                         return Ok((Arc::new(root_owned), stats, repairs));
                     }
                     _ => {
-                        recover!(true);
+                        if !try_unwind!() {
+                            recover!(true);
+                        }
                     }
                 }
                 continue;
@@ -898,48 +1065,83 @@ pub fn incremental_parse(
             // L4 associative splice: a salvaged LIST/RUN of a list
             // nonterminal either CONCATENATES into the open builder on
             // top of the stack (Wagner's B → B B, no state change) or
-            // seeds a new builder via GOTO.
-            if seq && t.lists.contains_key(&node.nt) {
-                let continues = matches!(
-                    stack.last(),
-                    Some(Entry { sym: SymSlot::List(b), .. }) if b.nt == node.nt
-                );
-                if continues {
-                    input.pop_front();
-                    // Pending trivia belongs INSIDE the run's first
-                    // element (where batch drains it at the next token
-                    // shift) — never at list level.
-                    let spliced = if pending.is_empty() || node.terms == 0 {
-                        node.clone()
+            // seeds a new builder via GOTO. Complete LIST nodes are
+            // whole numbers of repetition units by construction; RUN
+            // chunks are arbitrary cuts and must pass the alignment
+            // check first — a dangling tail (e.g. a trailing separator
+            // the state has not shifted over) re-enters the input.
+            if seq {
+                if let Some(shape) = t.lists.get(&node.nt) {
+                    let continues = matches!(
+                        stack.last(),
+                        Some(Entry { sym: SymSlot::List(b), .. }) if b.nt == node.nt
+                    );
+                    let goto_next = t.goto_[state as usize].get(&node.nt).copied();
+                    let fit = if !continues && goto_next.is_none() {
+                        RunFit::Reject // not spliceable here at all
+                    } else if node.prod != RUN_PROD {
+                        RunFit::Take { tail: 0 }
                     } else {
-                        prepend_trivia(&node, std::mem::take(&mut pending))
+                        let lead = if continues {
+                            shape.alpha_first
+                        } else {
+                            shape.seed_first.unwrap_or(shape.alpha_first)
+                        };
+                        run_fit(&node, shape, lead)
                     };
-                    stats.reused_terms += spliced.terms;
-                    stats.splices += 1;
-                    consumed_terms += spliced.terms as usize;
-                    let Some(Entry { sym: SymSlot::List(b), .. }) = stack.last_mut() else {
-                        unreachable!()
-                    };
-                    b.absorb_seq(&spliced);
-                    continue;
+                    if let RunFit::Take { tail } = fit {
+                        input.pop_front();
+                        // Pending trivia belongs INSIDE the run's first
+                        // element (where batch drains it at the next
+                        // token shift) — never at list level.
+                        let spliced = if pending.is_empty() || node.terms == 0 {
+                            node.clone()
+                        } else {
+                            prepend_trivia(&node, std::mem::take(&mut pending))
+                        };
+                        if !continues {
+                            stack.push(Entry {
+                                leading: Vec::new(),
+                                sym: SymSlot::List(ListBuilder::new(node.nt)),
+                                spliced: false,
+                            });
+                            states.push(goto_next.unwrap());
+                        }
+                        let Some(Entry { sym: SymSlot::List(b), .. }) = stack.last_mut() else {
+                            unreachable!()
+                        };
+                        stats.splices += 1;
+                        if tail == 0 {
+                            stats.reused_terms += spliced.terms;
+                            consumed_terms += spliced.terms as usize;
+                            b.absorb_seq(&spliced);
+                        } else {
+                            // Absorb the aligned prefix loosely; the
+                            // dangle shifts through the automaton.
+                            let flat = flat_children(&spliced);
+                            let cut = flat.len() - tail;
+                            let mut absorbed = 0u32;
+                            for c in &flat[..cut] {
+                                absorbed += match c {
+                                    GreenChild::Node(n) => n.terms,
+                                    GreenChild::Token(tk) => {
+                                        u32::from(!tk.trivia && !tk.is_missing())
+                                    }
+                                };
+                                b.push_loose((*c).clone(), true);
+                            }
+                            let tail_items: Vec<GreenChild> =
+                                flat[cut..].iter().map(|c| (*c).clone()).collect();
+                            stats.reused_terms += absorbed;
+                            consumed_terms += absorbed as usize;
+                            for c in tail_items.into_iter().rev() {
+                                input.push_front(Item::Sub(c));
+                            }
+                        }
+                        continue;
+                    }
+                    // Reject: fall through to reduce-enable/breakdown.
                 }
-                if let Some(next) = t.goto_[state as usize].get(&node.nt).copied() {
-                    input.pop_front();
-                    let spliced = if pending.is_empty() || node.terms == 0 {
-                        node.clone()
-                    } else {
-                        prepend_trivia(&node, std::mem::take(&mut pending))
-                    };
-                    let mut b = ListBuilder::new(node.nt);
-                    stats.reused_terms += spliced.terms;
-                    stats.splices += 1;
-                    consumed_terms += spliced.terms as usize;
-                    b.absorb_seq(&spliced);
-                    stack.push(Entry { leading: Vec::new(), sym: SymSlot::List(b) });
-                    states.push(next);
-                    continue;
-                }
-                // Fall through to reduce-enable/breakdown below.
             }
 
             let fragile = !seq
@@ -963,6 +1165,7 @@ pub fn incremental_parse(
                     stack.push(Entry {
                         leading: Vec::new(),
                         sym: SymSlot::Child(GreenChild::Node(spliced)),
+                        spliced: true,
                     });
                     states.push(next);
                     continue;
@@ -1008,13 +1211,16 @@ pub fn incremental_parse(
                 stack.push(Entry {
                     leading: std::mem::take(&mut pending),
                     sym: SymSlot::Child(sym),
+                    spliced: false,
                 });
                 states.push(next);
             }
             Some(LrAct::Reduce(p)) => reduce!(p),
             Some(LrAct::Accept) => unreachable!("accept only on EOF"),
             Some(LrAct::Error) | None => {
-                recover!(false);
+                if !try_unwind!() {
+                    recover!(false);
+                }
             }
         }
     }

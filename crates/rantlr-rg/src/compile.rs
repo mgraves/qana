@@ -1,0 +1,979 @@
+//! The `.rg` compiler: a green tree (from the bootstrap parser) in, the
+//! toolchain's grammar VALUES out — `LexGrammar`, `SynGrammar`,
+//! `BindingConfig`, `Styles`, `OutlineConfig` — plus span-carrying
+//! diagnostics. Certification (`certify`) then runs the same envelope
+//! gates every programmatic grammar passes, mapping lint witnesses and
+//! LR conflict counterexamples back to `.rg` source spans: the refusal
+//! UX points at the construct that caused it.
+
+use crate::bootstrap::RgProds;
+use crate::pat_parse::parse_pattern;
+use rantlr_grammar::green::ERROR_NT;
+use rantlr_grammar::model::{BracketKind, LexGrammar, TokenDef, TokenId};
+use rantlr_grammar::pat::Pat;
+use rantlr_grammar::syn::{Assoc, Sym, SynGrammar};
+use rantlr_grammar::{build_lr, CompiledLexer, GreenChild, GreenNode, GreenToken, LrTables, Vocab};
+use rantlr_sem::{BindingConfig, RefKind};
+use rantlr_services::{OutlineConfig, OutlineEntry, Styles, LEGEND};
+use std::collections::HashMap;
+
+/// Outline kinds a grammar may declare (closed set, `&'static` for the
+/// services layer).
+pub const OUTLINE_KINDS: &[&str] = &["variable", "constant", "function", "struct", "module", "class"];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RgDiag {
+    pub span: (u32, u32),
+    pub msg: String,
+    /// 1 = error, 2 = warning.
+    pub severity: u8,
+}
+
+/// A compiled language definition: pure values + the source-span maps
+/// that let certification report refusals against the `.rg` text.
+pub struct LangDef {
+    pub lex: LexGrammar,
+    pub sg: SynGrammar,
+    pub binding: BindingConfig,
+    pub styles: Styles,
+    pub outline: OutlineConfig,
+    /// Token id → span of its declaring name (keywords: the item span).
+    pub token_spans: Vec<(u32, u32)>,
+    /// Production index → span of its alternative label.
+    pub prod_spans: Vec<(u32, u32)>,
+}
+
+// ---------------------------------------------------------------------------
+// Offset-carrying green-tree cursor
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct Cur<'g> {
+    n: &'g GreenNode,
+    base: u32,
+}
+
+enum Child<'g> {
+    Node(Cur<'g>),
+    Tok(&'g GreenToken, (u32, u32)),
+}
+
+impl<'g> Cur<'g> {
+    /// k-th grammar-symbol child with its byte span (trivia, missing
+    /// repair tokens, and error nodes skipped — same positional contract
+    /// as the typed accessors).
+    fn sym(&self, k: usize) -> Option<Child<'g>> {
+        let mut off = self.base;
+        let mut idx = 0usize;
+        for c in &self.n.children {
+            let w = c.width();
+            let is_symbol = match c {
+                GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+                GreenChild::Node(m) => m.nt != ERROR_NT,
+            };
+            if is_symbol {
+                if idx == k {
+                    return Some(match c {
+                        GreenChild::Token(t) => Child::Tok(t, (off, off + w)),
+                        GreenChild::Node(m) => Child::Node(Cur { n: m, base: off }),
+                    });
+                }
+                idx += 1;
+            }
+            off += w;
+        }
+        None
+    }
+
+    fn tok(&self, k: usize) -> Option<(&'g GreenToken, (u32, u32))> {
+        match self.sym(k)? {
+            Child::Tok(t, s) => Some((t, s)),
+            Child::Node(_) => None,
+        }
+    }
+
+    fn node(&self, k: usize) -> Option<Cur<'g>> {
+        match self.sym(k)? {
+            Child::Node(c) => Some(c),
+            Child::Tok(..) => None,
+        }
+    }
+
+    /// Flattened element nodes of a LIST subtree (RUN nodes expanded),
+    /// each with its base offset.
+    fn items(&self) -> Vec<Cur<'g>> {
+        fn go<'g>(n: &'g GreenNode, base: u32, out: &mut Vec<Cur<'g>>) {
+            let mut off = base;
+            for c in &n.children {
+                match c {
+                    GreenChild::Node(m) if m.prod == rantlr_grammar::green::RUN_PROD => {
+                        go(m, off, out)
+                    }
+                    GreenChild::Node(m) if m.nt != ERROR_NT => out.push(Cur { n: m, base: off }),
+                    _ => {}
+                }
+                off += c.width();
+            }
+        }
+        let mut out = Vec::new();
+        go(self.n, self.base, &mut out);
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Source-shaped intermediate view (one walk, then passes over it)
+// ---------------------------------------------------------------------------
+
+struct AttrIr {
+    name: String,
+    name_span: (u32, u32),
+    /// (text, span, is_string) per argument.
+    args: Vec<(String, (u32, u32), bool)>,
+}
+
+struct TokenIr {
+    name: String,
+    name_span: (u32, u32),
+    mode: u16,
+    /// Regex interior or unescaped literal text.
+    pat_src: String,
+    pat_span: (u32, u32),
+    pat_is_regex: bool,
+    attrs: Vec<AttrIr>,
+}
+
+struct SymIr {
+    label: Option<String>,
+    /// NAME text or unescaped STRING content.
+    text: String,
+    span: (u32, u32),
+    is_string: bool,
+}
+
+struct AltIr {
+    label: String,
+    label_span: (u32, u32),
+    syms: Vec<SymIr>,
+    attrs: Vec<AttrIr>,
+}
+
+struct RuleIr {
+    name: String,
+    name_span: (u32, u32),
+    alts: Vec<AltIr>,
+}
+
+#[derive(Clone)]
+struct TokRefIr {
+    text: String,
+    span: (u32, u32),
+    is_string: bool,
+}
+
+/// Token-id-assigning declarations, in FILE order (ids are positional:
+/// the order tokens and keywords appear is the order they're numbered).
+enum IdEvent {
+    Def(TokenIr),
+    Keywords { base: String, base_span: (u32, u32), items: Vec<TokRefIr> },
+}
+
+#[derive(Default)]
+struct FileIr {
+    language: Option<(String, (u32, u32))>,
+    max_stack: Option<(u8, (u32, u32))>,
+    events: Vec<IdEvent>,
+    mode_names: Vec<(String, (u32, u32))>,
+    brackets: Vec<(TokRefIr, TokRefIr)>,
+    /// (assoc, ops) in declaration order — level = position + 1.
+    precs: Vec<(Assoc, Vec<TokRefIr>)>,
+    start: Option<(String, (u32, u32))>,
+    rules: Vec<RuleIr>,
+}
+
+impl Default for IdEvent {
+    fn default() -> Self {
+        IdEvent::Keywords { base: String::new(), base_span: (0, 0), items: Vec::new() }
+    }
+}
+
+/// Strip one level of `\c → c` escaping from a STRING token's content.
+fn unquote(text: &str) -> String {
+    let inner = text.strip_prefix('"').unwrap_or(text);
+    let inner = inner.strip_suffix('"').unwrap_or(inner);
+    let mut out = String::with_capacity(inner.len());
+    let mut esc = false;
+    for c in inner.chars() {
+        if esc {
+            out.push(c);
+            esc = false;
+        } else if c == '\\' {
+            esc = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn lower_attrs(cur: Cur<'_>, p: &RgProds) -> Vec<AttrIr> {
+    // cur is an `attrs` LIST node.
+    cur.items()
+        .iter()
+        .filter_map(|a| {
+            let (name_tok, name_span) = a.tok(1)?;
+            let mut args = Vec::new();
+            if a.n.prod == p.attr_args as u16 {
+                if let Some(list) = a.node(3) {
+                    // arg_list items are `arg` nodes (the comma is a
+                    // terminal inside the cons production, so the
+                    // flattened node view yields the args directly).
+                    for arg in list.items() {
+                        let Some((t, s)) = arg.tok(0) else { continue };
+                        let is_string = arg.n.prod == p.arg_str as u16;
+                        let text = if is_string { unquote(&t.text) } else { t.text.clone() };
+                        args.push((text, s, is_string));
+                    }
+                }
+            }
+            Some(AttrIr { name: name_tok.text.clone(), name_span, args })
+        })
+        .collect()
+}
+
+fn lower_tok_ref(cur: Cur<'_>, p: &RgProds) -> Option<TokRefIr> {
+    let (t, span) = cur.tok(0)?;
+    let is_string = cur.n.prod == p.tok_str as u16;
+    let text = if is_string { unquote(&t.text) } else { t.text.clone() };
+    Some(TokRefIr { text, span, is_string })
+}
+
+fn lower_token_def(cur: Cur<'_>, mode: u16, p: &RgProds) -> Option<TokenIr> {
+    let (name_tok, name_span) = cur.tok(1)?;
+    let pat = cur.node(3)?;
+    let (pat_tok, pat_span) = pat.tok(0)?;
+    let pat_is_regex = pat.n.prod == p.pat_regex as u16;
+    let pat_src = if pat_is_regex {
+        let inner = pat_tok.text.strip_prefix('/').unwrap_or(&pat_tok.text);
+        inner.strip_suffix('/').unwrap_or(inner).to_string()
+    } else {
+        unquote(&pat_tok.text)
+    };
+    let attrs = cur.node(4).map(|a| lower_attrs(a, p)).unwrap_or_default();
+    Some(TokenIr {
+        name: name_tok.text.clone(),
+        name_span,
+        mode,
+        pat_src,
+        pat_span,
+        pat_is_regex,
+        attrs,
+    })
+}
+
+fn lower(tree: &GreenNode, p: &RgProds, diags: &mut Vec<RgDiag>) -> FileIr {
+    let mut ir = FileIr::default();
+    let root = Cur { n: tree, base: 0 };
+    let Some(decls) = root.node(0) else { return ir };
+    // First sweep: mode declarations (mode numbers are declaration
+    // order; tokens can @push modes declared later in the file).
+    for d in decls.items() {
+        if d.n.prod == p.mode_decl as u16 {
+            if let Some((t, s)) = d.tok(1) {
+                if ir.mode_names.iter().any(|(n, _)| *n == t.text) {
+                    diags.push(RgDiag {
+                        span: s,
+                        msg: format!("mode `{}` declared twice", t.text),
+                        severity: 1,
+                    });
+                } else {
+                    ir.mode_names.push((t.text.clone(), s));
+                }
+            }
+        }
+    }
+    for d in decls.items() {
+        let prod = d.n.prod as usize;
+        if prod == p.lang_decl {
+            if let Some((t, s)) = d.tok(1) {
+                if ir.language.is_some() {
+                    diags.push(RgDiag { span: s, msg: "duplicate `language`".into(), severity: 1 });
+                } else {
+                    ir.language = Some((t.text.clone(), s));
+                }
+            }
+        } else if prod == p.max_stack_decl {
+            if let Some((t, s)) = d.tok(1) {
+                match t.text.parse::<u8>() {
+                    Ok(n) => ir.max_stack = Some((n, s)),
+                    Err(_) => diags.push(RgDiag {
+                        span: s,
+                        msg: "max_stack must fit in a u8".into(),
+                        severity: 1,
+                    }),
+                }
+            }
+        } else if prod == p.kw_decl {
+            let Some((base, base_span)) = d.tok(1) else { continue };
+            let mut items = Vec::new();
+            if let Some(list) = d.node(3) {
+                for item in list.items() {
+                    let Some((t, s)) = item.tok(0) else { continue };
+                    let is_string = item.n.prod == p.kw_str as u16;
+                    let text = if is_string { unquote(&t.text) } else { t.text.clone() };
+                    items.push(TokRefIr { text, span: s, is_string });
+                }
+            }
+            ir.events.push(IdEvent::Keywords { base: base.text.clone(), base_span, items });
+        } else if prod == p.token_decl {
+            if let Some(td) = d.node(0).and_then(|c| lower_token_def(c, 0, p)) {
+                ir.events.push(IdEvent::Def(td));
+            }
+        } else if prod == p.mode_decl {
+            // Mode number = position in the (deduplicated) mode list.
+            let mode = d
+                .tok(1)
+                .and_then(|(t, _)| ir.mode_names.iter().position(|(n, _)| *n == t.text))
+                .map(|i| (i + 1) as u16)
+                .unwrap_or(0);
+            if let Some(defs) = d.node(3) {
+                for td in defs.items() {
+                    if let Some(t) = lower_token_def(td, mode, p) {
+                        ir.events.push(IdEvent::Def(t));
+                    }
+                }
+            }
+        } else if prod == p.bracket_decl {
+            let (Some(o), Some(c)) = (
+                d.node(1).and_then(|c| lower_tok_ref(c, p)),
+                d.node(2).and_then(|c| lower_tok_ref(c, p)),
+            ) else {
+                continue;
+            };
+            ir.brackets.push((o, c));
+        } else if prod == p.prec_decl {
+            let assoc = match d.node(1).map(|a| a.n.prod as usize) {
+                Some(x) if x == p.assoc_right => Assoc::Right,
+                _ => Assoc::Left,
+            };
+            let mut ops = Vec::new();
+            if let Some(list) = d.node(2) {
+                for r in list.items() {
+                    if let Some(t) = lower_tok_ref(r, p) {
+                        ops.push(t);
+                    }
+                }
+            }
+            ir.precs.push((assoc, ops));
+        } else if prod == p.start_decl {
+            if let Some((t, s)) = d.tok(1) {
+                if ir.start.is_some() {
+                    diags.push(RgDiag { span: s, msg: "duplicate `start`".into(), severity: 1 });
+                } else {
+                    ir.start = Some((t.text.clone(), s));
+                }
+            }
+        } else if prod == p.rule_decl || prod == p.rule_decl_bar {
+            let Some((name, name_span)) = d.tok(1) else { continue };
+            let alt_list_pos = if prod == p.rule_decl_bar { 4 } else { 3 };
+            let mut alts = Vec::new();
+            if let Some(list) = d.node(alt_list_pos) {
+                for a in list.items() {
+                    let Some((label, label_span)) = a.tok(0) else { continue };
+                    let mut syms = Vec::new();
+                    if let Some(sym_list) = a.node(2) {
+                        for s in sym_list.items() {
+                            let sp = s.n.prod as usize;
+                            let (label_s, tok_at) = if sp == p.sym_labeled || sp == p.sym_labeled_str
+                            {
+                                let l = s.tok(0).map(|(t, _)| t.text.clone());
+                                (l, 2)
+                            } else {
+                                (None, 0)
+                            };
+                            let Some((t, span)) = s.tok(tok_at) else { continue };
+                            let is_string = sp == p.sym_str || sp == p.sym_labeled_str;
+                            let text =
+                                if is_string { unquote(&t.text) } else { t.text.clone() };
+                            syms.push(SymIr { label: label_s, text, span, is_string });
+                        }
+                    }
+                    let attrs = a.node(3).map(|x| lower_attrs(x, p)).unwrap_or_default();
+                    alts.push(AltIr { label: label.text.clone(), label_span, syms, attrs });
+                }
+            }
+            ir.rules.push(RuleIr { name: name.text.clone(), name_span, alts });
+        }
+    }
+    ir
+}
+
+// ---------------------------------------------------------------------------
+// Compilation passes
+// ---------------------------------------------------------------------------
+
+pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
+    let mut diags = Vec::new();
+    let ir = lower(tree, p, &mut diags);
+    let d = &mut diags;
+    let error = |d: &mut Vec<RgDiag>, span: (u32, u32), msg: String| {
+        d.push(RgDiag { span, msg, severity: 1 })
+    };
+
+    let lang_name = ir.language.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| "Lang".into());
+    let mode_names: Vec<String> = std::iter::once("DEFAULT".to_string())
+        .chain(ir.mode_names.iter().map(|(n, _)| n.clone()))
+        .collect();
+    let mode_refs: Vec<&str> = mode_names.iter().map(|s| s.as_str()).collect();
+    let mut lex = LexGrammar::new(&lang_name, &mode_refs);
+    if let Some((n, _)) = ir.max_stack {
+        lex.max_stack = Some(n);
+    }
+
+    // ---- tokens (ids in declaration order) ----
+    let mut token_ids: HashMap<String, TokenId> = HashMap::new();
+    let mut token_spans: Vec<(u32, u32)> = Vec::new();
+    let mut lit_text: HashMap<String, TokenId> = HashMap::new();
+    let mut styles = Styles::new(LEGEND.to_vec());
+    let mut style_reqs: Vec<(TokenId, String, (u32, u32))> = Vec::new();
+
+    let mut kw_text: HashMap<String, TokenId> = HashMap::new();
+    let mut kw_bases: Vec<(String, (u32, u32))> = Vec::new();
+    for ev in &ir.events {
+        let t = match ev {
+            IdEvent::Def(t) => t,
+            IdEvent::Keywords { base, base_span, items } => {
+                kw_bases.push((base.clone(), *base_span));
+                for item in items {
+                    if kw_text.contains_key(&item.text) {
+                        error(d, item.span, format!("keyword `{}` declared twice", item.text));
+                        continue;
+                    }
+                    let id = lex.add(TokenDef::new(
+                        &format!("KW_{}", item.text.to_uppercase()),
+                        0,
+                        Pat::Never,
+                    ));
+                    lex.keywords.push((item.text.clone(), id));
+                    kw_text.insert(item.text.clone(), id);
+                    token_spans.push(item.span);
+                    styles.set(id, "keyword");
+                }
+                continue;
+            }
+        };
+        if token_ids.contains_key(&t.name) {
+            error(d, t.name_span, format!("token `{}` declared twice", t.name));
+            continue;
+        }
+        let pat = if t.pat_is_regex {
+            match parse_pattern(&t.pat_src) {
+                Ok(p) => p,
+                Err(e) => {
+                    let at = t.pat_span.0 + 1 + e.pos as u32;
+                    error(d, (at, at + 1), format!("pattern: {}", e.msg));
+                    Pat::Never
+                }
+            }
+        } else {
+            if t.pat_src.is_empty() {
+                error(d, t.pat_span, "literal token text cannot be empty".into());
+            }
+            Pat::Lit(t.pat_src.clone())
+        };
+        let mut def = TokenDef::new(&t.name, t.mode, pat.clone());
+        let mut classes: Vec<(String, (u32, u32))> = Vec::new();
+        for a in &t.attrs {
+            let arity = |d: &mut Vec<RgDiag>, want: usize| {
+                if a.args.len() != want {
+                    error(
+                        d,
+                        a.name_span,
+                        format!("@{} takes {} argument(s), got {}", a.name, want, a.args.len()),
+                    );
+                    false
+                } else {
+                    true
+                }
+            };
+            match a.name.as_str() {
+                "trivia" => def.trivia = true,
+                "error" => def.error = true,
+                "specialize" => def.specialize = true,
+                "pop" => def.action = rantlr_grammar::model::Action::Pop,
+                "push" => {
+                    if arity(d, 1) {
+                        let (m, ms, _) = &a.args[0];
+                        match mode_names.iter().position(|n| n == m) {
+                            Some(i) => def.action = rantlr_grammar::model::Action::Push(i as u16),
+                            None => error(d, *ms, format!("unknown mode `{m}`")),
+                        }
+                    }
+                }
+                "style" => {
+                    if arity(d, 1) {
+                        let (c, cs, _) = &a.args[0];
+                        classes.push((c.clone(), *cs));
+                    }
+                }
+                other => error(
+                    d,
+                    a.name_span,
+                    format!(
+                        "unknown token attribute `@{other}` (expected @trivia, @error, @specialize, @style, @push, @pop)"
+                    ),
+                ),
+            }
+        }
+        let id = lex.add(def);
+        for (class, span) in classes {
+            style_reqs.push((id, class, span));
+        }
+        token_ids.insert(t.name.clone(), id);
+        token_spans.push(t.name_span);
+        if let Pat::Lit(s) = &pat {
+            lit_text.entry(s.clone()).or_insert(id);
+        }
+    }
+
+    // Keyword bases validate against the COMPLETE token map (a keywords
+    // declaration may precede its base token's declaration).
+    for (base, base_span) in &kw_bases {
+        match token_ids.get(base) {
+            None => error(d, *base_span, format!("unknown token `{base}`")),
+            Some(&id) => {
+                if !lex.tokens[id as usize].specialize {
+                    error(
+                        d,
+                        *base_span,
+                        format!("keyword base token `{base}` must be declared @specialize"),
+                    );
+                }
+            }
+        }
+    }
+
+    // Apply @style requests (legend is a closed set).
+    for (id, class, span) in &style_reqs {
+        match LEGEND.iter().find(|e| *e == class) {
+            Some(entry) => styles.set(*id, entry),
+            None => error(
+                d,
+                *span,
+                format!("unknown style class `{class}` (legend: {})", LEGEND.join(", ")),
+            ),
+        }
+    }
+
+    // ---- brackets ----
+    let resolve_tok = |r: &TokRefIr,
+                       token_ids: &HashMap<String, TokenId>,
+                       d: &mut Vec<RgDiag>|
+     -> Option<TokenId> {
+        if r.is_string {
+            if let Some(&id) = lit_text.get(&r.text) {
+                return Some(id);
+            }
+            if let Some(&id) = kw_text.get(&r.text) {
+                return Some(id);
+            }
+            error(
+                d,
+                r.span,
+                format!("`\"{}\"` is not a declared token text or keyword", r.text),
+            );
+            None
+        } else {
+            match token_ids.get(&r.text) {
+                Some(&id) => Some(id),
+                None => {
+                    error(d, r.span, format!("unknown token `{}`", r.text));
+                    None
+                }
+            }
+        }
+    };
+
+    for (open, close) in &ir.brackets {
+        let (Some(o), Some(c)) =
+            (resolve_tok(open, &token_ids, d), resolve_tok(close, &token_ids, d))
+        else {
+            continue;
+        };
+        let kind = match lex.tokens[o as usize].pat {
+            Pat::Lit(ref s) if s == "(" => Some((BracketKind::Paren, ")")),
+            Pat::Lit(ref s) if s == "[" => Some((BracketKind::Bracket, "]")),
+            Pat::Lit(ref s) if s == "{" => Some((BracketKind::Brace, "}")),
+            _ => None,
+        };
+        let Some((kind, want_close)) = kind else {
+            error(d, open.span, "bracket pairs must open with `(`, `[`, or `{`".into());
+            continue;
+        };
+        match &lex.tokens[c as usize].pat {
+            Pat::Lit(s) if s == want_close => {}
+            _ => {
+                error(d, close.span, format!("expected the matching `{want_close}` token"));
+                continue;
+            }
+        }
+        lex.tokens[o as usize].bracket = Some((kind, true));
+        lex.tokens[c as usize].bracket = Some((kind, false));
+    }
+
+    // ---- precedence (level = declaration order, later binds tighter) ----
+    let mut prec_levels: HashMap<TokenId, (u8, Assoc)> = HashMap::new();
+    let mut prec_list: Vec<(TokenId, u8, Assoc)> = Vec::new();
+    for (i, (assoc, ops)) in ir.precs.iter().enumerate() {
+        let level = (i + 1) as u8;
+        for r in ops {
+            if let Some(id) = resolve_tok(r, &token_ids, d) {
+                if prec_levels.insert(id, (level, *assoc)).is_some() {
+                    error(d, r.span, format!("`{}` already has a precedence", r.text));
+                }
+                prec_list.push((id, level, *assoc));
+            }
+        }
+    }
+
+    // ---- rules ----
+    let vocab = Vocab::of(&lex);
+    let mut sg = SynGrammar::new(&format!("{lang_name}Syn"), vocab.names.clone());
+    let mut nt_ids: HashMap<String, u16> = HashMap::new();
+    for r in &ir.rules {
+        if nt_ids.contains_key(&r.name) {
+            error(d, r.name_span, format!("rule `{}` declared twice", r.name));
+            continue;
+        }
+        if token_ids.contains_key(&r.name) {
+            error(d, r.name_span, format!("`{}` is already a token name", r.name));
+            continue;
+        }
+        nt_ids.insert(r.name.clone(), sg.nt(&r.name));
+    }
+    for (id, level, assoc) in &prec_list {
+        sg.set_token_prec(*id, *level, *assoc);
+    }
+
+    let mut binding = BindingConfig::default();
+    let mut outline = OutlineConfig::default();
+    let mut prod_spans: Vec<(u32, u32)> = Vec::new();
+    let mut labels_seen: HashMap<String, ()> = HashMap::new();
+
+    for r in &ir.rules {
+        let Some(&nt) = nt_ids.get(&r.name) else { continue };
+        for alt in &r.alts {
+            if labels_seen.insert(alt.label.clone(), ()).is_some() {
+                error(
+                    d,
+                    alt.label_span,
+                    format!("alternative label `{}` used twice (labels name typed-AST types)", alt.label),
+                );
+            }
+            let mut rhs: Vec<Sym> = Vec::new();
+            let mut positions: HashMap<&str, usize> = HashMap::new();
+            for s in alt.syms.iter() {
+                let sym = if s.is_string {
+                    match lit_text.get(&s.text).or_else(|| kw_text.get(&s.text)) {
+                        Some(&id) => Sym::T(id),
+                        None => {
+                            error(
+                                d,
+                                s.span,
+                                format!(
+                                    "`\"{}\"` is not a declared token text or keyword — declare it (fixed token or `keywords` entry)",
+                                    s.text
+                                ),
+                            );
+                            continue;
+                        }
+                    }
+                } else if let Some(&id) = token_ids.get(&s.text) {
+                    Sym::T(id)
+                } else if let Some(&nt2) = nt_ids.get(&s.text) {
+                    Sym::N(nt2)
+                } else {
+                    error(d, s.span, format!("cannot find token or rule `{}`", s.text));
+                    continue;
+                };
+                // Position = index in the FINAL rhs (robust when an
+                // earlier sym failed to resolve under errors).
+                if let Some(l) = &s.label {
+                    positions.insert(l.as_str(), rhs.len());
+                }
+                rhs.push(sym);
+            }
+            let prod = sg.prod_named(nt, &alt.label, rhs) as u16;
+            prod_spans.push(alt.label_span);
+
+            for a in &alt.attrs {
+                let pos_of = |d: &mut Vec<RgDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
+                    match positions.get(arg.0.as_str()) {
+                        Some(&k) => Some(k),
+                        None => {
+                            error(
+                                d,
+                                arg.1,
+                                format!("no symbol labeled `{}` in this alternative", arg.0),
+                            );
+                            None
+                        }
+                    }
+                };
+                match a.name.as_str() {
+                    "def" => {
+                        if a.args.len() == 1 {
+                            if let Some(k) = pos_of(d, &a.args[0]) {
+                                binding.defs.push((nt, prod, k));
+                            }
+                        } else {
+                            error(d, a.name_span, "@def takes one label argument".into());
+                        }
+                    }
+                    "ref" => {
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@ref takes a label and an optional kind".into());
+                        } else if let Some(k) = pos_of(d, &a.args[0]) {
+                            let kind = match a.args.get(1).map(|x| x.0.as_str()) {
+                                None | Some("var") => RefKind::Var,
+                                Some("call") => RefKind::Call,
+                                Some(other) => {
+                                    error(
+                                        d,
+                                        a.args[1].1,
+                                        format!("unknown ref kind `{other}` (var, call)"),
+                                    );
+                                    RefKind::Var
+                                }
+                            };
+                            binding.refs.push((nt, prod, k, kind));
+                        }
+                    }
+                    "scope" => binding.scopes.push((nt, prod)),
+                    "outline" => {
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@outline takes a label and an optional kind".into());
+                        } else if let Some(k) = pos_of(d, &a.args[0]) {
+                            let kind = match a.args.get(1) {
+                                None => "variable",
+                                Some(arg) => match OUTLINE_KINDS.iter().find(|e| **e == arg.0) {
+                                    Some(e) => e,
+                                    None => {
+                                        error(
+                                            d,
+                                            arg.1,
+                                            format!(
+                                                "unknown outline kind `{}` ({})",
+                                                arg.0,
+                                                OUTLINE_KINDS.join(", ")
+                                            ),
+                                        );
+                                        "variable"
+                                    }
+                                },
+                            };
+                            outline.entries.push(OutlineEntry { nt, prod, name_child: k, kind });
+                        }
+                    }
+                    "prec" => {
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@prec takes one token argument".into());
+                        } else {
+                            let arg = &a.args[0];
+                            let r = TokRefIr { text: arg.0.clone(), span: arg.1, is_string: arg.2 };
+                            if let Some(id) = resolve_tok(&r, &token_ids, d) {
+                                match prec_levels.get(&id) {
+                                    Some(&(level, _)) => {
+                                        let idx = sg.prods.len() - 1;
+                                        sg.prods[idx].prec = Some(level);
+                                    }
+                                    None => error(
+                                        d,
+                                        arg.1,
+                                        format!("`{}` has no declared precedence", arg.0),
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                    other => error(
+                        d,
+                        a.name_span,
+                        format!(
+                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @prec)"
+                        ),
+                    ),
+                }
+            }
+        }
+    }
+
+    // ---- start symbol ----
+    match &ir.start {
+        Some((name, span)) => match nt_ids.get(name) {
+            Some(&nt) => sg.start = nt,
+            None => error(d, *span, format!("cannot find rule `{name}`")),
+        },
+        None => sg.start = 0,
+    }
+    if ir.rules.is_empty() {
+        error(d, (0, 0), "a grammar needs at least one rule".into());
+    }
+
+    (
+        LangDef { lex, sg, binding, styles, outline, token_spans, prod_spans },
+        diags,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Certification: the envelope gates, with spans
+// ---------------------------------------------------------------------------
+
+/// Run the envelope over a compiled definition. Refusals come back as
+/// span-carrying diagnostics: L1/L2 lint witnesses point at the token
+/// declaration, LR conflicts point at an involved production and carry
+/// the counterexample input.
+pub fn certify(def: &LangDef) -> Result<(CompiledLexer, LrTables), Vec<RgDiag>> {
+    let span_of_token = |name: &str| -> (u32, u32) {
+        def.lex
+            .tokens
+            .iter()
+            .position(|t| t.name == name)
+            .and_then(|i| def.token_spans.get(i).copied())
+            .unwrap_or((0, 0))
+    };
+    let lexer = match CompiledLexer::build(&def.lex) {
+        Ok(l) => l,
+        Err(e) => {
+            use rantlr_grammar::dfa::CompileError;
+            use rantlr_grammar::lexer::BuildError;
+            use rantlr_grammar::lints::LintError;
+            let (span, msg) = match &e {
+                BuildError::Compile(CompileError::NonAsciiLiteral { token, .. })
+                | BuildError::Compile(CompileError::EmptyMatch { token }) => {
+                    (span_of_token(token), format!("{e}"))
+                }
+                BuildError::Lint(LintError::TokenSpansLines { token, .. }) => {
+                    (span_of_token(token), format!("{e}"))
+                }
+                BuildError::Lint(_) => ((0, 0), format!("{e}")),
+            };
+            return Err(vec![RgDiag { span, msg, severity: 1 }]);
+        }
+    };
+    let tables = build_lr(&def.sg);
+    if !tables.conflicts.is_empty() {
+        let diags = tables
+            .conflicts
+            .iter()
+            .map(|c| {
+                let span = c
+                    .prods
+                    .first()
+                    .and_then(|&p| def.prod_spans.get(p as usize).copied())
+                    .unwrap_or((0, 0));
+                RgDiag {
+                    span,
+                    msg: format!(
+                        "grammar conflict ({} on {}) — example input: {}\n  {}",
+                        c.kind,
+                        def.sg.term_name(c.lookahead),
+                        c.example,
+                        c.items.join("\n  ")
+                    ),
+                    severity: 1,
+                }
+            })
+            .collect();
+        return Err(diags);
+    }
+    Ok((lexer, tables))
+}
+
+// ---------------------------------------------------------------------------
+// Canonical dumps (the equality gates' comparison form)
+// ---------------------------------------------------------------------------
+
+pub fn dump_lex(g: &LexGrammar) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    writeln!(out, "language {} modes {:?} max_stack {:?}", g.name, g.mode_names, g.max_stack)
+        .unwrap();
+    for (i, t) in g.tokens.iter().enumerate() {
+        writeln!(
+            out,
+            "{i}: {} mode={} trivia={} error={} spec={} bracket={:?} action={:?} pat={:?}",
+            t.name, t.mode, t.trivia, t.error, t.specialize, t.bracket, t.action, t.pat
+        )
+        .unwrap();
+    }
+    writeln!(out, "keywords {:?}", g.keywords).unwrap();
+    out
+}
+
+pub fn dump_syn(sg: &SynGrammar) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    writeln!(out, "syn {} start {}", sg.name, sg.nt_names[sg.start as usize]).unwrap();
+    for (i, _) in sg.prods.iter().enumerate() {
+        writeln!(
+            out,
+            "{i}: [{}] {} prec={:?}",
+            sg.prod_name(i),
+            sg.prod_display(i),
+            sg.prods[i].prec
+        )
+        .unwrap();
+    }
+    let mut precs: Vec<String> = sg
+        .token_prec
+        .iter()
+        .enumerate()
+        .filter_map(|(t, p)| p.map(|(l, a)| format!("{} {l} {a:?}", sg.term_name(t as TokenId))))
+        .collect();
+    precs.sort();
+    writeln!(out, "prec {precs:?}").unwrap();
+    out
+}
+
+pub fn dump_tables(t: &LrTables) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    writeln!(out, "states {} conflicts {}", t.n_states, t.conflicts.len()).unwrap();
+    for (si, row) in t.action.iter().enumerate() {
+        let mut acts: Vec<String> = row.iter().map(|(k, v)| format!("{k}:{v:?}")).collect();
+        acts.sort();
+        let mut gotos: Vec<String> =
+            t.goto_[si].iter().map(|(k, v)| format!("{k}:{v}")).collect();
+        gotos.sort();
+        writeln!(out, "{si}: {acts:?} {gotos:?}").unwrap();
+    }
+    writeln!(out, "fragile {:?}", t.fragile).unwrap();
+    let mut lists: Vec<String> =
+        t.lists.iter().map(|(nt, s)| format!("{nt}:{}/{}", s.cons, s.seed)).collect();
+    lists.sort();
+    writeln!(out, "lists {lists:?}").unwrap();
+    out
+}
+
+pub fn dump_styles(s: &Styles, n_tokens: usize) -> String {
+    let mut pairs: Vec<String> = (0..n_tokens as TokenId)
+        .filter_map(|id| s.class_of(id).map(|c| format!("{id}:{}", s.legend[c as usize])))
+        .collect();
+    pairs.sort();
+    format!("{pairs:?}")
+}
+
+pub fn dump_binding(b: &BindingConfig) -> String {
+    format!("defs {:?} refs {:?} scopes {:?}", b.defs, b.refs, b.scopes)
+}
+
+pub fn dump_outline(o: &OutlineConfig) -> String {
+    let entries: Vec<String> = o
+        .entries
+        .iter()
+        .map(|e| format!("{}/{} child {} kind {}", e.nt, e.prod, e.name_child, e.kind))
+        .collect();
+    format!("{entries:?}")
+}

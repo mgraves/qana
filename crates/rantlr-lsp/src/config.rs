@@ -1,13 +1,22 @@
-//! The hot-reloadable language definition: `chartlang.toml`, a minimal
-//! line-based config that parameterizes the demo grammar — keywords and
-//! operator precedence/associativity — and rebuilds the ENTIRE certified
-//! pipeline (envelope lints, LR tables, conflict counterexamples, style
-//! legend) in milliseconds. Bad configs are refused with the tool's own
-//! counterexamples; the server surfaces them as diagnostics on the
-//! config file. This is the envelope's authoring loop, live.
+//! The hot-reloadable language definition. Two sources, one certified
+//! pipeline:
+//!
+//! * `chartlang.rg` (preferred): the FULL textual grammar surface —
+//!   tokens, modes, keywords, precedence, productions, binding and
+//!   style annotations — compiled by rantlr-rg and certified by the
+//!   envelope. Refusals carry source spans.
+//! * `chartlang.toml` (legacy fallback): keywords + operator precedence
+//!   parameterizing the built-in demo grammar.
+//!
+//! Bad definitions are refused with the tool's own counterexamples; the
+//! server surfaces them as diagnostics on the definition file. This is
+//! the envelope's authoring loop, live.
 
 use rantlr_grammar::demo::{demo_grammar_with_keywords, demo_syn_grammar_prec};
 use rantlr_grammar::{build_lr, Assoc, CompiledLexer, LrTables, SynGrammar, TokenId};
+use rantlr_rg::compile::{certify, RgDiag};
+use rantlr_rg::{compile_source, rg_binding_config, rg_outline_config, rg_styles, RgToolchain};
+use rantlr_sem::{demo_binding_config, BindingConfig};
 use rantlr_services::demo_glue::{demo_outline_config, demo_styles};
 use rantlr_services::{OutlineConfig, Styles};
 
@@ -103,6 +112,7 @@ pub struct Pipeline {
     pub tables: &'static LrTables,
     pub styles: Styles,
     pub outline_cfg: OutlineConfig,
+    pub binding: BindingConfig,
 }
 
 pub fn build_pipeline(cfg: &LangConfig) -> Result<Pipeline, String> {
@@ -134,11 +144,63 @@ pub fn build_pipeline(cfg: &LangConfig) -> Result<Pipeline, String> {
     }
     let styles = demo_styles(&ids);
     let outline_cfg = demo_outline_config(&sg);
+    let binding = demo_binding_config(&sg);
     Ok(Pipeline {
         lexer: Box::leak(Box::new(lexer)),
         sg: Box::leak(Box::new(sg)),
         tables: Box::leak(Box::new(tables)),
         styles,
         outline_cfg,
+        binding,
     })
+}
+
+/// Build the target-language pipeline from a `.rg` grammar source. Parse
+/// repairs, compile errors, and envelope refusals all come back as
+/// span-carrying diagnostics for the grammar file.
+pub fn build_pipeline_rg(tc: &RgToolchain, text: &str) -> Result<Pipeline, Vec<RgDiag>> {
+    let out = compile_source(tc, text);
+    let mut diags: Vec<RgDiag> = rg_parse_diags(tc, text, &out.repairs);
+    diags.extend(out.diags.iter().cloned());
+    if !diags.is_empty() {
+        return Err(diags);
+    }
+    let (lexer, tables) = certify(&out.def)?;
+    Ok(Pipeline {
+        lexer: Box::leak(Box::new(lexer)),
+        sg: Box::leak(Box::new(out.def.sg)),
+        tables: Box::leak(Box::new(tables)),
+        styles: out.def.styles,
+        outline_cfg: out.def.outline,
+        binding: out.def.binding,
+    })
+}
+
+/// Parse repairs of a `.rg` text as span diagnostics (helper shared by
+/// the reload path and the live-editing path).
+pub fn rg_parse_diags(
+    tc: &RgToolchain,
+    text: &str,
+    repairs: &[rantlr_grammar::Repair],
+) -> Vec<RgDiag> {
+    use rantlr_engine::LexedBuffer;
+    let buf = LexedBuffer::new(&tc.lexer, text);
+    rantlr_services::diagnostics(&tc.lexer, &buf, &tc.sg, repairs)
+        .into_iter()
+        .map(|d| RgDiag { span: d.span, msg: d.message, severity: 1 })
+        .collect()
+}
+
+/// The static pipeline for serving `.rg` documents THEMSELVES — the
+/// dogfood loop: grammar files get rantlr-powered highlighting, outline,
+/// navigation, and live envelope diagnostics.
+pub fn rg_service_pipeline(tc: &'static RgToolchain) -> Pipeline {
+    Pipeline {
+        lexer: &tc.lexer,
+        sg: &tc.sg,
+        tables: &tc.tables,
+        styles: rg_styles(&tc.ids),
+        outline_cfg: rg_outline_config(&tc.sg),
+        binding: rg_binding_config(&tc.sg),
+    }
 }

@@ -45,6 +45,11 @@ pub struct BindingConfig {
     pub refs: Vec<(u16, u16, usize, RefKind)>,
     /// (nt, prod) pairs that open a lexical scope.
     pub scopes: Vec<(u16, u16)>,
+    /// Unordered namespaces (declaration languages): a reference may
+    /// resolve to a definition ANYWHERE in a visible scope — forward
+    /// references are the normal case in grammars. Default (false) is
+    /// sequential definition-before-use with shadowing.
+    pub unordered: bool,
 }
 
 /// The demo grammar's annotations: `let` defines (child 1), `NameRef`
@@ -238,6 +243,7 @@ pub type Resolutions = Vec<Target>;
 fn resolve_file(
     st: &SymbolTable,
     foreign: &[(String, Arc<SymbolTable>)], // other files, sorted by uri
+    unordered: bool,
 ) -> Resolutions {
     let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, d) in st.defs.iter().enumerate() {
@@ -261,7 +267,8 @@ fn resolve_file(
             if let Some(cands) = by_name.get(r.name.as_str()) {
                 for &i in cands {
                     let d = &st.defs[i];
-                    if d.order < r.order && st.is_ancestor_or_self(d.scope, r.scope) {
+                    if (unordered || d.order < r.order) && st.is_ancestor_or_self(d.scope, r.scope)
+                    {
                         let key = (depths[d.scope as usize], d.order, i);
                         if best.map_or(true, |b| (key.0, key.1) > (b.0, b.1)) {
                             best = Some(key);
@@ -381,7 +388,7 @@ impl SemDb {
                 return res.clone();
             }
         }
-        let res = Arc::new(resolve_file(&own_symbols, &foreign));
+        let res = Arc::new(resolve_file(&own_symbols, &foreign, self.cfg.unordered));
         self.stats.resolve_computed += 1;
         self.files.get_mut(uri).unwrap().resolve = Some((fp, res.clone()));
         res
@@ -494,10 +501,11 @@ impl SemDb {
         // ancestor of the scope of the nearest following item, falling
         // back to root. Demo-grade: all defs with span.start < offset,
         // innermost-first by scope depth then recency.
+        let unordered = self.cfg.unordered;
         let mut cands: Vec<(&Def, u32)> = st
             .defs
             .iter()
-            .filter(|d| d.span.0 < offset)
+            .filter(|d| unordered || d.span.0 < offset)
             .map(|d| (d, st.scope_depth(d.scope)))
             .collect();
         cands.sort_by(|a, b| (b.1, b.0.order).cmp(&(a.1, a.0.order)));

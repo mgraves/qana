@@ -19,6 +19,22 @@ use std::collections::HashMap;
 // Semantic tokens (tier 0: syntactic, from the token runs)
 // ---------------------------------------------------------------------------
 
+/// The canonical style legend: a CLOSED set of classes shared by every
+/// grammar the server hosts (editor themes and the semantic-token
+/// protocol need one stable legend). Grammar-declared styles must pick
+/// from it — an unknown class is a compile diagnostic, not a surprise.
+pub const LEGEND: &[&str] = &[
+    "keyword",
+    "variable",
+    "number",
+    "string",
+    "comment",
+    "operator",
+    "punctuation",
+    "bracket",
+    "regexp",
+];
+
 /// Token-id → style mapping plus the LSP legend it indexes into.
 #[derive(Clone, Debug)]
 pub struct Styles {
@@ -498,16 +514,7 @@ pub mod demo_glue {
     use rantlr_grammar::SynGrammar;
 
     pub fn demo_styles(ids: &DemoIds) -> Styles {
-        let mut s = Styles::new(vec![
-            "keyword",
-            "variable",
-            "number",
-            "string",
-            "comment",
-            "operator",
-            "punctuation",
-            "bracket",
-        ]);
+        let mut s = Styles::new(super::LEGEND.to_vec());
         for &kw in &ids.kw {
             s.set(kw, "keyword");
         }

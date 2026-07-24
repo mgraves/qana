@@ -494,15 +494,51 @@ Numbers hold: the sugared `chartlang.rg` is 80 lines compiling in
 235 µs (was 86 lines / 457 µs — sugar makes grammars smaller AND
 cheaper); text → certified pipeline still under 2 ms.
 
+## P5 — increment 3 (shipped): tree-sitter grammar emission
+
+`rantlr_rg::tsgen` + the `rg2ts` binary emit a tree-sitter
+`grammar.js` and `queries/highlights.scm` from any envelope-certified
+grammar — the "derived artifact" of the original feasibility report:
+one definition also reaches every tree-sitter-native surface (Neovim,
+Helix, Zed, GitHub). The envelope makes the mapping principled:
+
+* trivia-by-declaration → `extras`
+* keyword specialization → `word:` + inline keyword strings
+  (tree-sitter's keyword extraction mirrors our specialization)
+* declarative precedence (L3) → `prec.left/right(level, …)`
+* L4 lists → idiomatic `repeat1` / separated-`seq` forms; ε-productions
+  become `optional(…)` at references (computed by nullability)
+* binding name children (L8) → `field("name", …)`
+* bounded self-push trivia modes (L2) → RECURSIVE extra rules: nested
+  block comments with no external scanner (tree-sitter nests them
+  unboundedly where we cap depth — a permissive-direction divergence,
+  noted in the emitted header)
+* `@style` classes → highlight captures (`@keyword`,
+  `@punctuation.bracket`, `@string.regexp`, …)
+
+Deliberate boundaries, refused with explanations: @error tokens are
+skipped (tree-sitter has its own ERROR recovery) and non-trivia modes
+(string interpolation) are named external-scanner territory.
+
+Validated against the real thing: `tree-sitter generate` (v0.25)
+accepts both emitted grammars — our canonical-LR(1) discipline held
+under tree-sitter's weaker LALR(1) — and the generated parsers parse
+the corpus with **zero errors**: the chartlang parser reads `demo.cl`,
+and the rg parser reads `rg.rg` and `chartlang.rg` — a tree-sitter
+parser, emitted from a self-hosted grammar, parsing that grammar's own
+source. Checked-in artifacts under `tree-sitter/{chartlang,rg}/` are
+drift-gated; emitted JS is structurally validated (all `$.rule`
+references defined, deterministic output); the live `generate` gate
+soft-skips when the CLI is absent.
+
 ## Status
 
-Seven library crates + a server binary; 85 tests; the full story runs:
+Seven library crates + a server binary; 89 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + LSP, self-hosted: the grammar
 language is defined in itself, parsed by its own engine, and its files
 get the same editor intelligence as the languages it defines.**
 Remaining roadmap (per the feasibility report): grouping on the `.rg`
-surface (needs a typed-AST naming story), tree-sitter grammar emission,
-per-item semantic memoization / real salsa, and the composition/macro
-tiers (Part III).
+surface (needs a typed-AST naming story), per-item semantic
+memoization / real salsa, and the composition/macro tiers (Part III).

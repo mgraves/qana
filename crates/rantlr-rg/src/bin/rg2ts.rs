@@ -1,0 +1,64 @@
+//! Emit a tree-sitter grammar from a `.rg` grammar file:
+//!   cargo run -p rantlr-rg --bin rg2ts -- <grammar.rg> <outdir>
+//!
+//! Writes `<outdir>/grammar.js` and `<outdir>/queries/highlights.scm`.
+//! The grammar is envelope-certified first — out-of-envelope grammars
+//! emit nothing but their refusal diagnostics.
+
+use rantlr_rg::compile::certify;
+use rantlr_rg::tsgen::emit_tree_sitter;
+use rantlr_rg::{compile_source, RgToolchain};
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let [_, src_path, outdir] = args.as_slice() else {
+        eprintln!("usage: rg2ts <grammar.rg> <outdir>");
+        std::process::exit(2);
+    };
+    let src = std::fs::read_to_string(src_path).unwrap_or_else(|e| {
+        eprintln!("rg2ts: cannot read {src_path}: {e}");
+        std::process::exit(2);
+    });
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, &src);
+    if !out.repairs.is_empty() || !out.diags.is_empty() {
+        for d in &out.diags {
+            eprintln!("rg2ts: {}..{}: {}", d.span.0, d.span.1, d.msg);
+        }
+        if !out.repairs.is_empty() {
+            eprintln!("rg2ts: {} parse repair(s) — fix the grammar first", out.repairs.len());
+        }
+        std::process::exit(1);
+    }
+    let (_lexer, tables) = match certify(&out.def) {
+        Ok(x) => x,
+        Err(diags) => {
+            for d in diags {
+                eprintln!("rg2ts: {}..{}: {}", d.span.0, d.span.1, d.msg);
+            }
+            std::process::exit(1);
+        }
+    };
+    let ts = match emit_tree_sitter(&out.def.lex, &out.def.sg, &tables, &out.def.styles, &out.def.binding)
+    {
+        Ok(ts) => ts,
+        Err(errors) => {
+            for e in errors {
+                eprintln!("rg2ts: {e}");
+            }
+            std::process::exit(1);
+        }
+    };
+    for w in &ts.warnings {
+        eprintln!("rg2ts: note: {w}");
+    }
+    let out_path = std::path::Path::new(outdir);
+    std::fs::create_dir_all(out_path.join("queries")).expect("create outdir");
+    std::fs::write(out_path.join("grammar.js"), &ts.grammar_js).expect("write grammar.js");
+    std::fs::write(out_path.join("queries/highlights.scm"), &ts.highlights_scm)
+        .expect("write highlights.scm");
+    println!(
+        "rg2ts: wrote {}/grammar.js and {}/queries/highlights.scm",
+        outdir, outdir
+    );
+}

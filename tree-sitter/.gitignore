@@ -1,0 +1,10 @@
+# tree-sitter build products (grammar.js + queries/ are the emitted,
+# drift-gated artifacts; everything else is `tree-sitter generate` output)
+*/src/
+*/grammar.json
+*/node-types.json
+*/tree-sitter.json
+*/Cargo.toml
+*/package.json
+*/binding.gyp
+*/bindings/

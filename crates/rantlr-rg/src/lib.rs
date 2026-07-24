@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod compile;
 pub mod pat_parse;
 pub mod rg_ast;
+pub mod tsgen;
 
 use bootstrap::{rg_lex_grammar, rg_syn_grammar, RgIds, RgProds};
 use compile::{compile, RgDiag};

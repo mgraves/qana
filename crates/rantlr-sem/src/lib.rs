@@ -53,13 +53,51 @@ pub struct BindingConfig {
     pub defs: Vec<(u16, u16, usize)>,
     /// (nt, prod, symbol-child index of the name token, kind).
     pub refs: Vec<(u16, u16, usize, RefKind)>,
-    /// (nt, prod) pairs that open a lexical scope.
-    pub scopes: Vec<(u16, u16)>,
-    /// Unordered namespaces (declaration languages): a reference may
-    /// resolve to a definition ANYWHERE in a visible scope — forward
-    /// references are the normal case in grammars. Default (false) is
-    /// sequential definition-before-use with shadowing.
+    /// (nt, prod, unordered, barrier) — productions that open a lexical
+    /// scope. `unordered` scopes resolve declaration-language style
+    /// (forward references legal — ordering is a PER-SCOPE property).
+    /// `barrier` scopes seal their namespace: references inside cannot
+    /// escape past the barrier (an island's names are island-local, and
+    /// a guest reference never silently resolves to a host binding).
+    pub scopes: Vec<(u16, u16, bool, bool)>,
+    /// Ordering of the ROOT (file) scope: unordered namespaces
+    /// (declaration languages) resolve forward anywhere; the default
+    /// (false) is sequential definition-before-use with shadowing.
     pub unordered: bool,
+}
+
+/// Compose a guest language's binding into a host's over a composed
+/// grammar (offsets from the [`rantlr_grammar::ComposeMap`]): host
+/// entries apply unchanged (host ids are preserved by composition),
+/// guest entries shift by the offsets, and every island production
+/// becomes a BARRIER scope carrying the guest's root ordering — the
+/// guest's namespace, island-local and sealed in both directions.
+pub fn compose_binding(
+    host: &BindingConfig,
+    guest: &BindingConfig,
+    sg: &SynGrammar,
+    map: &rantlr_grammar::ComposeMap,
+) -> BindingConfig {
+    let mut out = host.clone();
+    for &(_, _, prod) in &map.islands {
+        out.scopes.push((sg.prods[prod as usize].lhs, prod, guest.unordered, true));
+    }
+    for &(nt, prod, k) in &guest.defs {
+        out.defs.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset, k));
+    }
+    for &(nt, prod, k, kind) in &guest.refs {
+        out.refs.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset, k, kind));
+    }
+    for &(nt, prod, unordered, barrier) in &guest.scopes {
+        out.scopes.push((
+            nt + map.guest_nt_offset,
+            prod + map.guest_prod_offset,
+            unordered,
+            barrier,
+        ));
+    }
+    out.unordered = host.unordered;
+    out
 }
 
 /// The demo grammar's annotations: `let` defines (child 1), `NameRef`
@@ -72,7 +110,7 @@ pub fn demo_binding_config(sg: &SynGrammar) -> BindingConfig {
             "LetStmt" => cfg.defs.push((nt, prod, 1)),
             "NameRef" => cfg.refs.push((nt, prod, 0, RefKind::Var)),
             "CallExpr" => cfg.refs.push((nt, prod, 0, RefKind::Call)),
-            "Block" => cfg.scopes.push((nt, prod)),
+            "Block" => cfg.scopes.push((nt, prod, false, false)),
             _ => {}
         }
     }
@@ -121,6 +159,9 @@ enum LocalRes {
     Def(u32),
     /// No fragment-local binding — classify against the environment.
     Escape,
+    /// No fragment-local binding AND a barrier scope seals the ref in:
+    /// unresolved, definitively (island names never leak).
+    Contained,
 }
 
 #[derive(Debug)]
@@ -130,6 +171,11 @@ struct Fragment {
     defs: Vec<Def>,
     refs: Vec<Ref>,
     scope_parents: Vec<ScopeId>,
+    /// Per-scope ordering: unordered scopes resolve forward (index 0 =
+    /// the config's root ordering).
+    scope_unordered: Vec<bool>,
+    /// Per-scope barrier: visibility and escape stop here.
+    scope_barrier: Vec<bool>,
     /// Indices into `defs` of scope-0 definitions, in order — the
     /// item's contribution to the environment (and the signature).
     top_defs: Vec<u32>,
@@ -148,14 +194,34 @@ impl Fragment {
             s = p;
         }
     }
-    fn is_ancestor_or_self(&self, anc: ScopeId, mut s: ScopeId) -> bool {
+    /// Is a def in `anc` visible from a ref in `s`? Ancestor-or-self,
+    /// but the walk STOPS at barrier scopes: defs AT a barrier are
+    /// visible from inside it; defs above it are not.
+    fn visible(&self, anc: ScopeId, mut s: ScopeId) -> bool {
         loop {
             if s == anc {
                 return true;
             }
+            if self.scope_barrier[s as usize] {
+                return false;
+            }
             let p = self.scope_parents[s as usize];
             if p == s {
                 return false;
+            }
+            s = p;
+        }
+    }
+    /// May a ref in scope `s` escape to the file environment (no
+    /// barrier between it and the root)?
+    fn escapes(&self, mut s: ScopeId) -> bool {
+        loop {
+            if self.scope_barrier[s as usize] {
+                return false;
+            }
+            let p = self.scope_parents[s as usize];
+            if p == s {
+                return true;
             }
             s = p;
         }
@@ -167,6 +233,8 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
         defs: Vec::new(),
         refs: Vec::new(),
         scope_parents: vec![0],
+        scope_unordered: vec![cfg.unordered],
+        scope_barrier: vec![false],
         top_defs: Vec::new(),
         local: Vec::new(),
     };
@@ -178,10 +246,11 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
         }
     }
     // Env-independent local resolution: candidates are fragment defs in
-    // visible scopes. Inner scopes shadow the environment uncondition-
-    // ally; scope-0 candidates win in ORDERED mode (same-item defs are
-    // later than any earlier item's) but defer to the environment in
-    // UNORDERED mode (a later item may still shadow).
+    // VISIBLE scopes (barriers stop the walk). Ordering is a per-scope
+    // property: unordered scopes resolve forward. Root-scope candidates
+    // defer to the environment only when the ROOT itself is unordered
+    // (a later item may still shadow); barrier scopes are fragment-
+    // complete, so their unordered resolution is final here.
     let mut by_name: HashMap<&str, Vec<u32>> = HashMap::new();
     for (i, d) in f.defs.iter().enumerate() {
         by_name.entry(d.name.as_str()).or_default().push(i as u32);
@@ -192,11 +261,11 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
         if let Some(cands) = by_name.get(r.name.as_str()) {
             for &i in cands {
                 let d = &f.defs[i as usize];
-                if cfg.unordered && d.scope == 0 {
+                if f.scope_unordered[0] && d.scope == 0 {
                     continue; // unordered top-level: environment decides
                 }
-                if (cfg.unordered || d.order < r.order)
-                    && f.is_ancestor_or_self(d.scope, r.scope)
+                if (f.scope_unordered[d.scope as usize] || d.order < r.order)
+                    && f.visible(d.scope, r.scope)
                 {
                     let key = (depths[d.scope as usize], d.order, i);
                     if best.map_or(true, |b| (key.0, key.1) > (b.0, b.1)) {
@@ -207,7 +276,8 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
         }
         f.local.push(match best {
             Some((_, _, i)) => LocalRes::Def(i),
-            None => LocalRes::Escape,
+            None if f.escapes(r.scope) => LocalRes::Escape,
+            None => LocalRes::Contained,
         });
     }
     return f;
@@ -244,10 +314,16 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
         order: &mut u32,
     ) {
         let mut scope = scope;
-        if n.prod != RUN_PROD && cfg.scopes.iter().any(|&(nt, p)| nt == n.nt && p == n.prod) {
-            let id = f.scope_parents.len() as ScopeId;
-            f.scope_parents.push(scope);
-            scope = id;
+        if n.prod != RUN_PROD {
+            if let Some(&(_, _, unordered, barrier)) =
+                cfg.scopes.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
+            {
+                let id = f.scope_parents.len() as ScopeId;
+                f.scope_parents.push(scope);
+                f.scope_unordered.push(unordered);
+                f.scope_barrier.push(barrier);
+                scope = id;
+            }
         }
         if let Some(&(_, _, k)) = cfg.defs.iter().find(|&&(nt, p, _)| nt == n.nt && p == n.prod) {
             if let Some((name, off)) = name_child(n, k) {
@@ -627,6 +703,7 @@ impl SemDb {
                 for (ri, r) in slot.frag.refs.iter().enumerate() {
                     let t = match slot.frag.local[ri] {
                         LocalRes::Def(d) => Classified::Local(d),
+                        LocalRes::Contained => Classified::Unresolved,
                         LocalRes::Escape => {
                             if env.contains(r.name.as_str()) {
                                 Classified::Top

@@ -137,10 +137,16 @@ pub fn chartlang_with_rg_islands() -> ComposedToolchain {
         styles.set(close, "punctuation");
     }
 
-    // Host binding works on the product UNCHANGED (host nt/prod ids are
-    // preserved by construction); guest binding composition awaits
-    // per-entry ordering (documented refinement).
-    let binding = rantlr_sem::demo_binding_config(&sg);
+    // COMPOSED binding: host entries unchanged (host ids preserved),
+    // guest entries offset, and every island a BARRIER scope carrying
+    // the guest's ordering — the guest namespace is island-local,
+    // forward-resolving, and sealed in both directions.
+    let binding = rantlr_sem::compose_binding(
+        &rantlr_sem::demo_binding_config(&sg),
+        &rg_binding_config(&guest_sg),
+        &sg,
+        &map,
+    );
 
     ComposedToolchain { lexer, sg, tables, styles, binding, map }
 }

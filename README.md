@@ -634,17 +634,49 @@ unclosed delimiter), and foreign guests (Markdown via pulldown-cmark)
 plus the `.rg` `island` declaration surface are the tier's remaining
 increments.
 
+## P7 — increment 2 (shipped): guest binding composition
+
+IntelliSense inside islands. The missing piece named in increment 1 —
+per-entry ordering — landed as something better: **ordering is a
+PER-SCOPE property**, and islands are **barrier scopes**. Binding
+scopes now declare `(unordered, barrier)`: unordered scopes resolve
+declaration-language style (forward references legal — it's the
+guest's own semantics, carried into the island), and barrier scopes
+seal their namespace in both directions — a guest reference never
+silently resolves to a host binding (`rule file = File: tempting`
+with a host `let tempting` is UNRESOLVED and diagnosed, not a
+cross-language jump), and island names are invisible to the host and
+to other islands. `rantlr_sem::compose_binding(host, guest, sg, map)`
+composes the configs mechanically: host entries unchanged (ids
+preserved by composition), guest entries offset, each island a barrier
+scope carrying the guest's root ordering. The `.rg` surface gained
+`@scope(unordered)` for declaration-language scopes.
+
+Because islands attach as statements, island content lives entirely
+inside one per-item fragment — so the whole feature lands in the
+fragment-local resolution layer (visibility walks stop at barriers;
+sealed refs classify as unresolved without consulting the environment)
+and inherits per-item memoization for free: island edits recompute one
+fragment, island navigation is fragment-local.
+
+Gates: forward references between island rules resolve (`widget*`
+jumps down to `rule widget`; a token used before its declaration
+resolves — the unordered island scope at work); references and rename
+stay island-local (two islands defining `widget` don't see each
+other); the seal is diagnosed in both directions; and unresolved
+diagnostics inside a garbage-filled island stay CONTAINED to the
+island span while host navigation flows around it. 97 tests.
+
 ## Status
 
-Seven library crates + a server binary; 95 tests; the full story runs:
+Seven library crates + a server binary; 97 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + LSP, self-hosted: the grammar
 language is defined in itself, parsed by its own engine, and its files
 get the same editor intelligence as the languages it defines.**
-Remaining roadmap (per the feasibility report): guest binding
-composition (IntelliSense inside islands), the `.rg` `island`
-declaration surface + foreign guests (Markdown), grouping on the `.rg`
-surface, per-name semantic dependency tracking / real salsa swap-in,
-and the macro tier (declared argument grammars over the island
-machinery).
+Remaining roadmap (per the feasibility report): the `.rg` `island`
+declaration surface + foreign guests (Markdown) + composed pipelines
+served over LSP, grouping on the `.rg` surface, per-name semantic
+dependency tracking / real salsa swap-in, and the macro tier (declared
+argument grammars over the island machinery).

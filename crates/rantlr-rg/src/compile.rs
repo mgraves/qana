@@ -1009,7 +1009,23 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             binding.refs.push((nt, prod, k, kind));
                         }
                     }
-                    "scope" => binding.scopes.push((nt, prod)),
+                    "scope" => {
+                        // `@scope` = ordered lexical scope; `@scope(unordered)`
+                        // = declaration-language scope (forward refs legal).
+                        let unordered = match a.args.first() {
+                            None => false,
+                            Some((arg, _, _)) if arg == "unordered" => true,
+                            Some((arg, span, _)) => {
+                                error(
+                                    d,
+                                    *span,
+                                    format!("unknown scope kind `{arg}` (only `unordered`)"),
+                                );
+                                false
+                            }
+                        };
+                        binding.scopes.push((nt, prod, unordered, false));
+                    }
                     "outline" => {
                         if a.args.is_empty() || a.args.len() > 2 {
                             error(d, a.name_span, "@outline takes a label and an optional kind".into());

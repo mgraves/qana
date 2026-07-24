@@ -56,6 +56,54 @@ pub struct RgOutcome {
     pub diags: Vec<RgDiag>,
 }
 
+/// An embeddable language pipeline for GUI/editor hosts: everything a
+/// text widget needs to serve a `.rg`-defined language IN PROCESS — no
+/// LSP hop. Owns its certified pipeline with `'static` lifetimes (one
+/// bounded leak per grammar load, the same deliberate pattern the LSP
+/// server uses; grammar loads are rare and small).
+pub struct EmbeddedLang {
+    pub lexer: &'static CompiledLexer,
+    pub sg: &'static SynGrammar,
+    pub tables: &'static LrTables,
+    pub styles: rantlr_services::Styles,
+    pub outline: rantlr_services::OutlineConfig,
+    pub binding: rantlr_sem::BindingConfig,
+}
+
+impl EmbeddedLang {
+    /// Compile + certify a `.rg` grammar source. Refusals come back as
+    /// span-carrying diagnostics against the grammar text.
+    pub fn from_rg_source(src: &str) -> Result<Self, Vec<RgDiag>> {
+        let tc = RgToolchain::new();
+        let out = compile_source(&tc, src);
+        let mut diags = out.diags.clone();
+        if !out.repairs.is_empty() {
+            diags.push(RgDiag {
+                span: (0, 1),
+                msg: format!("{} parse repair(s) in the grammar source", out.repairs.len()),
+                severity: 1,
+            });
+        }
+        if !diags.is_empty() {
+            return Err(diags);
+        }
+        let (lexer, tables) = compile::certify(&out.def)?;
+        Ok(EmbeddedLang {
+            lexer: Box::leak(Box::new(lexer)),
+            sg: Box::leak(Box::new(out.def.sg)),
+            tables: Box::leak(Box::new(tables)),
+            styles: out.def.styles,
+            outline: out.def.outline,
+            binding: out.def.binding,
+        })
+    }
+
+    /// Open an incremental session over a document (total under errors).
+    pub fn session(&self, text: &str) -> IncSession<'static> {
+        IncSession::new(self.lexer, self.sg, self.tables, text).expect("total parsing")
+    }
+}
+
 /// Parse + compile a `.rg` source. Total: broken sources still yield a
 /// tree (with repairs) and a best-effort definition (with diagnostics).
 pub fn compile_source(tc: &RgToolchain, src: &str) -> RgOutcome {

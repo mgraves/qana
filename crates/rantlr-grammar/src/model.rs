@@ -91,10 +91,14 @@ pub struct LexGrammar {
     pub name: String,
     pub mode_names: Vec<String>,
     pub tokens: Vec<TokenDef>,
-    /// Keyword text → the token id it specializes to. Each keyword owns a
-    /// distinct id (a `Pat::Never` token def), so parsers can reference
-    /// individual keywords as terminals.
-    pub keywords: Vec<(String, TokenId)>,
+    /// Keyword specializations: (text, keyword token id, OWNER token id).
+    /// Each keyword owns a distinct id (a `Pat::Never` token def) so
+    /// parsers can reference individual keywords as terminals, and each
+    /// entry names the @specialize token it applies to — specialization
+    /// is per-owner, which is what keeps COMPOSED languages' keyword
+    /// spaces separate (a host keyword is an ordinary identifier inside
+    /// a guest island).
+    pub keywords: Vec<(String, TokenId, TokenId)>,
     /// Maximum mode-stack depth. Required (and L2-checked) when the mode
     /// push graph is cyclic; must be ≤ [`crate::lexer::MAX_STACK`].
     pub max_stack: Option<u8>,

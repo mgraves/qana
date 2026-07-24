@@ -87,7 +87,7 @@ pub struct CompiledLexer {
     actions: Vec<Action>,
     trivia: Vec<bool>,
     specialize: Vec<bool>,
-    keywords: HashMap<String, TokenId>,
+    keywords: HashMap<(TokenId, String), TokenId>,
     stack_bound: u8,
     unknown: TokenId,
 }
@@ -109,7 +109,14 @@ impl CompiledLexer {
             actions: g.tokens.iter().map(|t| t.action).collect(),
             trivia: g.tokens.iter().map(|t| t.trivia).collect(),
             specialize: g.tokens.iter().map(|t| t.specialize).collect(),
-            keywords: g.keywords.iter().cloned().collect(),
+            // Specialization is PER-OWNER: a keyword only re-tags the
+            // token it was declared for (composed languages keep their
+            // keyword spaces separate).
+            keywords: g
+                .keywords
+                .iter()
+                .map(|(w, kw, owner)| ((*owner, w.clone()), *kw))
+                .collect(),
             unknown: g.unknown_id(),
         })
     }
@@ -146,7 +153,7 @@ impl CompiledLexer {
                 }
                 Some((end, mut tok)) => {
                     if self.specialize[tok as usize] {
-                        if let Some(&kw) = self.keywords.get(&text[i..end]) {
+                        if let Some(&kw) = self.keywords.get(&(tok, text[i..end].to_string())) {
                             tok = kw;
                         }
                     }

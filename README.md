@@ -576,15 +576,75 @@ pointer walk + fingerprint-validation pass (~3 ms at 90k items) — the
 damage-hint splice (letting the engine's damage report drive the item
 diff directly) is the named next step.
 
+## P7 — increment 1 (shipped): the composition tier
+
+Part III's language nesting runs, and the design's central claim held:
+**composition is a construction, not new machinery.** The generic
+`compose()` operator (`rantlr_grammar::compose`) builds the PRODUCT
+grammar of a host and a guest as ordinary grammar values — guest modes,
+tokens, and nonterminals offset into one space (names prefixed,
+astgen-clean), each island an OPEN token in a host mode pushing the
+guest's base mode, a CLOSE token popping it, and a host production
+`Island → OPEN guest_start CLOSE`. Finite host state × finite guest
+state = finite product state on the SAME bounded mode stack (L2's
+bound is the nesting depth), so **the product re-certifies through the
+unchanged pipeline** — L1/L2 lints and conflict-checked LR(1) run on
+every composition, which is the composition theorem as a checked
+property with counterexamples. Everything downstream — losslessness,
+Wagner splicing, recovery, L4 balancing, per-item memoization, product
+highlighting — applies to island content verbatim, because the engine
+never learns there were two languages.
+
+The dogfood instance: **chartlang hosting `.rg` fenced islands**
+(`` ```rg `` … `` ``` ``) — code files carrying grammar definitions,
+the seed of the macro tier's declared argument grammars. Gates: the
+product certifies; composed documents parse losslessly with full guest
+structure inside islands (a guest `TokenDef` and EBNF sugar, as typed
+nodes); island-interior and host edits hold incremental ≡ batch with
+100% terminal reuse; fence deletion extends the island (an unclosed-
+block-comment-class mode wave — total, lossless, recovered) and
+healing restores the exact clean tree; host semantics flow AROUND
+islands even broken ones (go-to-definition across a garbage island).
+
+Composing honestly surfaced two real bugs, both fixed with gates:
+
+* **Keyword specialization was global** — the guest's identifier token
+  specialized `let` into the HOST's keyword id inside islands. Keywords
+  now carry their OWNER (the @specialize token they belong to) through
+  the model, the `.rg` compiler, and the lexer: per-owner
+  specialization keeps composed keyword spaces separate — `rule let =`
+  is valid `.rg` inside a chartlang island.
+* **Right breakdown dead-ended at emptied list builders**: unwinding a
+  reused list's pieces left the automaton in the after-list state with
+  an empty builder, so recovery fabricated separators for valid text.
+  Absorption-seeded list entries are now provenance-marked and unwind
+  entirely (restoring the pre-list GOTO state) when emptied — fresh
+  ε-reduce lists stay put.
+
+Numbers (release): compose + certify the product in **3.5 ms** (76
+tokens, 83 productions, 255 states); a 50k-line composed document with
+500 islands cold-parses in 88.5 ms; an edit INSIDE a mid-file island
+reparses in **416 µs at 100% reuse**, a host edit near islands in
+**194 µs** — edit cost tracks the edit across language boundaries.
+Deliberate scope notes: guest binding configs are not composed yet
+(per-entry ordering is the missing piece — islands get syntax, trees,
+and highlighting; guest-side IntelliSense inside islands is next),
+island extent is lexical (unterminated guest modes extend it, like any
+unclosed delimiter), and foreign guests (Markdown via pulldown-cmark)
+plus the `.rg` `island` declaration surface are the tier's remaining
+increments.
+
 ## Status
 
-Seven library crates + a server binary; 90 tests; the full story runs:
+Seven library crates + a server binary; 95 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + LSP, self-hosted: the grammar
 language is defined in itself, parsed by its own engine, and its files
 get the same editor intelligence as the languages it defines.**
-Remaining roadmap (per the feasibility report): grouping on the `.rg`
-surface (needs a typed-AST naming story), per-name semantic dependency
-tracking / real salsa swap-in, and the composition/macro tiers
-(Part III).
+Remaining roadmap (per the feasibility report): guest binding
+composition (IntelliSense inside islands), the `.rg` `island`
+declaration surface + foreign guests (Markdown), grouping on the `.rg`
+surface, per-name semantic dependency tracking / real salsa swap-in,
+and the macro tier (declared argument grammars over the island
+machinery).

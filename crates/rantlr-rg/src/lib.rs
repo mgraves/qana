@@ -68,6 +68,84 @@ pub fn compile_source(tc: &RgToolchain, src: &str) -> RgOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// Composition (Part III tier 1): chartlang hosting `.rg` islands —
+// code files carrying grammar definitions in fenced blocks. Built with
+// the GENERIC compose() operator over the two envelope grammars this
+// workspace already certifies, then re-certified as one product.
+// ---------------------------------------------------------------------------
+
+/// The composed chartlang⊃rg pipeline: `` ```rg `` … `` ``` `` fenced
+/// islands are statements; island interiors are full `.rg` — lexing,
+/// parsing, balancing, recovery, highlighting all from the ONE product
+/// grammar.
+pub struct ComposedToolchain {
+    pub lexer: CompiledLexer,
+    pub sg: SynGrammar,
+    pub tables: rantlr_grammar::LrTables,
+    pub styles: rantlr_services::Styles,
+    pub binding: rantlr_sem::BindingConfig,
+    pub map: rantlr_grammar::ComposeMap,
+}
+
+pub fn chartlang_with_rg_islands() -> ComposedToolchain {
+    use rantlr_grammar::demo::{demo_grammar, demo_syn_grammar};
+    let (host_lex, host_ids) = demo_grammar();
+    let host_lexer = CompiledLexer::build(&host_lex).expect("host in envelope");
+    let host_sg = demo_syn_grammar(&host_ids, &host_lexer.vocab);
+    let (guest_lex, guest_ids) = rg_lex_grammar();
+    let guest_lexer = CompiledLexer::build(&guest_lex).expect("guest in envelope");
+    let (guest_sg, _) = rg_syn_grammar(&guest_ids, &guest_lexer.vocab);
+
+    let (lex, sg, map) = rantlr_grammar::compose(
+        &host_lex,
+        &host_sg,
+        &guest_lex,
+        &guest_sg,
+        &[rantlr_grammar::IslandSpec {
+            open_text: "```rg".into(),
+            close_text: "```".into(),
+            host_mode: 0,
+            attach_to: "stmt".into(),
+            name: "rg".into(),
+        }],
+    )
+    .expect("compositional checks pass");
+
+    // The composition theorem, checked: the PRODUCT goes through the
+    // unchanged certification pipeline.
+    let lexer = CompiledLexer::build(&lex).expect("product in envelope (L1/L2 on the product)");
+    let tables = build_lr(&sg);
+    assert!(tables.conflicts.is_empty(), "product is LR(1)-deterministic");
+
+    // Product styles: host classes at unchanged ids, guest classes at
+    // the offset, fences as punctuation.
+    let mut styles = rantlr_services::Styles::new(rantlr_services::LEGEND.to_vec());
+    let host_styles = rantlr_services::demo_glue::demo_styles(&host_ids);
+    for id in 0..host_lex.tokens.len() as rantlr_grammar::TokenId {
+        if let Some(c) = host_styles.class_of(id) {
+            styles.set(id, host_styles.legend[c as usize]);
+        }
+    }
+    let guest_styles = rg_styles(&guest_ids);
+    for id in 0..guest_lex.tokens.len() as rantlr_grammar::TokenId {
+        if let Some(c) = guest_styles.class_of(id) {
+            styles.set(id + map.guest_token_offset, guest_styles.legend[c as usize]);
+        }
+    }
+    for &(open, close, _) in &map.islands {
+        styles.set(open, "punctuation");
+        styles.set(close, "punctuation");
+    }
+
+    // Host binding works on the product UNCHANGED (host nt/prod ids are
+    // preserved by construction); guest binding composition awaits
+    // per-entry ordering (documented refinement).
+    let binding = rantlr_sem::demo_binding_config(&sg);
+
+    ComposedToolchain { lexer, sg, tables, styles, binding, map }
+}
+
+// ---------------------------------------------------------------------------
 // Editor-service glue for `.rg` files themselves (the dogfood loop:
 // grammar files get rantlr-powered highlighting, outline, navigation).
 // These mirror what compiling `rg.rg` produces — gated in rg_e2e.

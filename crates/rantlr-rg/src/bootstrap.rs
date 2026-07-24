@@ -153,7 +153,7 @@ pub fn rg_lex_grammar() -> (LexGrammar, RgIds) {
         .iter()
         .map(|w| g.add(TokenDef::new(&format!("KW_{}", w.to_uppercase()), DEFAULT, Pat::Never)))
         .collect();
-    g.keywords = RG_KEYWORDS.iter().zip(&kw).map(|(w, id)| (w.to_string(), *id)).collect();
+    g.keywords = RG_KEYWORDS.iter().zip(&kw).map(|(w, id)| (w.to_string(), *id, name)).collect();
 
     (
         g,

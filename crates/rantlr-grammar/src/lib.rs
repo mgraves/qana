@@ -11,6 +11,7 @@
 //! across a line break; L2: the unbounded mode-push cycle).
 
 pub mod astgen;
+pub mod compose;
 pub mod dfa;
 pub mod demo;
 pub mod demo_ast;
@@ -25,6 +26,7 @@ pub mod pat;
 pub mod syn;
 pub mod typed;
 
+pub use compose::{compose, ComposeMap, IslandSpec};
 pub use green::{build_green, GreenChild, GreenNode, GreenToken, TokWithText, NEWLINE};
 pub use incremental::{
     batch_parse_full, batch_parse_green, incremental_parse, salvage, FreshRegion, IncParseError,

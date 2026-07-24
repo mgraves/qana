@@ -67,7 +67,7 @@ pub fn emit_tree_sitter(
 
     // ---- classify tokens ----
     let kw_of: HashMap<TokenId, &str> =
-        lex.keywords.iter().map(|(w, id)| (*id, w.as_str())).collect();
+        lex.keywords.iter().map(|(w, id, _)| (*id, w.as_str())).collect();
     let mut term_form: Vec<TermForm> = Vec::new();
     let mut token_rules: Vec<(String, String)> = Vec::new(); // (name, regex)
     let mut extras: Vec<String> = Vec::new();

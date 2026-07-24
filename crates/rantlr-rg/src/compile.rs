@@ -511,12 +511,15 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
     let mut style_reqs: Vec<(TokenId, String, (u32, u32))> = Vec::new();
 
     let mut kw_text: HashMap<String, TokenId> = HashMap::new();
-    let mut kw_bases: Vec<(String, (u32, u32))> = Vec::new();
+    // (base name, base span, indices into lex.keywords) — the OWNER id
+    // is patched after the token pass (a keywords declaration may
+    // precede its base token's declaration).
+    let mut kw_groups: Vec<(String, (u32, u32), Vec<usize>)> = Vec::new();
     for ev in &ir.events {
         let t = match ev {
             IdEvent::Def(t) => t,
             IdEvent::Keywords { base, base_span, items } => {
-                kw_bases.push((base.clone(), *base_span));
+                let mut indices = Vec::new();
                 for item in items {
                     if kw_text.contains_key(&item.text) {
                         error(d, item.span, format!("keyword `{}` declared twice", item.text));
@@ -527,11 +530,13 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         0,
                         Pat::Never,
                     ));
-                    lex.keywords.push((item.text.clone(), id));
+                    indices.push(lex.keywords.len());
+                    lex.keywords.push((item.text.clone(), id, 0));
                     kw_text.insert(item.text.clone(), id);
                     token_spans.push(item.span);
                     styles.set(id, "keyword");
                 }
+                kw_groups.push((base.clone(), *base_span, indices));
                 continue;
             }
         };
@@ -609,9 +614,10 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
         }
     }
 
-    // Keyword bases validate against the COMPLETE token map (a keywords
-    // declaration may precede its base token's declaration).
-    for (base, base_span) in &kw_bases {
+    // Keyword bases validate against the COMPLETE token map, and each
+    // group's entries get their OWNER patched in (specialization is
+    // per-owner).
+    for (base, base_span, indices) in &kw_groups {
         match token_ids.get(base) {
             None => error(d, *base_span, format!("unknown token `{base}`")),
             Some(&id) => {
@@ -621,6 +627,9 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         *base_span,
                         format!("keyword base token `{base}` must be declared @specialize"),
                     );
+                }
+                for &i in indices {
+                    lex.keywords[i].2 = id;
                 }
             }
         }

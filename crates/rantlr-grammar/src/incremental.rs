@@ -729,8 +729,10 @@ pub fn incremental_parse(
     macro_rules! try_unwind {
         () => {{
             let mut done = false;
+            let mut pop_empty_list = false;
             match stack.last_mut() {
-                Some(Entry { sym: SymSlot::List(b), .. }) => {
+                Some(Entry { spliced: entry_spliced, sym: SymSlot::List(b), .. }) => {
+                    let entry_spliced = *entry_spliced;
                     // Step over trailing trivia pieces (state-inert) to
                     // reach the last structural piece.
                     let mut trailing: Vec<GreenChild> = Vec::new();
@@ -778,9 +780,28 @@ pub fn incremental_parse(
                             done = true;
                         }
                         None => {
-                            // Not unwindable: restore the trivia.
-                            for c in trailing.into_iter().rev() {
-                                b.pieces.push(Piece::Loose(c, false));
+                            if b.pieces.is_empty() && entry_spliced {
+                                // Unwinding emptied a list entry that
+                                // only exists because of reuse: the
+                                // entry AND its GOTO state unwind too
+                                // (the automaton returns to the
+                                // pre-list state, where batch would
+                                // be). Its stepped-over trivia rejoins
+                                // the input.
+                                let pend = std::mem::take(&mut pending);
+                                for c in pend.into_iter().rev() {
+                                    input.push_front(Item::Sub(c));
+                                }
+                                for c in trailing.into_iter() {
+                                    input.push_front(Item::Sub(c));
+                                }
+                                pop_empty_list = true;
+                                done = true;
+                            } else {
+                                // Not unwindable: restore the trivia.
+                                for c in trailing.into_iter().rev() {
+                                    b.pieces.push(Piece::Loose(c, false));
+                                }
                             }
                         }
                     }
@@ -807,6 +828,10 @@ pub fn incremental_parse(
                     done = true;
                 }
                 _ => {}
+            }
+            if pop_empty_list {
+                stack.pop();
+                states.pop();
             }
             done
         }};
@@ -1100,10 +1125,14 @@ pub fn incremental_parse(
                             prepend_trivia(&node, std::mem::take(&mut pending))
                         };
                         if !continues {
+                            // `spliced: true` — this list entry exists
+                            // because of REUSED structure; if unwinding
+                            // later empties it, the entry itself (and
+                            // its GOTO state) must unwind too.
                             stack.push(Entry {
                                 leading: Vec::new(),
                                 sym: SymSlot::List(ListBuilder::new(node.nt)),
-                                spliced: false,
+                                spliced: true,
                             });
                             states.push(goto_next.unwrap());
                         }

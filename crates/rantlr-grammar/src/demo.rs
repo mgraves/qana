@@ -167,7 +167,7 @@ pub fn demo_grammar_with_keywords(keywords: &[String]) -> (LexGrammar, DemoIds) 
     g.keywords = keywords
         .iter()
         .zip(&kw)
-        .map(|(w, id)| (w.clone(), *id))
+        .map(|(w, id)| (w.clone(), *id, ident))
         .collect();
 
     // BLOCK mode: nested comment interior. All trivia.

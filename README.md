@@ -531,14 +531,60 @@ drift-gated; emitted JS is structurally validated (all `$.rule`
 references defined, deterministic output); the live `generate` gate
 soft-skips when the CLI is absent.
 
+## P6 — increment 1 (shipped): per-item semantic memoization
+
+The granularity refinement named in P4: rantlr-sem now memoizes at the
+level of a file's top-level ITEMS. The mechanism falls out of machinery
+the toolchain already had — the incremental parser reuses untouched
+subtrees by `Arc` identity, so an item's pointer is a free, exact memo
+key. Two layers per item:
+
+* **Fragments** (keyed by pointer alone): defs/refs with ITEM-RELATIVE
+  spans, fragment-local scopes/order, and env-independent local
+  resolution — a ref either binds inside its item or ESCAPES.
+* **Item resolutions** (keyed by pointer + an environment fingerprint
+  chained over preceding items' top-level NAME sequences + the foreign
+  signature fingerprint): escaped refs are CLASSIFIED (top-level /
+  foreign / unresolved). Positions are never cached — they're recovered
+  through a lazily built per-revision name index — so caches survive
+  item insertion and body edits without positional staleness.
+
+`set_tree` diffs old/new item lists by pointer prefix/suffix: fragments
+and resolutions carry over positionally (no map traffic), dropped
+fragments are swept exactly, and the top-name count map updates from
+the edit-sized delta — so an unchanged signature is PROVEN in O(edit)
+and never re-sorted (backdating keeps other files' fingerprints still).
+
+Measured at 100k lines (90k items, 40k defs / 160k refs): a body edit's
+semantic cost fell from ~19.5 ms (P4 recomputed symbols + resolution
+wholesale) to **~4.9 ms** — with counters proving **2 fragment walks +
+2 item resolutions** (the edited item plus its trivia-adjacent
+neighbor: the newline ending an item lives in the NEXT item's leading
+spine, a bounded losslessness adjacency). The other file answers in
+**0.5 µs**; go-to-definition is 1 µs after a 1.7 ms first-call index
+build; a body edit in the small file leaves the 100k-line file fully
+memoized (100 µs validation pass). New gate: inserting a NON-DEFINING
+statement mid-file leaves every downstream item memoized even though
+all of them shifted position. The differential gate (incremental DB ≡
+fresh DB over random edit sequences) held throughout.
+
+Honest scope notes: a SIGNATURE edit reclassifies downstream items
+(~11 ms — the env fingerprint is deliberately coarse, since a changed
+export could shadow anything below; per-NAME dependency tracking is the
+salsa-grade refinement), and the per-keystroke floor is an O(items)
+pointer walk + fingerprint-validation pass (~3 ms at 90k items) — the
+damage-hint splice (letting the engine's damage report drive the item
+diff directly) is the named next step.
+
 ## Status
 
-Seven library crates + a server binary; 89 tests; the full story runs:
+Seven library crates + a server binary; 90 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + LSP, self-hosted: the grammar
 language is defined in itself, parsed by its own engine, and its files
 get the same editor intelligence as the languages it defines.**
 Remaining roadmap (per the feasibility report): grouping on the `.rg`
-surface (needs a typed-AST naming story), per-item semantic
-memoization / real salsa, and the composition/macro tiers (Part III).
+surface (needs a typed-AST naming story), per-name semantic dependency
+tracking / real salsa swap-in, and the composition/macro tiers
+(Part III).

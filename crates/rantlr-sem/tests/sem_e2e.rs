@@ -109,18 +109,21 @@ fn cross_file_resolution_through_signatures() {
 }
 
 #[test]
-fn firewall_body_edits_never_cross_files() {
+fn firewall_body_edits_never_cross_files_or_items() {
     let p = pipe();
+    // File a = 2 top-level ITEMS: a let and an if-block.
     let src_a = "let exported = 1;\nif (exported) {\n  let body = 2;\n  emit(body, 1);\n}\n";
     let mut a = session(&p, src_a);
     let b = session(&p, "let user = exported;\n");
     let mut db = db_with(&p, &[("a", &a), ("b", &b)]);
-    db.resolve("a");
-    db.resolve("b");
+    db.unresolved("a");
+    db.unresolved("b");
     let base = db.stats;
 
-    // BODY edit in a: change the block-local statement. The signature of
-    // `a` is unchanged, so b's resolution must NOT recompute (L9).
+    // BODY edit in a's second item. The signature of `a` is unchanged
+    // AND no top-level name sequence moved, so: exactly ONE fragment
+    // walk and ONE item resolution — the other item and all of b are
+    // memoized (L9, now at item granularity).
     a.edit(&p.sg, &p.tables, &[LineEdit {
         start: 2,
         end: 3,
@@ -128,17 +131,23 @@ fn firewall_body_edits_never_cross_files() {
     }])
     .unwrap();
     db.set_tree("a", a.tree().unwrap().clone());
-    db.resolve("a");
-    db.resolve("b");
+    db.unresolved("a");
+    db.unresolved("b");
     let after_body = db.stats;
     assert_eq!(
-        after_body.resolve_computed - base.resolve_computed,
+        after_body.fragments_computed - base.fragments_computed,
         1,
-        "only a's resolution recomputes on a body edit"
+        "one fragment walk for the edited item"
+    );
+    assert_eq!(
+        after_body.item_resolves_computed - base.item_resolves_computed,
+        1,
+        "one item resolution: the edited item; sibling and b memoized"
     );
 
-    // SIGNATURE edit in a: rename the exported def. Now b MUST recompute
-    // (and its ref goes unresolved).
+    // SIGNATURE edit in a: rename the exported def. Downstream items of
+    // a (env changed) and b (foreign fingerprint moved) recompute their
+    // RESOLUTIONS — but still only ONE fragment walk.
     a.edit(&p.sg, &p.tables, &[LineEdit {
         start: 0,
         end: 1,
@@ -146,13 +155,22 @@ fn firewall_body_edits_never_cross_files() {
     }])
     .unwrap();
     db.set_tree("a", a.tree().unwrap().clone());
-    db.resolve("a");
+    db.unresolved("a");
     let res_b = db.resolve("b");
     let after_sig = db.stats;
+    // Two fragments, not one: the newline between the items is trivia
+    // attached INSIDE the second item's leading spine (losslessness),
+    // so re-lexing it re-anchors the neighbor's Arc. Bounded to exactly
+    // one right neighbor, and the recomputed fragment is value-equal.
     assert_eq!(
-        after_sig.resolve_computed - after_body.resolve_computed,
+        after_sig.fragments_computed - after_body.fragments_computed,
         2,
-        "signature change recomputes both files"
+        "edited item + its right neighbor (trailing-newline adjacency)"
+    );
+    assert_eq!(
+        after_sig.item_resolves_computed - after_body.item_resolves_computed,
+        3,
+        "edited item + its downstream sibling + b's single item"
     );
     assert_eq!(res_b[0], Target::Unresolved, "b's use of the old name breaks");
 }
@@ -244,6 +262,50 @@ fn differential_incremental_db_equals_fresh_db() {
         srcs[0] = sessions[0].buf.reproduce();
         srcs[1] = sessions[1].buf.reproduce();
     }
+}
+
+/// The per-item claim beyond P4: inserting a NON-DEFINING statement
+/// mid-file leaves every downstream item's resolution memoized (the
+/// top-level name sequence — the environment fingerprint — is
+/// unchanged), even though every downstream item shifted position.
+#[test]
+fn inserting_a_non_def_item_leaves_downstream_memoized() {
+    let p = pipe();
+    let src: String = (0..40)
+        .map(|i| format!("let v{i} = {};\nemit(v{i}, 1);\n", if i == 0 { "1".into() } else { format!("v{}", i - 1) }))
+        .collect();
+    let mut s = session(&p, &src);
+    let mut db = db_with(&p, &[("a", &s)]);
+    db.unresolved("a");
+    let base = db.stats;
+
+    // Insert `emit(v3, 9);` mid-file: no top-level def added.
+    s.edit(&p.sg, &p.tables, &[LineEdit {
+        start: 20,
+        end: 20,
+        replacement: vec![Line::new("emit(v3, 9);", LineTerm::Lf)],
+    }])
+    .unwrap();
+    db.set_tree("a", s.tree().unwrap().clone());
+    assert!(db.unresolved("a").is_empty());
+    let after = db.stats;
+    assert!(
+        after.fragments_computed - base.fragments_computed <= 2,
+        "edit-sized fragments (inserted item + trivia-adjacent neighbor), got {}",
+        after.fragments_computed - base.fragments_computed
+    );
+    assert!(
+        after.item_resolves_computed - base.item_resolves_computed <= 2,
+        "downstream items stay memoized despite shifting position, got {}",
+        after.item_resolves_computed - base.item_resolves_computed
+    );
+
+    // And navigation still lands correctly after the shift.
+    let now = s.buf.reproduce();
+    let off = now.rfind("emit(v39").unwrap() as u32 + 5;
+    let (uri, span) = db.definition("a", off).expect("v39 resolves");
+    assert_eq!(uri, "a");
+    assert_eq!(&now[span.0 as usize..span.1 as usize], "v39");
 }
 
 #[test]

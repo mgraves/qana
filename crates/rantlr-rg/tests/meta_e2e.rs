@@ -492,3 +492,52 @@ fn let_rhs_prod(
         _ => None,
     })
 }
+
+/// HYGIENE. One rule finds every capture: a reference that survives
+/// expansion must resolve to the same definition afterwards as it did
+/// where it was WRITTEN. The binding tier answers both halves and
+/// provenance connects them, so cpp's classic capture — a macro body's
+/// free name swallowed by a local at the use site — is reported
+/// instead of silently changing meaning.
+#[test]
+fn hygiene_reports_capture() {
+    let (lexer, def, tables) = world();
+    let ex = |doc: &str| expand_document(&lexer, &def, &tables, doc, &[], 8).unwrap();
+
+    // The body's `unit` names the top-level binding. Spliced into a
+    // block that declares its OWN `unit`, it would silently bind
+    // there instead.
+    let doc = "let unit = 10;\nmacro scaled(v) => { v * unit }\nlet z = { let unit = 99; scaled!(2) };\n";
+    let out = ex(doc);
+    let hyg: Vec<&str> = out.diags.iter().map(|d| d.msg.as_str()).filter(|m| m.starts_with("hygiene")).collect();
+    assert_eq!(hyg.len(), 1, "exactly the one capture: {:?}", out.diags);
+    assert!(hyg[0].contains("`unit`"), "{}", hyg[0]);
+    // …and it points at the reference in the BODY, where the author
+    // can see what got captured.
+    let d = out.diags.iter().find(|d| d.msg.starts_with("hygiene")).unwrap();
+    assert_eq!(d.span.0 as usize, doc.find("unit }").unwrap(), "at the body's `unit`");
+    // The expansion still happens (v1 reports, it does not rename).
+    assert!(out.text.contains("2 * unit"), "{}", out.text);
+
+    // Capture in the other direction: an ARGUMENT's name swallowed by
+    // a binding inside the body.
+    let doc2 = "let n = 1;\nmacro shadow(x) => { { let n = 5; x } }\nlet z = shadow!(n);\n";
+    let out2 = ex(doc2);
+    assert!(
+        out2.diags.iter().any(|d| d.msg.starts_with("hygiene") && d.msg.contains("`n`")),
+        "the argument's `n` is captured by the body's local: {:?}",
+        out2.diags
+    );
+
+    // NO FALSE POSITIVES: the committed demo — nested macros, blocks,
+    // arguments, reflection-free — expands with a clean bill.
+    let clean = ex(DEMO);
+    assert!(
+        !clean.diags.iter().any(|d| d.msg.starts_with("hygiene")),
+        "the demo is hygienic: {:?}",
+        clean.diags
+    );
+    // A block that does NOT shadow anything the body uses is fine too.
+    let ok = ex("let unit = 10;\nmacro scaled(v) => { v * unit }\nlet z = { let other = 99; scaled!(2) };\n");
+    assert!(!ok.diags.iter().any(|d| d.msg.starts_with("hygiene")), "{:?}", ok.diags);
+}

@@ -1402,6 +1402,37 @@ silent change of meaning. Added parentheses are their own provenance
 kind, so a reader of generated code can see exactly which bytes the
 expander contributed and why.
 
+## Hygiene: one rule, because the binding tier can answer it
+
+Capture has a definition this architecture can simply *check*:
+
+> every reference that survives expansion must resolve to the same
+> definition afterwards as it did where it was written.
+
+The binding tier answers both halves and provenance connects them —
+each output byte knows its file and span, so a reference in the
+expansion can be looked up in the world it was WRITTEN in and
+compared with the world it LANDED in. One rule catches every flavor:
+a macro body's free name swallowed by a local at the use site (cpp's
+classic), an argument's name captured by a binding inside the body,
+and a reference that loses its binding entirely. The diagnostic
+points at the reference that changed meaning and names both
+definitions.
+
+  let unit = 10;
+  macro scaled(v) => { v * unit }
+  let z = { let unit = 99; scaled!(2) };
+     ⇩
+  hygiene: `unit` changes meaning when expanded — where it is
+  written it names the definition at byte 4, but after expansion
+  it binds the definition at byte 76
+
+v1 REPORTS rather than renames (renaming needs the same information
+plus a way to mint names the grammar admits — the named successor).
+The gates pin both directions of capture AND the absence of false
+positives: the committed demo, blocks that shadow something else, and
+every existing example expand with a clean bill.
+
 Building this also caught a REAL engine bug the suite had been
 hiding: the type tier's per-item memoization keyed its cache by raw
 subtree address without keeping the subtree alive, so a freed item's
@@ -1414,7 +1445,7 @@ tests.
 
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 161 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 164 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

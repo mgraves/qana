@@ -14,7 +14,7 @@ use crate::compile::LangDef;
 use rantlr_engine::IncSession;
 use rantlr_grammar::{CompiledLexer, LrTables};
 use rantlr_sem::macros::{compose, expand_pass, MacroDiag, Seg, SegKind, SyntaxInfo};
-use rantlr_sem::SemDb;
+use rantlr_sem::{SemDb, Target};
 
 pub struct ExpandOutcome {
     pub text: String,
@@ -98,7 +98,116 @@ pub fn expand_document(
             break;
         }
     }
+    // Hygiene is checked on the RESULT, once: every reference that
+    // survived must still mean what it meant where it was written.
+    if substitutions > 0 {
+        diags.extend(check_hygiene(lexer, def, tables, text, siblings, &current, &segs));
+    }
     Ok(ExpandOutcome { text: current, segs, passes, substitutions, diags, repairs })
+}
+
+// ---------------------------------------------------------------------------
+// Hygiene: expansion must not change what a name MEANS
+// ---------------------------------------------------------------------------
+
+/// The whole hygiene property, in one sentence the binding tier can
+/// check: EVERY REFERENCE THAT SURVIVES EXPANSION MUST RESOLVE TO THE
+/// SAME DEFINITION AFTERWARDS AS IT DID BEFORE. A macro body's free
+/// name that binds to a local at the use site (cpp's classic capture),
+/// an argument whose name is captured by a binding inside the body,
+/// a reference that loses its binding entirely — all three are the
+/// same violation of the same rule, so one check finds them all.
+///
+/// Provenance is what makes it decidable: every output byte knows the
+/// file and span it came from, so a reference in the output can be
+/// looked up in the world it was WRITTEN in and compared with the
+/// world it LANDED in. v1 REPORTS captures (renaming to avoid them is
+/// the named successor — it needs the same information, plus a way to
+/// mint names the grammar admits).
+fn check_hygiene(
+    lexer: &CompiledLexer,
+    def: &LangDef,
+    tables: &LrTables,
+    src_text: &str,
+    siblings: &[(String, String)],
+    out_text: &str,
+    segs: &[Seg],
+) -> Vec<MacroDiag> {
+    let mut diags = Vec::new();
+    let world = |uri: &str, text: &str| -> Option<SemDb> {
+        let mut db = SemDb::new(def.binding.clone());
+        for (su, st) in siblings {
+            let s = IncSession::new(lexer, &def.sg, tables, st).ok()?;
+            db.set_tree(su, s.tree()?.clone());
+        }
+        let s = IncSession::new(lexer, &def.sg, tables, text).ok()?;
+        db.set_tree(uri, s.tree()?.clone());
+        Some(db)
+    };
+    let (Some(mut before), Some(mut after)) = (world("src", src_text), world("out", out_text))
+    else {
+        return diags;
+    };
+
+    // Where an output span came from: (file, span in that file).
+    let origin = |span: (u32, u32)| -> Option<(String, (u32, u32))> {
+        let i = segs.partition_point(|s| s.out.1 <= span.0);
+        let s = segs.get(i)?;
+        if span.1 > s.out.1 || s.kind.synthesized() {
+            return None;
+        }
+        let d = span.0 - s.out.0;
+        Some((
+            s.src_uri.clone().unwrap_or_else(|| "src".into()),
+            (s.src.0 + d, s.src.0 + d + (span.1 - span.0)),
+        ))
+    };
+
+    let out_syms = after.symbols("out");
+    let out_res = after.resolve("out");
+    for (ri, r) in out_syms.refs.iter().enumerate() {
+        let Some((home, home_span)) = origin(r.span) else { continue };
+        // What this reference meant where it was WRITTEN.
+        let (bsyms, bres) = (before.symbols(&home), before.resolve(&home));
+        let Some(bi) = bsyms.refs.iter().position(|x| x.span == home_span) else { continue };
+        let was = match bres.get(bi) {
+            Some(&Target::Local { def }) => {
+                bsyms.defs.get(def).map(|d| (home.clone(), d.span))
+            }
+            Some(Target::Foreign { uri, def }) => {
+                before.symbols(uri).defs.get(*def).map(|d| (uri.clone(), d.span))
+            }
+            _ => None,
+        };
+        // What it means where it LANDED, expressed in the same terms.
+        let now = match out_res.get(ri) {
+            Some(&Target::Local { def }) => {
+                out_syms.defs.get(def).and_then(|d| origin(d.span))
+            }
+            Some(Target::Foreign { uri, def }) => {
+                after.symbols(uri).defs.get(*def).map(|d| (uri.clone(), d.span))
+            }
+            _ => None,
+        };
+        if was == now {
+            continue;
+        }
+        let where_ = |t: &Option<(String, (u32, u32))>| match t {
+            Some((u, s)) if u == "src" => format!("the definition at byte {}", s.0),
+            Some((u, s)) => format!("the definition at byte {} of {u}", s.0),
+            None => "nothing".to_string(),
+        };
+        diags.push(MacroDiag {
+            span: home_span,
+            msg: format!(
+                "hygiene: `{}` changes meaning when expanded — where it is written it names {}, but after expansion it binds {}",
+                r.name,
+                where_(&was),
+                where_(&now)
+            ),
+        });
+    }
+    diags
 }
 
 /// The provenance sidecar, serialized without a JSON dependency: an

@@ -58,7 +58,15 @@ rule mparams = mparam* % ","
 
 rule mparam = MParam: name:IDENT @def(name)
 
+// A block with a local binding — the thing a macro body can be
+// captured BY. `{ let unit = 99; e }` scopes `unit` to `e`. (The
+// binding lives on its own production so it lands INSIDE the scope:
+// a production carrying both @def and @scope defines in the
+// ENCLOSING scope, which is what `macro m(x) => …` wants.)
+rule local_bind = LocalBind: "let" name:IDENT "=" expr ";" @def(name)
+
 rule expr =
+  | Scoped:  "{" local_bind expr "}" @scope
   | Add:     expr "+" expr
   | Mul:     expr "*" expr
   // Expansion may happen HERE and only here: `name!(args)`.

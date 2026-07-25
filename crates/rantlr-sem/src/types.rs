@@ -18,11 +18,11 @@
 //! type as unknown. Unknown NEVER cascades into an error — a diagnostic
 //! is emitted only where two KNOWN types disagree.
 
+use crate::key::NodeKey;
 use crate::SemDb;
 use rantlr_grammar::green::ERROR_NT;
 use rantlr_grammar::{GreenChild, GreenNode};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Index into [`TypeConfig::atoms`].
 pub type TypeId = u16;
@@ -735,8 +735,8 @@ impl SemDb {
                 .iter()
                 .flat_map(|s| s.frag.refs.iter().map(move |r| s.base_off + r.span.0))
                 .collect();
-            let item_meta: Vec<(std::sync::Arc<GreenNode>, u32, usize)> =
-                e.items.iter().map(|s| (s.node.clone(), s.base_off, s.ptr)).collect();
+            let item_meta: Vec<(NodeKey, u32)> =
+                e.items.iter().map(|s| (s.key.clone(), s.base_off)).collect();
             let mut v: Vec<u32> = Vec::new();
             let mut names: HashMap<u32, String> = HashMap::new();
             for s in &e.items {
@@ -810,8 +810,8 @@ impl SemDb {
                 item_meta
                     .iter()
                     .rev()
-                    .find(|(_, b, _)| *b <= s)
-                    .map(|(_, b, _)| s - b)
+                    .find(|(_, b)| *b <= s)
+                    .map(|(_, b)| s - b)
                     .unwrap_or(s)
             };
             let mut refs: Vec<(u32, TypeId)> =
@@ -853,14 +853,14 @@ impl SemDb {
         let mut cache = self.type_caches.remove(uri).unwrap_or_default();
         let mut gv = std::mem::take(&mut self.gvocab);
         let mut gen_current: Vec<(usize, u32, String)> = Vec::new();
-        for (idx, (node, base, ptr)) in item_meta.iter().enumerate() {
-            if let Some((_, it)) = cache.per_item.get(ptr).map(|(a, b)| (a, b)) {
+        for (idx, (key, base)) in item_meta.iter().enumerate() {
+            if let Some(it) = cache.per_item.get(key) {
                 for (rel, name) in &it.rel_deftypes {
                     gen_current.push((idx, *rel, name.clone()));
                 }
             } else {
                 let mut sites: Vec<(u32, String)> = Vec::new();
-                collect_deftypes(node, *base, &rules, &mut sites);
+                collect_deftypes(key.node(), *base, &rules, &mut sites);
                 for (abs, name) in sites {
                     gen_current.push((idx, abs - base, name));
                 }
@@ -901,13 +901,12 @@ impl SemDb {
         // The replaced item (same index, dead ptr) seeds its old values
         // too, so self-recursive items resolve in the first pass. ----
         let mut warm_defs: HashMap<u32, TypeId> = HashMap::new();
-        for (idx, (_, base, ptr)) in item_meta.iter().enumerate() {
-            let it = cache.per_item.get(ptr).map(|(_, o)| o).or_else(|| {
+        for (idx, (key, base)) in item_meta.iter().enumerate() {
+            let it = cache.per_item.get(key).or_else(|| {
                 cache
                     .items_order
                     .get(idx)
                     .and_then(|old| cache.per_item.get(old))
-                    .map(|(_, o)| o)
             });
             if let Some(it) = it {
                 for (rel, _, t) in &it.rel_defs {
@@ -998,8 +997,8 @@ impl SemDb {
         let mut fresh_walked = 0u64;
         if vocab_reusable {
             let warm_merged = merge_members(&warm_members);
-            for (idx, (node, base, ptr)) in item_meta.iter().enumerate() {
-                if cache.per_item.contains_key(ptr) {
+            for (idx, (key, base)) in item_meta.iter().enumerate() {
+                if cache.per_item.contains_key(key) {
                     continue;
                 }
                 let out = walk_item(
@@ -1008,7 +1007,7 @@ impl SemDb {
                     &mut g_arrow_intern,
                     &warm_defs,
                     &warm_merged,
-                    node,
+                    key.node(),
                     *base,
                 );
                 fresh_walked += 1;
@@ -1017,8 +1016,7 @@ impl SemDb {
                 let old = cache
                     .items_order
                     .get(idx)
-                    .and_then(|old| cache.per_item.get(old))
-                    .map(|(_, o)| o);
+                    .and_then(|old| cache.per_item.get(old));
                 let seq_ok = match old {
                     Some(o) => {
                         o.rel_defs.iter().map(|(_, _, t)| *t).collect::<Vec<_>>()
@@ -1045,9 +1043,9 @@ impl SemDb {
         let (final_outs, member_final) = if fast_ok && !cache.per_item.is_empty() {
             // Replay every cached item; fresh outputs slot in.
             self.stats.type_passes += 1;
-            for (idx, (_, _, ptr)) in item_meta.iter().enumerate() {
+            for (idx, (key, _)) in item_meta.iter().enumerate() {
                 if outs[idx].is_none() {
-                    outs[idx] = cache.per_item.get(ptr).map(|(_, o)| o.clone());
+                    outs[idx] = cache.per_item.get(key).cloned();
                 }
             }
             (outs, warm_members)
@@ -1064,21 +1062,21 @@ impl SemDb {
                 self.stats.type_passes += 1;
                 let merged = merge_members(&member_types);
                 let mut pass_outs: Vec<Option<ItemOut>> = Vec::with_capacity(item_meta.len());
-                for (node, base, _) in &item_meta {
+                for (key, base) in &item_meta {
                     pass_outs.push(Some(walk_item(
                         &mut vocab,
                         &mut g_arrows,
                         &mut g_arrow_intern,
                         &def_types,
                         &merged,
-                        node,
+                        key.node(),
                         *base,
                     )));
                     self.stats.type_item_walks += 1;
                 }
                 let mut new_defs: HashMap<u32, TypeId> = HashMap::new();
                 let mut new_members: HashMap<(TypeId, String), Option<TypeId>> = HashMap::new();
-                for (out, (_, base, _)) in pass_outs.iter().zip(&item_meta) {
+                for (out, (_, base)) in pass_outs.iter().zip(&item_meta) {
                     let out = out.as_ref().unwrap();
                     for (rel, _, t) in &out.rel_defs {
                         new_defs.insert(base + rel, *t);
@@ -1105,7 +1103,7 @@ impl SemDb {
         cache.foreign_snapshot = foreign_snapshot;
         let prev_order = std::mem::replace(
             &mut cache.items_order,
-            item_meta.iter().map(|(_, _, p)| *p).collect(),
+            item_meta.iter().map(|(k, _)| k.clone()).collect(),
         );
         self.gvocab = GlobalVocab {
             names: vocab,
@@ -1136,7 +1134,7 @@ impl SemDb {
                 v
             },
         };
-        for (out, (node, base, ptr)) in final_outs.into_iter().zip(&item_meta) {
+        for (out, (key, base)) in final_outs.into_iter().zip(&item_meta) {
             let Some(out) = out else { continue };
             for &((a, b), t) in &out.rel_types {
                 report.types.push(((base + a, base + b), t));
@@ -1149,17 +1147,17 @@ impl SemDb {
                     .diags
                     .push(TypeDiag { span: (base + a, base + b), msg: msg.clone() });
             }
-            cache.per_item.insert(*ptr, (node.clone(), out));
+            cache.per_item.insert(key.clone(), out);
         }
         // Keep exactly two generations: the current items, and the
         // ones they replaced (a replaced item finds its predecessor by
         // index, which is how a BODY edit is told from a SIGNATURE
         // edit). Anything older would pin subtrees forever.
-        let live: std::collections::HashSet<usize> = cache
+        let live: std::collections::HashSet<NodeKey> = cache
             .items_order
             .iter()
-            .copied()
-            .chain(prev_order.iter().copied())
+            .cloned()
+            .chain(prev_order.iter().cloned())
             .collect();
         cache.per_item.retain(|k, _| live.contains(k));
         report.types.sort_unstable_by_key(|((s, e), _)| (*s, u32::MAX - (*e - *s)));
@@ -1195,14 +1193,12 @@ pub(crate) struct TypeCache {
     foreign_snapshot: FSnap,
     /// Item subtree pointers at cache time, in order — how a replaced
     /// item finds its predecessor for the body/signature comparison.
-    items_order: Vec<usize>,
-    /// Item pointer → (KEEPALIVE, outputs). The Arc is load-bearing:
-    /// it pins the subtree so its address cannot be recycled by a
-    /// later allocation and mistaken for this entry (the binding
-    /// tier's `frag_cache` pins its nodes for the same reason). Without
-    /// it, an edit that frees an item can hand its address to the
-    /// replacement, and a SIGNATURE edit silently replays stale types.
-    per_item: HashMap<usize, (Arc<GreenNode>, ItemOut)>,
+    items_order: Vec<NodeKey>,
+    /// Item identity → outputs. The key OWNS its subtree (see
+    /// [`crate::key`]): that is what makes identity comparison sound
+    /// across edits, and it is enforced by the type rather than by
+    /// remembering to store a handle alongside.
+    per_item: HashMap<NodeKey, ItemOut>,
 }
 
 #[derive(Clone, PartialEq)]

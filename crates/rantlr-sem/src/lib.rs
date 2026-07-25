@@ -29,11 +29,13 @@
 //! re-lexes it re-anchors the right neighbor's Arc — at most one extra
 //! fragment walk per edit, and the recomputed fragment is value-equal.
 
+use crate::key::NodeKey;
 use rantlr_grammar::green::{ERROR_NT, LIST_PROD, RUN_PROD};
 use rantlr_grammar::{GreenChild, GreenNode, SynGrammar};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod key;
 pub mod macros;
 pub mod types;
 pub use types::{compose_types, TypeConfig, TypeDiag, TypeId, TypeReport, TypeRule, TyTerm};
@@ -566,10 +568,10 @@ pub struct SemStats {
 }
 
 struct ItemSlot {
-    ptr: usize,
-    /// Keepalive: pins the subtree so the pointer stays unambiguous
-    /// while cached.
-    node: Arc<GreenNode>,
+    /// Identity AND keepalive in one value: a [`NodeKey`] cannot exist
+    /// without owning its subtree, so the address it compares by can
+    /// never be recycled underneath this slot.
+    key: NodeKey,
     base_off: u32,
     frag: Arc<Fragment>,
     /// (env fp, foreign fp, resolutions) — carried ACROSS revisions by
@@ -582,9 +584,11 @@ struct FileEntry {
     tree: Arc<GreenNode>,
     tree_rev: u64,
     items: Vec<ItemSlot>,
-    /// item pointer → fragment — survives edits (moved items keep their
-    /// fragments); swept exactly, from the positional diff.
-    frag_cache: HashMap<usize, (Arc<GreenNode>, Arc<Fragment>)>,
+    /// item identity → fragment — survives edits (moved items keep
+    /// their fragments); swept exactly, from the positional diff. The
+    /// key owns the subtree, so a swept entry's address cannot come
+    /// back as someone else's.
+    frag_cache: HashMap<NodeKey, Arc<Fragment>>,
     /// Top-level name → occurrence count, maintained EXACTLY from the
     /// per-edit fragment delta — membership answers in O(1), and an
     /// unchanged signature is proven in O(edit).
@@ -688,7 +692,7 @@ impl SemDb {
         // Items = the elements of the root's list child(ren); any other
         // node child of the root is an item of its own. Files without
         // list structure degrade to one whole-file item.
-        let mut items: Vec<(usize, Arc<GreenNode>, u32)> = Vec::new();
+        let mut items: Vec<(NodeKey, u32)> = Vec::new();
         {
             let mut off = 0u32;
             for c in &tree.children {
@@ -696,13 +700,13 @@ impl SemDb {
                     if n.prod == LIST_PROD {
                         collect_list_items(n, off, &mut items);
                     } else if n.nt != ERROR_NT {
-                        items.push((Arc::as_ptr(n) as usize, n.clone(), off));
+                        items.push((NodeKey::new(n.clone()), off));
                     }
                 }
                 off += c.width();
             }
             if items.is_empty() {
-                items.push((Arc::as_ptr(&tree) as usize, tree.clone(), 0));
+                items.push((NodeKey::new(tree.clone()), 0));
             }
         }
 
@@ -714,38 +718,37 @@ impl SemDb {
         // the signature-dirty decision O(edit), not O(file)).
         let mut old = std::mem::take(&mut e.items);
         let mut lo = 0usize;
-        while lo < old.len() && lo < items.len() && old[lo].ptr == items[lo].0 {
+        while lo < old.len() && lo < items.len() && old[lo].key == items[lo].0 {
             lo += 1;
         }
         let mut suffix = 0usize;
         while suffix < old.len() - lo
             && suffix < items.len() - lo
-            && old[old.len() - 1 - suffix].ptr == items[items.len() - 1 - suffix].0
+            && old[old.len() - 1 - suffix].key == items[items.len() - 1 - suffix].0
         {
             suffix += 1;
         }
         let n_new = items.len();
         let old_len = old.len();
         let mut new_items: Vec<ItemSlot> = Vec::with_capacity(n_new);
-        for (i, (ptr, node, base_off)) in items.into_iter().enumerate() {
+        for (i, (key, base_off)) in items.into_iter().enumerate() {
             if i < lo || i >= n_new - suffix {
                 // Carried by position: same subtree, new base offset.
                 let oi = if i < lo { i } else { old_len - (n_new - i) };
                 let o = &mut old[oi];
-                debug_assert_eq!(o.ptr, ptr);
+                debug_assert!(o.key == key);
                 new_items.push(ItemSlot {
-                    ptr,
-                    node,
+                    key,
                     base_off,
                     frag: o.frag.clone(),
                     res: o.res.take(),
                 });
                 continue;
             }
-            let frag = match e.frag_cache.get(&ptr) {
-                Some((_, f)) => f.clone(),
+            let frag = match e.frag_cache.get(&key) {
+                Some(f) => f.clone(),
                 None => {
-                    let f = Arc::new(build_fragment(&node, cfg));
+                    let f = Arc::new(build_fragment(key.node(), cfg));
                     fragments_computed += 1;
                     for &di in &f.top_defs {
                         let d = &f.defs[di as usize];
@@ -754,17 +757,17 @@ impl SemDb {
                         c.1 += d.exported as i64;
                         e.sig_dirty = true;
                     }
-                    e.frag_cache.insert(ptr, (node.clone(), f.clone()));
+                    e.frag_cache.insert(key.clone(), f.clone());
                     f
                 }
             };
-            new_items.push(ItemSlot { ptr, node, base_off, frag, res: None });
+            new_items.push(ItemSlot { key, base_off, frag, res: None });
         }
-        let new_mid: HashSet<usize> =
-            new_items[lo..n_new - suffix].iter().map(|s| s.ptr).collect();
+        let new_mid: HashSet<NodeKey> =
+            new_items[lo..n_new - suffix].iter().map(|s| s.key.clone()).collect();
         for slot in &old[lo..old_len - suffix] {
-            if !new_mid.contains(&slot.ptr) {
-                if let Some((_, f)) = e.frag_cache.remove(&slot.ptr) {
+            if !new_mid.contains(&slot.key) {
+                if let Some(f) = e.frag_cache.remove(&slot.key) {
                     for &di in &f.top_defs {
                         let d = &f.defs[di as usize];
                         let k = tkey(&d.ns, &d.name);
@@ -1078,7 +1081,7 @@ impl SemDb {
     fn item_at(&self, uri: &str, offset: u32) -> Option<u32> {
         let items = &self.files.get(uri)?.items;
         let k = items.partition_point(|s| s.base_off <= offset).checked_sub(1)?;
-        (offset < items[k].base_off + items[k].node.width).then_some(k as u32)
+        (offset < items[k].base_off + items[k].key.node().width).then_some(k as u32)
     }
 
     /// Go-to-definition from an offset (on a ref or a def).
@@ -1590,7 +1593,7 @@ impl SemDb {
     }
 }
 
-fn collect_list_items(n: &GreenNode, base: u32, out: &mut Vec<(usize, Arc<GreenNode>, u32)>) {
+fn collect_list_items(n: &GreenNode, base: u32, out: &mut Vec<(NodeKey, u32)>) {
     let mut off = base;
     for c in &n.children {
         match c {
@@ -1598,7 +1601,7 @@ fn collect_list_items(n: &GreenNode, base: u32, out: &mut Vec<(usize, Arc<GreenN
                 collect_list_items(m, off, out);
             }
             GreenChild::Node(m) => {
-                out.push((Arc::as_ptr(m) as usize, m.clone(), off));
+                out.push((NodeKey::new(m.clone()), off));
             }
             _ => {}
         }

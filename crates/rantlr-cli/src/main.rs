@@ -636,8 +636,37 @@ fn cmd_expand(args: &Args) {
     }
     let src = read_file(doc_path);
     let depth: u32 = args.val("depth").map(|v| v.parse().unwrap_or(8)).unwrap_or(8);
-    let out = rantlr_rg::expand::expand_document(&lang.lexer, &lang.def, &lang.tables, &src, depth)
-        .unwrap_or_else(|e| die(&e));
+    // Same-extension siblings join the world: macros defined next
+    // door expand here (skip prior .exp materializations).
+    let mut siblings: Vec<(String, String)> = Vec::new();
+    let p = std::path::Path::new(doc_path);
+    if let (Some(dir), Some(ext)) = (p.parent(), p.extension()) {
+        let dir = if dir.as_os_str().is_empty() { std::path::Path::new(".") } else { dir };
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let sp = e.path();
+                let stem_is_exp = sp
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.ends_with(".exp"));
+                if sp != p && sp.extension() == Some(ext) && !stem_is_exp {
+                    if let Ok(text) = std::fs::read_to_string(&sp) {
+                        siblings.push((sp.to_string_lossy().into_owned(), text));
+                    }
+                }
+            }
+        }
+    }
+    siblings.sort();
+    let out = rantlr_rg::expand::expand_document(
+        &lang.lexer,
+        &lang.def,
+        &lang.tables,
+        &src,
+        &siblings,
+        depth,
+    )
+    .unwrap_or_else(|e| die(&e));
     for d in &out.diags {
         eprintln!("{} {}..{}: {}", red("macro"), d.span.0, d.span.1, d.msg);
     }

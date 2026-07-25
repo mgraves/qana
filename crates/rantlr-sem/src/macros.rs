@@ -62,12 +62,16 @@ pub enum SegKind {
 
 /// One provenance segment: output bytes `out` are a copy of source
 /// bytes `src` (equal lengths — every segment is a copy, which is
-/// what makes multi-pass composition exact).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// what makes multi-pass composition exact). `src_uri` is None for
+/// the document being expanded and Some(uri) when the bytes came from
+/// ANOTHER file — a cross-file macro's body splices text whose home
+/// is the defining file, and provenance says so.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Seg {
     pub out: (u32, u32),
     pub src: (u32, u32),
     pub kind: SegKind,
+    pub src_uri: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,7 +92,7 @@ pub struct PassOut {
 
 struct MacroDef {
     params: Vec<usize>,
-    /// Trimmed body span (absolute, in the pass input).
+    /// Token-exact body span in the DEFINING file's text.
     body: (u32, u32),
     /// (ref span, parameter position) inside the body, sorted.
     param_refs: Vec<((u32, u32), usize)>,
@@ -96,6 +100,8 @@ struct MacroDef {
 
 struct Job {
     span: (u32, u32),
+    /// None: this file. Some(uri): the macro lives in a sibling.
+    def_file: Option<String>,
     def: usize,
     args: Vec<(u32, u32)>,
     /// Whether the splice DECLARED an args child — a non-macro callee
@@ -206,8 +212,88 @@ fn list_elements(n: &GreenNode, base: u32) -> Vec<(u32, u32)> {
     if s.1 > s.0 { vec![s] } else { Vec::new() }
 }
 
-/// Run ONE expansion pass. `tree` must be the tree `db` holds for
-/// `uri` (the caller just set it); `text` its exact source.
+/// Build a file's macro registry: every @macro node in `tree`, keyed
+/// by the ABSOLUTE index of the def it introduces (the production's
+/// own @def, found by containment outside the params/body children).
+fn build_registry(
+    tree: &GreenNode,
+    text: &str,
+    st: &SymbolTable,
+    res: &[Target],
+    cfg: &MacroConfig,
+) -> HashMap<usize, MacroDef> {
+    let mut registry = HashMap::new();
+    go(tree, 0, cfg, st, res, text, &mut registry);
+    return registry;
+
+    fn go(
+        n: &GreenNode,
+        base: u32,
+        cfg: &MacroConfig,
+        st: &SymbolTable,
+        res: &[Target],
+        text: &str,
+        registry: &mut HashMap<usize, MacroDef>,
+    ) {
+        let span = (base, base + n.width);
+        if let Some(&(_, _, params_child, body_child)) =
+            cfg.defs.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
+        {
+            if let Some((body_raw, body_node)) = symbol_child(n, base, body_child) {
+                let pspan = params_child.and_then(|k| symbol_child(n, base, k)).map(|(s, _)| s);
+                let inside = |d: (u32, u32), c: (u32, u32)| d.0 >= c.0 && d.1 <= c.1;
+                let def_idx = st.defs.iter().position(|d| {
+                    inside(d.span, span)
+                        && !inside(d.span, body_raw)
+                        && !pspan.is_some_and(|p| inside(d.span, p))
+                });
+                if let Some(di) = def_idx {
+                    let params: Vec<usize> = pspan
+                        .map(|p| {
+                            st.defs
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, d)| inside(d.span, p))
+                                .map(|(i, _)| i)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    // Token-exact body: never splice leading trivia.
+                    let body = match body_node {
+                        Some(m) => content_span(m, body_raw.0),
+                        None => trim_span(text, body_raw),
+                    };
+                    let mut param_refs: Vec<((u32, u32), usize)> = st
+                        .refs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| inside(r.span, body))
+                        .filter_map(|(ri, r)| match res.get(ri) {
+                            Some(&Target::Local { def }) => {
+                                params.iter().position(|&p| p == def).map(|pi| (r.span, pi))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    param_refs.sort_by_key(|&(s, _)| s.0);
+                    registry.insert(di, MacroDef { params, body, param_refs });
+                }
+            }
+        }
+        let mut off = base;
+        for c in &n.children {
+            if let GreenChild::Node(m) = c {
+                go(m, off, cfg, st, res, text, registry);
+            }
+            off += c.width();
+        }
+    }
+}
+
+/// Run ONE expansion pass over `uri`. `tree`/`text` must be what `db`
+/// holds for it. Uses resolving to macros in SIBLING files (the db's
+/// other set_tree'd documents) expand too: their bodies splice from
+/// the sibling's text, and the segments say so (`src_uri`).
 pub fn expand_pass(
     db: &mut SemDb,
     uri: &str,
@@ -219,15 +305,28 @@ pub fn expand_pass(
     let res = db.resolve(uri);
     let mut diags = Vec::new();
 
-    // ---- macro registry: every @macro node, keyed by the def it
-    // introduces (the production's own @def, found by containment
-    // outside the params/body children) ----
-    let mut registry: HashMap<usize, MacroDef> = HashMap::new();
+    let registry = build_registry(tree, text, &st, &res, cfg);
     let mut jobs: Vec<Job> = Vec::new();
-    walk(tree, 0, cfg, &st, &res, text, &mut registry, &mut jobs);
+    walk(tree, 0, cfg, &st, &res, &mut jobs);
 
-    // Uses inside any macro BODY never expand at the definition —
-    // they expand after splicing, at use sites (cpp and Rust agree).
+    // Foreign registries (and texts, recovered losslessly from the
+    // trees) for every sibling a job points into.
+    let mut foreign: HashMap<String, (HashMap<usize, MacroDef>, String)> = HashMap::new();
+    for j in &jobs {
+        if let Some(fu) = &j.def_file {
+            if !foreign.contains_key(fu) {
+                let Some(ftree) = db.tree(fu) else { continue };
+                let ftext = ftree.text();
+                let fst = db.symbols(fu);
+                let fres = db.resolve(fu);
+                let freg = build_registry(&ftree, &ftext, &fst, &fres, cfg);
+                foreign.insert(fu.clone(), (freg, ftext));
+            }
+        }
+    }
+
+    // Uses inside any LOCAL macro BODY never expand at the definition
+    // — they expand after splicing, at use sites (cpp and Rust agree).
     let bodies: Vec<(u32, u32)> = registry.values().map(|m| m.body).collect();
     jobs.retain(|j| !bodies.iter().any(|b| j.span.0 >= b.0 && j.span.1 <= b.1));
 
@@ -245,17 +344,35 @@ pub fn expand_pass(
     let mut out = String::with_capacity(text.len());
     let mut segs: Vec<Seg> = Vec::new();
     let mut cursor = 0u32;
-    let push = |out: &mut String, segs: &mut Vec<Seg>, src: (u32, u32), kind: SegKind| {
+    // A copy from SOME source text into the output. `from` is the
+    // source string the span indexes; `src_uri` names it (None = the
+    // pass input).
+    let push = |out: &mut String,
+                segs: &mut Vec<Seg>,
+                from: &str,
+                src_uri: &Option<String>,
+                src: (u32, u32),
+                kind: SegKind| {
         if src.1 > src.0 {
             let start = out.len() as u32;
-            out.push_str(&text[src.0 as usize..src.1 as usize]);
-            segs.push(Seg { out: (start, out.len() as u32), src, kind });
+            out.push_str(&from[src.0 as usize..src.1 as usize]);
+            segs.push(Seg { out: (start, out.len() as u32), src, kind, src_uri: src_uri.clone() });
         }
     };
     let mut substitutions = 0u32;
     for j in &kept {
-        push(&mut out, &mut segs, (cursor, j.span.0), SegKind::Verbatim);
-        let Some(m) = registry.get(&j.def) else {
+        push(&mut out, &mut segs, text, &None, (cursor, j.span.0), SegKind::Verbatim);
+        // The macro's home: this file or a sibling.
+        let (m, body_text, body_uri) = match &j.def_file {
+            None => (registry.get(&j.def), text, &None),
+            Some(fu) => match foreign.get(fu) {
+                Some((freg, ftext)) => {
+                    (freg.get(&j.def), ftext.as_str(), &Some(fu.clone()))
+                }
+                None => (None, text, &None),
+            },
+        };
+        let Some(m) = m else {
             // Callee resolves, but not to a macro.
             if j.has_args {
                 diags.push(MacroDiag {
@@ -263,7 +380,7 @@ pub fn expand_pass(
                     msg: "spliced name does not resolve to a macro".into(),
                 });
             }
-            push(&mut out, &mut segs, j.span, SegKind::Verbatim);
+            push(&mut out, &mut segs, text, &None, j.span, SegKind::Verbatim);
             cursor = j.span.1;
             continue;
         };
@@ -276,102 +393,59 @@ pub fn expand_pass(
                     j.args.len()
                 ),
             });
-            push(&mut out, &mut segs, j.span, SegKind::Verbatim);
+            push(&mut out, &mut segs, text, &None, j.span, SegKind::Verbatim);
             cursor = j.span.1;
             continue;
         }
-        // Body pieces around parameter refs; args at the refs.
+        // Body pieces (from the DEFINING file) around parameter refs;
+        // args (from THIS file's use site) at the refs.
         let mut b = m.body.0;
         for &(rspan, pi) in &m.param_refs {
-            push(&mut out, &mut segs, (b, rspan.0), SegKind::Body);
-            push(&mut out, &mut segs, trim_span(text, j.args[pi]), SegKind::Arg);
+            push(&mut out, &mut segs, body_text, body_uri, (b, rspan.0), SegKind::Body);
+            push(&mut out, &mut segs, text, &None, trim_span(text, j.args[pi]), SegKind::Arg);
             b = rspan.1;
         }
-        push(&mut out, &mut segs, (b, m.body.1), SegKind::Body);
+        push(&mut out, &mut segs, body_text, body_uri, (b, m.body.1), SegKind::Body);
         substitutions += 1;
         cursor = j.span.1;
     }
-    push(&mut out, &mut segs, (cursor, text.len() as u32), SegKind::Verbatim);
+    push(&mut out, &mut segs, text, &None, (cursor, text.len() as u32), SegKind::Verbatim);
 
     PassOut { text: out, segs, substitutions, diags }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Collect splice JOBS: every @splice node whose callee resolves —
+/// locally or into a sibling file. Whether the target is a MACRO is
+/// settled at emit time against the registries (a use may precede
+/// its macro's definition textually).
 fn walk(
     n: &GreenNode,
     base: u32,
     cfg: &MacroConfig,
     st: &SymbolTable,
     res: &[Target],
-    text: &str,
-    registry: &mut HashMap<usize, MacroDef>,
     jobs: &mut Vec<Job>,
 ) {
-    let span = (base, base + n.width);
-    if let Some(&(_, _, params_child, body_child)) =
-        cfg.defs.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
-    {
-        if let Some((body_raw, body_node)) = symbol_child(n, base, body_child) {
-            let pspan = params_child.and_then(|k| symbol_child(n, base, k)).map(|(s, _)| s);
-            let inside = |d: (u32, u32), c: (u32, u32)| d.0 >= c.0 && d.1 <= c.1;
-            // The def this production introduces: within the node,
-            // outside its params/body children.
-            let def_idx = st.defs.iter().position(|d| {
-                inside(d.span, span)
-                    && !inside(d.span, body_raw)
-                    && !pspan.is_some_and(|p| inside(d.span, p))
-            });
-            if let Some(di) = def_idx {
-                let params: Vec<usize> = pspan
-                    .map(|p| {
-                        st.defs
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, d)| inside(d.span, p))
-                            .map(|(i, _)| i)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                // Token-exact body: never splice a body's leading or
-                // trailing trivia.
-                let body = match body_node {
-                    Some(m) => content_span(m, body_raw.0),
-                    None => trim_span(text, body_raw),
-                };
-                let mut param_refs: Vec<((u32, u32), usize)> = st
-                    .refs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, r)| inside(r.span, body))
-                    .filter_map(|(ri, r)| match res.get(ri) {
-                        Some(&Target::Local { def }) => {
-                            params.iter().position(|&p| p == def).map(|pi| (r.span, pi))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                param_refs.sort_by_key(|&(s, _)| s.0);
-                registry.insert(di, MacroDef { params, body, param_refs });
-            }
-        }
-    }
     if let Some(&(_, _, callee_child, args_child)) =
         cfg.uses.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
     {
         if let Some((cspan, _)) = symbol_child(n, base, callee_child) {
             if let Some(ri) = st.refs.iter().position(|r| r.span == cspan) {
-                if let Some(&Target::Local { def }) = res.get(ri) {
+                let target = match res.get(ri) {
+                    Some(&Target::Local { def }) => Some((None, def)),
+                    Some(Target::Foreign { uri, def }) => Some((Some(uri.clone()), *def)),
+                    _ => None,
+                };
+                if let Some((def_file, def)) = target {
                     let args = args_child
                         .and_then(|k| symbol_child(n, base, k))
                         .and_then(|(s, node)| node.map(|m| list_elements(m, s.0)))
                         .unwrap_or_default();
-                    // Whether this def is a MACRO is settled at emit
-                    // time against the completed registry (a use may
-                    // precede its macro's definition textually). The
-                    // replaced span is token-exact — leading trivia
-                    // stays in the surrounding text.
+                    // The replaced span is token-exact — leading
+                    // trivia stays in the surrounding text.
                     jobs.push(Job {
                         span: content_span(n, base),
+                        def_file,
                         def,
                         args,
                         has_args: args_child.is_some(),
@@ -383,7 +457,7 @@ fn walk(
     let mut off = base;
     for c in &n.children {
         if let GreenChild::Node(m) = c {
-            walk(m, off, cfg, st, res, text, registry, jobs);
+            walk(m, off, cfg, st, res, jobs);
         }
         off += c.width();
     }
@@ -391,10 +465,16 @@ fn walk(
 
 /// Compose provenance across passes: `a` maps original→t1, `b` maps
 /// t1→t2; the result maps original→t2. Sound because every segment
-/// is a COPY (equal out/src lengths), so offsets split linearly.
+/// is a COPY (equal out/src lengths), so offsets split linearly. A
+/// b-segment whose src lives in a FOREIGN file does not reference t1
+/// at all — it passes through unchanged.
 pub fn compose(a: &[Seg], b: &[Seg]) -> Vec<Seg> {
     let mut out = Vec::new();
     for bs in b {
+        if bs.src_uri.is_some() {
+            out.push(bs.clone());
+            continue;
+        }
         let (mut s, e) = bs.src;
         if s == e {
             continue;
@@ -409,6 +489,7 @@ pub fn compose(a: &[Seg], b: &[Seg]) -> Vec<Seg> {
                 out: (bs.out.0 + (os - bs.src.0), bs.out.0 + (oe - bs.src.0)),
                 src: (asg.src.0 + (os - asg.out.0), asg.src.0 + (oe - asg.out.0)),
                 kind: if bs.kind == SegKind::Verbatim { asg.kind } else { bs.kind },
+                src_uri: asg.src_uri.clone(),
             });
             s = oe;
             if s >= e {

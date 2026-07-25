@@ -30,20 +30,35 @@ pub struct ExpandOutcome {
     pub repairs: usize,
 }
 
-/// Expand `text` to fixpoint (bounded by `max_passes`).
+/// Expand `text` to fixpoint (bounded by `max_passes`). `siblings`
+/// are (uri, text) pairs for the document's neighbors: macros DEFINED
+/// there expand here (their bodies splice from the sibling's text,
+/// with provenance naming the file), and the spliced output re-binds
+/// in THIS document's context. Sibling texts are fixed — only the
+/// primary document iterates.
 pub fn expand_document(
     lexer: &CompiledLexer,
     def: &LangDef,
     tables: &LrTables,
     text: &str,
+    siblings: &[(String, String)],
     max_passes: u32,
 ) -> Result<ExpandOutcome, String> {
+    // Parse each sibling ONCE — their trees are pass-invariant.
+    let mut sib_trees = Vec::new();
+    for (uri, stext) in siblings {
+        let s = IncSession::new(lexer, &def.sg, tables, stext)
+            .map_err(|e| format!("sibling {uri} parse failed: {e:?}"))?;
+        let t = s.tree().ok_or_else(|| format!("sibling {uri} produced no tree"))?.clone();
+        sib_trees.push((uri.clone(), t));
+    }
     let mut current = text.to_string();
     // Identity provenance to start: everything verbatim.
     let mut segs = vec![Seg {
         out: (0, current.len() as u32),
         src: (0, current.len() as u32),
         kind: SegKind::Verbatim,
+        src_uri: None,
     }];
     let mut diags = Vec::new();
     let mut passes = 0u32;
@@ -55,6 +70,9 @@ pub fn expand_document(
         repairs += session.last_repairs.len();
         let tree = session.tree().ok_or("expansion parse produced no tree")?;
         let mut db = SemDb::new(def.binding.clone());
+        for (uri, t) in &sib_trees {
+            db.set_tree(uri, t.clone());
+        }
         db.set_tree("expand", tree.clone());
         let pass = expand_pass(&mut db, "expand", &tree, &current, &def.macros);
         diags.extend(pass.diags.iter().cloned());
@@ -95,13 +113,18 @@ pub fn provenance_json(source_uri: &str, source: &str, out: &ExpandOutcome) -> S
             SegKind::Body => "body",
             SegKind::Arg => "arg",
         };
+        let file = match &seg.src_uri {
+            Some(u) => format!(", \"file\": {u:?}"),
+            None => String::new(),
+        };
         s.push_str(&format!(
-            "    {{\"out\": [{}, {}], \"src\": [{}, {}], \"kind\": \"{}\"}}{}\n",
+            "    {{\"out\": [{}, {}], \"src\": [{}, {}], \"kind\": \"{}\"{}}}{}\n",
             seg.out.0,
             seg.out.1,
             seg.src.0,
             seg.src.1,
             kind,
+            file,
             if i + 1 == out.segs.len() { "" } else { "," }
         ));
     }

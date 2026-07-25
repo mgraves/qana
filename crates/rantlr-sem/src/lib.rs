@@ -820,6 +820,12 @@ impl SemDb {
         self.type_caches.remove(uri);
     }
 
+    /// The tree currently held for `uri` (lossless — its text() is the
+    /// document). The macro engine reads sibling trees through this.
+    pub fn tree(&self, uri: &str) -> Option<Arc<GreenNode>> {
+        self.files.get(uri).map(|e| e.tree.clone())
+    }
+
     pub fn signature(&mut self, uri: &str) -> Arc<Signature> {
         self.ensure_signature(uri);
         self.files[uri].signature.as_ref().unwrap().0.clone()

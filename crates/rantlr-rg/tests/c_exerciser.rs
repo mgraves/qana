@@ -450,7 +450,7 @@ fn object_like_defines_expand_in_code_only() {
     let (lexer, tables) = certify(&out.def).unwrap();
     assert!(out.def.macros.declared(), "C declares its macro tier");
 
-    let exp = expand_document(&lexer, &out.def, &tables, DEMO, 8).expect("demo expands");
+    let exp = expand_document(&lexer, &out.def, &tables, DEMO, &[], 8).expect("demo expands");
     assert!(exp.diags.is_empty(), "{:?}", exp.diags);
     assert_eq!(exp.repairs, 0);
     assert!(exp.substitutions >= 6, "all LIMIT uses open: {}", exp.substitutions);

@@ -1135,13 +1135,58 @@ forward-declarable (`typedef struct point point_t;` before the
 definition) — per-NAMESPACE ordering is a real need the binding tier
 doesn't express yet.
 
-Gates: 147 tests — the typedef world end to end, head navigation,
-typo diagnosis, and the residue pinned by its exact semantic
-signature.
+Gates: the typedef world end to end, head navigation, typo diagnosis,
+and the residue pinned by its exact semantic signature.
+
+## C wall 3: the expression-tier split — four doors, one surrendered derivation
+
+Real C grammars stratify expressions; ours now does too, and the whole
+wall came down on a single trade. Statement expressions (`s_expr`)
+are identical to `expr` except for ONE missing production: a bare
+identifier may not be the left operand of `*`. That frees the
+two-token prefix `IDENT *` at statement level, and four doors open at
+once, with zero conflicts:
+
+  point_t *alias = head_node;          pointered typedef LOCALS
+  bits = (unsigned long)pt->y;         casts, keyword-led type names
+  span = sizeof(struct point *);       sizeof(type), pointers included
+  for (i = 0, j = 0; ...; ++i, ++j)    the comma operator
+  bits = bits + span, width = w + s;   ...as a statement too
+
+The comma operator is its own tier (`cexpr`, above assignment), placed
+only where C allows it — parens, conditions, `for` clauses, `return`,
+statements — so `f(a, b)` stays two arguments. Casts and
+`sizeof(type)` take keyword-led type names in full, because a keyword
+never begins an expression: `(` peels cast from parenthesized
+expression on the very next token.
+
+Bare TYPEDEF names in those positions converge instead of
+conflicting: `sizeof(word_t)` parses as sizeof-of-a-value (the ref
+still resolves and navigates), and a bare-name cast is written
+call-shaped, `(word_t)(x)` — the classic C unification; the
+juxtaposition `(word_t) x` is refused. The R/R core those spellings
+dodge is not an opinion — the wall-3 gate injects the bare-name form
+`sizeof "(" IDENT ptr+ ")"` into the grammar and the certifier
+REFUSES it with the machine's own counterexample:
+
+  shift/reduce on STAR — example: IDENT IDENT EQ KW_SIZEOF LPAREN IDENT · STAR
+    [expr → IDENT · , STAR]            reduce: a multiplication
+    [ptr  → · STAR type_quals]         shift: a pointer
+
+One token, two futures, no feedback allowed: that trace IS the wall,
+stated by the tool it was built to hit.
+
+The flip's cost is pinned as precisely as the wins: a multiplication
+STATEMENT led by a bare name now reads as a declaration (`x * y;`
+declares y — C's own reading when x names a type), and `x * y + z;`
+is refused outright. Deeper left spines keep multiplying: `(x) * y`
+and `g() * y` parse fine — only the bare name surrendered. 443 states
+(was 320 — the split's price), zero conflicts, demo extended through
+every door.
 
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 147 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 144 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

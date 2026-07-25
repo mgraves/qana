@@ -1,6 +1,8 @@
 /* demo.c — served by the C-subset grammar in c.rg.
    Block comments, // line comments, directives-as-syntax, structs,
-   enums, nested declarators, and the full expression grammar. */
+   enums, nested declarators, and the full expression grammar —
+   including the wall-3 doors: pointered typedef locals, casts,
+   sizeof(type), and the comma operator. */
 
 #include <stdio.h>
 #define LIMIT 100
@@ -50,6 +52,22 @@ int apply(int (*op)(int x, int y), int a, int b) {
     return op(a, b);
 }
 
+static unsigned long checksum(const struct point *pt) {
+    point_t *alias = head_node;           /* pointered typedef local  */
+    word_t *cursor = &global_words, salt = 3;
+    unsigned long bits = (unsigned long)pt->y;      /* keyword cast   */
+    word_t widened = (word_t)(pt->x);     /* bare-name cast: call-shaped */
+    unsigned span = sizeof(struct point *) + sizeof(unsigned long);
+    unsigned width = sizeof(word_t);      /* bare name: sizeof a VALUE */
+    int i, steps;
+
+    for (i = 0, steps = 0; i < 4; ++i, ++steps)     /* comma clauses  */
+        bits = bits << 1 ^ (unsigned long)i;
+    bits = bits + span, width = width + steps;      /* comma operator */
+    salt = *cursor + (word_t)(bits);
+    return alias == 0 ? salt + width : salt * widened;
+}
+
 int main(void) {
     struct point p;
     int total = 0;
@@ -57,6 +75,7 @@ int main(void) {
     word_t local_words = twice(3);
     double ratio = 1.5e2;
     char *msg = "hello, world";
+    unsigned long check = 0;
     int i;
 
     struct point q = { .x = 1, .y = 2 };
@@ -77,6 +96,9 @@ int main(void) {
     do {
         total = total << 1 ^ (total & 0xF);
     } while (!(total >= LIMIT));
+
+    check = checksum(&p);
+    total ^= (int)check;
 
     return total == 0 ? -1 : ~total + sizeof big;
 }

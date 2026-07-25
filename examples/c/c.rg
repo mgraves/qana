@@ -6,20 +6,26 @@
 //    parses as one PpDirective item — lossless, greppable, styled.
 //    Expansion is the meta tier's job (materialized, with provenance),
 //    never the parser's (L5).
-//  * The typedef-name ambiguity (`T * x;`) is dodged in v0: declaration
-//    specifiers are KEYWORDS (int, struct Foo, ...). The plan of record
-//    for typedef names is a covering grammar + semantic classification,
-//    never lexer feedback.
 //  * Typedef-name heads work WITHOUT lexer feedback, split by context:
-//    file scope / params / fields take full typedef'd declarators
-//    (pointers, abstracts); block level rides the two-identifier
-//    signal (`T x` is never an expression), so `T *p;` LOCALS are the
-//    pinned residue, along with casts and sizeof(type) — all three
-//    are R/R-entangled with expressions and await the
-//    expression-tier split (which would also unlock the comma
-//    operator). Labels/goto need default-shift semantics; function-
-//    like macro adjacency is space-sensitive and invisible over
-//    trivia.
+//    file scope / params / fields take full typedef'd declarators, and
+//    block level rides the EXPRESSION-TIER SPLIT: statement
+//    expressions (`s_expr`, below) surrender exactly one derivation —
+//    a bare identifier as the left operand of `*` — so a statement
+//    beginning `IDENT *` is a DECLARATION, deterministically. That is
+//    C's own reading whenever the head is a typedef; the flip side is
+//    pinned: `x * y + z;` (a multiplication STATEMENT led by a bare
+//    name) is refused, because it now reads as a broken declaration.
+//  * Casts and sizeof(type) take KEYWORD-led type names in full
+//    (`(unsigned long *)p`, `sizeof(struct point *)`). Bare typedef
+//    names converge instead of conflicting: `sizeof(word_t)` parses
+//    as sizeof-of-a-VALUE (the ref still resolves), and a bare-name
+//    cast is written call-shaped, `(word_t)(x)` — the classic C
+//    unification. `(word_t) x` (juxtaposition) is refused. The R/R
+//    core these convergences dodge is machine-provable: ask for
+//    `sizeof "(" IDENT ptr+ ")"` and the certifier refuses with a
+//    shift/reduce counterexample on `*` (see the exerciser gate).
+//  * Labels/goto need default-shift semantics; function-like macro
+//    adjacency is space-sensitive and invisible over trivia.
 //
 // Dangling else is resolved the envelope way: EXPLICITLY. `else` gets a
 // precedence, and the else-less `if` is marked lower — the classic yacc
@@ -279,14 +285,17 @@ rule param =
   | TdParamAbs:  head:IDENT ptrs @ref(head)
   | VarArgs:     ELLIPSIS
 
-// Block-level typedef'd declarators: IDENT-led (no leading `*`, no
-// leading `(` — both would collide with expression statements). Local
-// prototypes and arrays still work: `word_t f(int);`, `word_t a[4];`.
+// Block-level typedef'd declarators: pointered (the expression-tier
+// split freed the `IDENT *` prefix), but still no leading `(` — a
+// parenthesized declarator head collides with call statements, so
+// block-local function POINTERS remain file-scope-only.
 rule n_init_declarators = n_init_declarator+ % ","
 
 rule n_init_declarator =
-  | NInitDecl:     n_direct
-  | NInitDeclInit: n_direct "=" initializer
+  | NInitDecl:     n_declarator
+  | NInitDeclInit: n_declarator "=" initializer
+
+rule n_declarator = NDeclarator: ptrs n_direct
 
 rule n_direct =
   | NDName:  name:IDENT @def(name)
@@ -308,27 +317,28 @@ rule block_items = block_item*
 
 rule block_item =
   | ItemDecl: decl_specs init_declarators ";"
-  // Block level DOES have expression statements, so typedef'd locals
-  // ride the two-identifier signal: `T x` cannot be an expression
-  // (C has no juxtaposition), so requiring an IDENT-led declarator
-  // splits deterministically. `T *p;` locals are the pinned residue —
-  // R/R-entangled with multiplication (see the wall list).
+  // Block level DOES have expression statements — but those use the
+  // RESTRICTED tier (s_cexpr), which cannot begin `IDENT *`. So a
+  // typedef'd local takes pointered declarators after all: `T *p;`
+  // shifts into `ptrs` with no competitor, because the one expression
+  // that wanted those two tokens (bare-name multiplication) is the
+  // derivation the statement tier gave up.
   | TdLocal: head:IDENT n_init_declarators ";" @ref(head)
   | ItemStmt: stmt
 
 rule stmt =
-  | ExprStmt:    expr ";"
+  | ExprStmt:    s_cexpr ";"
   | EmptyStmt:   ";"
   | CompoundS:   compound_stmt
-  | IfStmt:      "if" "(" expr ")" stmt @precedence(",")
-  | IfElseStmt:  "if" "(" expr ")" stmt "else" stmt
-  | WhileStmt:   "while" "(" expr ")" stmt
-  | DoStmt:      "do" stmt "while" "(" expr ")" ";"
-  | ForStmt:     "for" "(" opt_expr ";" opt_expr ";" opt_expr ")" stmt
-  | ReturnStmt:  "return" opt_expr ";"
+  | IfStmt:      "if" "(" cexpr ")" stmt @precedence(",")
+  | IfElseStmt:  "if" "(" cexpr ")" stmt "else" stmt
+  | WhileStmt:   "while" "(" cexpr ")" stmt
+  | DoStmt:      "do" stmt "while" "(" cexpr ")" ";"
+  | ForStmt:     "for" "(" opt_cexpr ";" opt_cexpr ";" opt_cexpr ")" stmt
+  | ReturnStmt:  "return" opt_cexpr ";"
   | BreakStmt:   "break" ";"
   | ContinueStmt: "continue" ";"
-  | SwitchStmt:  "switch" "(" expr ")" stmt
+  | SwitchStmt:  "switch" "(" cexpr ")" stmt
   | CaseStmt:    "case" expr ":" stmt
   | DefaultStmt: "default" ":" stmt
   | PpStmt:      pp_directive
@@ -336,6 +346,103 @@ rule stmt =
 rule opt_expr = expr?
 
 // ---- expressions ----
+//
+// THE EXPRESSION-TIER SPLIT. Three tiers, one derivation surrendered:
+//
+//   cexpr    the comma operator — above assignment, and only where C
+//            allows it (parens, conditions, for clauses, return,
+//            statements). Call arguments and initializer lists keep
+//            their SEPARATOR commas at the `expr` tier, which is why
+//            `f(a, b)` stays two arguments.
+//   expr     assignment tier and below — unchanged, used everywhere
+//            an operand is wanted.
+//   s_expr   the STATEMENT expression. Identical to expr except for
+//            one missing production: a bare identifier may not be the
+//            left operand of `*`. Every other left spine is present
+//            (`f() * y;`, `(x) * y;`, `5 * y;` all parse). The freed
+//            two-token prefix `IDENT *` is what lets typedef'd
+//            pointer locals be declarations, deterministically.
+//
+// The statement tier is a left-spine mirror: each left-recursive
+// production takes `s_expr` on the left and plain `expr` on the
+// right, because the restriction is only about how a STATEMENT may
+// BEGIN. Prefix forms take full `expr` operands for the same reason.
+
+rule s_cexpr =
+  | ScFirst: s_expr
+  | ScComma: s_cexpr "," expr
+
+rule s_expr =
+  | SeName: name:IDENT @ref(name)
+  | SeWide: s_wide
+
+rule s_wide =
+  | SAssign:    s_expr "=" expr
+  | SAddAssign: s_expr "+=" expr
+  | SSubAssign: s_expr "-=" expr
+  | SMulAssign: s_expr "*=" expr
+  | SDivAssign: s_expr "/=" expr
+  | SModAssign: s_expr "%=" expr
+  | SAndAssign: s_expr "&=" expr
+  | SOrAssign:  s_expr "|=" expr
+  | SXorAssign: s_expr "^=" expr
+  | SShlAssign: s_expr "<<=" expr
+  | SShrAssign: s_expr ">>=" expr
+  | SCond:      s_expr "?" expr ":" expr @precedence("?")
+  | SLogOr:     s_expr "||" expr
+  | SLogAnd:    s_expr "&&" expr
+  | SBitOr:     s_expr "|" expr
+  | SBitXor:    s_expr "^" expr
+  | SBitAnd:    s_expr "&" expr
+  | SEqExpr:    s_expr "==" expr
+  | SNeExpr:    s_expr "!=" expr
+  | SLtExpr:    s_expr "<" expr
+  | SGtExpr:    s_expr ">" expr
+  | SLeExpr:    s_expr "<=" expr
+  | SGeExpr:    s_expr ">=" expr
+  | SShlExpr:   s_expr "<<" expr
+  | SShrExpr:   s_expr ">>" expr
+  | SAddExpr:   s_expr "+" expr
+  | SSubExpr:   s_expr "-" expr
+  // The surrendered derivation: `s_wide * expr`, never `s_expr * expr`.
+  // A bare name followed by `*` at statement start is a declaration.
+  | SMulExpr:   s_wide "*" expr
+  | SDivExpr:   s_expr "/" expr
+  | SModExpr:   s_expr "%" expr
+  | SNeg:       "-" expr @precedence("!")
+  | SPos:       "+" expr @precedence("!")
+  | SNot:       "!" expr
+  | SBitNot:    "~" expr
+  | SDeref:     "*" expr @precedence("!")
+  | SAddrOf:    "&" expr @precedence("!")
+  | SPreInc:    "++" expr
+  | SPreDec:    "--" expr
+  | SSizeofE:   "sizeof" expr
+  | SSizeofT:   "sizeof" "(" type_name ")" @precedence("sizeof")
+  | SCast:      "(" type_name ")" expr @precedence("!")
+  | SCall:      s_expr "(" args ")" @precedence(".")
+  | SIndex:     s_expr "[" expr "]" @precedence(".")
+  | SMember:    s_expr "." IDENT
+  | SArrow:     s_expr "->" IDENT
+  | SPostInc:   s_expr "++" @precedence(".")
+  | SPostDec:   s_expr "--" @precedence(".")
+  | SNumLit:    NUMBER
+  | SCharLit:   CHAR
+  | SStrLit:    STRING
+  | SParen:     "(" cexpr ")"
+
+rule cexpr =
+  | CFirst: expr
+  | CComma: cexpr "," expr
+
+rule opt_cexpr = cexpr?
+
+// A type name for casts and sizeof: KEYWORD-led specifiers plus
+// pointers. Keywords never begin an expression, so `(` peels cast
+// from parenthesized expression on the very next token — no cover
+// grammar, no feedback. Bare typedef names take the convergent
+// spellings instead (see the header).
+rule type_name = TypeName: decl_specs ptrs
 
 rule expr =
   | Assign:    expr "=" expr
@@ -377,6 +484,8 @@ rule expr =
   | PreInc:    "++" expr
   | PreDec:    "--" expr
   | SizeofE:   "sizeof" expr
+  | SizeofT:   "sizeof" "(" type_name ")" @precedence("sizeof")
+  | Cast:      "(" type_name ")" expr @precedence("!")
   | Call:      expr "(" args ")" @precedence(".")
   | Index:     expr "[" expr "]" @precedence(".")
   | Member:    expr "." IDENT
@@ -387,6 +496,6 @@ rule expr =
   | NumLit:    NUMBER
   | CharLit:   CHAR
   | StrLit:    STRING
-  | ParenExpr: "(" expr ")"
+  | ParenExpr: "(" cexpr ")"
 
 rule args = expr* % ","

@@ -119,9 +119,9 @@ fn deleting_a_block_comment_relexes_one_line() {
 }
 
 /// The typedef campaign: heads resolve WITHOUT lexer feedback, split
-/// by context — full declarators at file scope / params / fields, the
-/// two-identifier signal at block level. The residue is PINNED: a
-/// block-local `T *p;` still parses as (broken) multiplication.
+/// by context — full declarators at file scope / params / fields, and
+/// (since wall 3) pointered declarators at block level too, because
+/// the statement-expression tier surrendered the `IDENT *` prefix.
 #[test]
 fn typedef_heads_resolve_without_lexer_feedback() {
     let tc = RgToolchain::new();
@@ -164,15 +164,96 @@ int main(void) {\n\
     let unres: Vec<String> = db2.unresolved("b").into_iter().map(|(n, _)| n).collect();
     assert_eq!(unres, ["wrod"], "typo'd type is diagnosed by name");
 
-    // PINNED residue: block-level `T *p;` parses CLEANLY — as
-    // multiplication (that is the trap: no parse error, wrong
-    // reading). The honest signature: zero repairs, `word` resolving
-    // to the typedef as a VALUE read, and `p` unresolved. Awaits the
-    // expression-tier split; if this stops holding, update the walls.
+    // The wall-2 residue, DEMOLISHED by wall 3: block-level `T *p;`
+    // is now a DECLARATION — zero repairs, the head resolves to the
+    // typedef, and `p` is a definition (not an unresolved read).
     let residue = IncSession::new(&lexer, &out.def.sg, &tables, "typedef int word;\nint f(void) { word *p; return 0; }\n").unwrap();
-    assert!(residue.last_repairs.is_empty(), "the trap parses clean: {:?}", residue.last_repairs);
+    assert!(residue.last_repairs.is_empty(), "T *p; parses clean: {:?}", residue.last_repairs);
     let mut db3 = SemDb::new(out.def.binding.clone());
     db3.set_tree("r", residue.tree().unwrap().clone());
-    let unres: Vec<String> = db3.unresolved("r").into_iter().map(|(n, _)| n).collect();
-    assert_eq!(unres, ["p"], "the misreading surfaces semantically, not syntactically");
+    assert!(db3.unresolved("r").is_empty(), "{:?}", db3.unresolved("r"));
+    let names: Vec<String> = db3.symbols("r").defs.iter().map(|d| d.name.clone()).collect();
+    assert!(names.iter().any(|n| n == "p"), "p is a definition now: {names:?}");
+}
+
+/// C wall 3, the expression-tier split. Statement expressions give up
+/// exactly one derivation — a bare identifier as the left operand of
+/// `*` — and four doors open at once: pointered typedef locals,
+/// keyword-led casts, sizeof(type), and the comma operator. The costs
+/// are pinned as precisely as the wins, and the R/R core the
+/// convergent spellings dodge is proved by the certifier itself.
+#[test]
+fn expression_tier_split_opens_four_doors() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, C_RG);
+    let (lexer, tables) = certify(&out.def).expect("the split certifies");
+
+    let parses_clean = |doc: &str| -> bool {
+        let s = IncSession::new(&lexer, &out.def.sg, &tables, doc).unwrap();
+        s.last_repairs.is_empty()
+    };
+
+    // The doors, one representative each — all clean, all resolving.
+    let doc = "\
+typedef unsigned long word;\n\
+int f(void) {\n\
+    word *p, **pp, salt = 1;\n\
+    unsigned long u = (unsigned long)salt;\n\
+    word w = (word)(salt);\n\
+    unsigned n = sizeof(unsigned long *) + sizeof(word);\n\
+    int i, j;\n\
+    for (i = 0, j = 0; i < 3; ++i, ++j)\n\
+        u = u + 1, salt = salt + u;\n\
+    return (int)(u + w + n + *p + **pp);\n\
+}\n";
+    let s = IncSession::new(&lexer, &out.def.sg, &tables, doc).unwrap();
+    assert!(s.last_repairs.is_empty(), "all four doors parse: {:?}", s.last_repairs);
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_tree("w3", s.tree().unwrap().clone());
+    assert!(db.unresolved("w3").is_empty(), "{:?}", db.unresolved("w3"));
+
+    // The flip's cost, pinned: a multiplication STATEMENT led by a
+    // bare name now reads as a declaration, so `x * y;` quietly
+    // declares y (C's own reading when x names a type), and
+    // `x * y + z;` is REFUSED outright.
+    assert!(
+        parses_clean("int f(int x) { x * y; return 0; }\n"),
+        "bare-name star statement parses — as a declaration"
+    );
+    assert!(
+        !parses_clean("int f(int x, int y, int z) { x * y + z; return 0; }\n"),
+        "a bare-name multiplication statement is refused"
+    );
+    // Deeper left spines keep their multiplications: only the bare
+    // name surrendered.
+    assert!(parses_clean("int f(int x, int y) { (x) * y + 1; return 0; }\n"));
+    assert!(parses_clean("int g(void); int f(int y) { g() * y + 1; return 0; }\n"));
+
+    // Bare-typedef casts: juxtaposition refused, call shape converges.
+    assert!(!parses_clean("typedef int word;\nint f(int x) { word w = (word) x; return w; }\n"));
+    assert!(parses_clean("typedef int word;\nint f(int x) { word w = (word)(x); return w; }\n"));
+
+    // Call arguments never grew a comma operator: still two arguments.
+    let two_args = "int add(int a, int b); int f(void) { return add(1, 2); }\n";
+    assert!(parses_clean(two_args));
+
+    // THE PROOF BY REFUSAL: ask for the bare-name form directly —
+    // `sizeof "(" IDENT ptrs+ ")"` — and the certifier refuses with a
+    // shift/reduce counterexample on `*`: the token where sizeof's
+    // parenthesized VALUE (multiplication) and the would-be TYPE
+    // (pointer) diverge. This is the wall, stated by the machine.
+    let probed = C_RG.replace(
+        "  | SizeofE:   \"sizeof\" expr\n",
+        "  | SizeofE:   \"sizeof\" expr\n  | SizeofTd:  \"sizeof\" \"(\" IDENT td_ptrs \")\" @precedence(\"sizeof\")\n",
+    ) + "\nrule td_ptrs = ptr+\n";
+    assert_ne!(probed, C_RG, "probe injection took");
+    let probe_out = compile_source(&tc, &probed);
+    assert!(probe_out.diags.is_empty(), "probe grammar compiles: {:?}", probe_out.diags);
+    let err = certify(&probe_out.def).expect_err("the bare-name form must be refused");
+    let msg = err.iter().map(|d| d.msg.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(
+        msg.contains("shift/reduce") && msg.contains("on STAR"),
+        "refused with the diverging token named: {msg}"
+    );
+    assert!(msg.contains("example input"), "and a counterexample trace: {msg}");
 }

@@ -870,9 +870,42 @@ diagnostic on the name token, unknown-field-type silence, and static
 cross-checks (the member name must label a token, deftype's body label
 must exist).
 
+## Type tier infrastructure (shipped): memoization + cross-file flow
+
+The tier's capability roadmap being done, this increment makes it
+CHEAP and makes it REACH. Per-item memoization: every item's type
+outputs are cached with item-relative spans keyed by subtree identity
+(the Arc pointers the incremental parser already preserves), and an
+edit is classified by comparing the edited item's def-type sequence
+and member contribution against its predecessor — equal means BODY
+edit (replay everything else, re-walk one item, one pass), different
+means SIGNATURE edit (honest full ripple, the P6 firewall philosophy
+applied to types). `SemStats::{type_item_walks, type_passes}` are the
+proof, and a differential gate holds the memoized report byte-equal to
+a fresh SemDb's on every path.
+
+That differential caught a real bug during development: persistent
+arrow-intern tables accumulated stale entries across ripples, drifting
+TypeIds from what a fresh run assigns. A ripple now rebuilds the arrow
+vocabulary and purges arrow ids from its warm seeds, keeping the
+trajectory identical to a cold run.
+
+Cross-file: a reference resolving into another file (the binding
+tier's foreign resolution) is typed from that file's own converged
+report — recursively computed with a cycle guard, cheap because the
+dependency is itself memoized. Grammar-atom types only, since atom ids
+are file-independent; foreign document types and arrows stay unknown
+until a global vocabulary exists (the honest boundary, gated). Editing
+the dependency updates the dependent's diagnostics on its next query.
+
+p8bench, 2001 items: cold 6.3 ms (4002 walks, 2 passes); body edit
+1.2 ms (2 walks, 1 pass); signature edit 9.1 ms (full ripple); no-op
+query 1.4 ms (0 walks — the assembly/resolution floor, the named next
+refinement). Gates: 129 tests.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 126 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 129 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

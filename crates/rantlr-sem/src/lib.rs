@@ -404,6 +404,12 @@ pub struct SemStats {
     pub fragments_computed: u64,
     /// Item resolutions actually computed (cache misses).
     pub item_resolves_computed: u64,
+    /// Type-tier item walks actually performed (cache misses) — the
+    /// memoization proof: a body edit costs O(1) of these.
+    pub type_item_walks: u64,
+    /// Type-tier fixpoint passes run (a warm, unchanged file converges
+    /// in one).
+    pub type_passes: u64,
 }
 
 struct ItemSlot {
@@ -447,6 +453,12 @@ pub struct SemDb {
     cfg: BindingConfig,
     /// The declared type tier, when the grammar declared one.
     type_cfg: Option<types::TypeConfig>,
+    /// Per-file memoization of the type pass (converged results +
+    /// per-item outputs keyed by subtree identity).
+    type_caches: HashMap<String, types::TypeCache>,
+    /// Re-entrancy guard for cross-file type queries (a dependency
+    /// cycle resolves with whatever is already known, never hangs).
+    type_visiting: HashSet<String>,
     revision: u64,
     files: HashMap<String, FileEntry>,
     pub stats: SemStats,
@@ -467,6 +479,8 @@ impl SemDb {
         SemDb {
             cfg,
             type_cfg: None,
+            type_caches: HashMap::new(),
+            type_visiting: HashSet::new(),
             revision: 0,
             files: HashMap::new(),
             stats: SemStats::default(),
@@ -622,6 +636,7 @@ impl SemDb {
     pub fn remove(&mut self, uri: &str) {
         self.revision += 1;
         self.files.remove(uri);
+        self.type_caches.remove(uri);
     }
 
     pub fn signature(&mut self, uri: &str) -> Arc<Signature> {

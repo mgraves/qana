@@ -165,7 +165,7 @@ impl TypeReport {
 // ---------------------------------------------------------------------------
 
 struct Walker<'a> {
-    rules: HashMap<(u16, u16), &'a TypeRule>,
+    rules: &'a HashMap<(u16, u16), &'a TypeRule>,
     /// The run vocabulary (grammar atoms + document types + arrows).
     /// Mutable: arrow types intern on first encounter, and the tables
     /// persist across fixpoint passes so ids stay stable.
@@ -173,8 +173,13 @@ struct Walker<'a> {
     /// arrow TypeId → (parameter types, return type).
     arrows: &'a mut HashMap<TypeId, (Vec<TypeId>, TypeId)>,
     arrow_intern: &'a mut HashMap<(Vec<TypeId>, TypeId), TypeId>,
-    /// abs ref-name start → abs def-name start (same file only, v0).
+    /// abs ref-name start → abs def-name start (same file).
     ref_res: &'a HashMap<u32, u32>,
+    /// abs ref-name start → the FOREIGN def's type, pre-resolved from
+    /// the dependency file's converged report. Grammar-atom types only
+    /// (atom ids are file-independent); doc types and arrows stay
+    /// unknown until a global vocabulary exists.
+    foreign_ref_types: &'a HashMap<u32, TypeId>,
     /// abs def-name start → type (from the previous pass).
     def_types: &'a HashMap<u32, TypeId>,
     /// abs def-name start → the document-level type that def INTRODUCES.
@@ -330,11 +335,14 @@ impl<'a> Walker<'a> {
         let ty = match rule {
             TypeRule::Const(a) => Some(*a),
             TypeRule::OfChild(k) => pos_types.get(*k).copied().flatten(),
-            TypeRule::FromRef { ref_child } => pos_spans
-                .get(*ref_child)
-                .and_then(|s| self.ref_res.get(&s.0))
-                .and_then(|d| self.def_types.get(d))
-                .copied(),
+            TypeRule::FromRef { ref_child } => {
+                let start = pos_spans.get(*ref_child).map(|s| s.0);
+                start
+                    .and_then(|s| self.ref_res.get(&s))
+                    .and_then(|d| self.def_types.get(d))
+                    .copied()
+                    .or_else(|| start.and_then(|s| self.foreign_ref_types.get(&s)).copied())
+            }
             // The introduction itself was recorded in the pre-pass; the
             // declaring node is not an expression and stays untyped.
             // With a body child, the def sites inside it become the
@@ -597,64 +605,45 @@ impl SemDb {
 
     /// Derive the file's type facts from the declared rules. Types flow
     /// through names via the binding tier's own resolution; def-typing
-    /// iterates to a fixed point so chains of definitions (`let b = a;`)
-    /// converge regardless of order. File-granular in v0 (recomputed per
-    /// call); per-item memoization is the named refinement.
+    /// and member tables iterate to a fixed point so chains converge
+    /// regardless of order.
+    ///
+    /// MEMOIZED per item: outputs are cached (relative spans) keyed by
+    /// subtree identity, and an edit whose item keeps the same def-type
+    /// sequence and member contribution — a BODY edit — replays every
+    /// other item and re-walks only the changed one, in one pass. An
+    /// edit that changes a def's type — a SIGNATURE edit — ripples: the
+    /// whole file re-derives (the P6 firewall philosophy, applied to
+    /// types). `SemStats::{type_item_walks, type_passes}` are the proof.
+    ///
+    /// CROSS-FILE: a reference resolving to another file (the binding
+    /// tier's foreign resolution) is typed from that file's own
+    /// converged report — grammar-atom types only, since atom ids are
+    /// file-independent; foreign document types and arrows stay unknown
+    /// until a global vocabulary exists. Dependency cycles resolve with
+    /// what is known and never hang.
     pub fn types(&mut self, uri: &str) -> TypeReport {
         let Some(cfg) = self.type_cfg.clone() else { return TypeReport::default() };
-        if !self.files.contains_key(uri) {
+        if !self.files.contains_key(uri) || self.type_visiting.contains(uri) {
             return TypeReport::default();
         }
+        self.type_visiting.insert(uri.to_string());
+        let report = self.types_inner(uri, &cfg);
+        self.type_visiting.remove(uri);
+        report
+    }
 
-        // Resolution pre-pass: every ref's def site, via the binding
-        // tier (memoized under the hood). Same-file only in v0.
-        let ref_starts: Vec<u32> = {
+    fn types_inner(&mut self, uri: &str, cfg: &TypeConfig) -> TypeReport {
+        // ---- gather: refs, defs, items (cheap clones of metadata) ----
+        let (ref_meta, item_meta, all_defs, def_names) = {
             let e = &self.files[uri];
-            e.items
+            let ref_meta: Vec<u32> = e
+                .items
                 .iter()
                 .flat_map(|s| s.frag.refs.iter().map(move |r| s.base_off + r.span.0))
-                .collect()
-        };
-        let mut ref_res: HashMap<u32, u32> = HashMap::new();
-        for start in ref_starts {
-            if let Some((duri, dspan)) = self.definition(uri, start) {
-                if duri == uri {
-                    ref_res.insert(start, dspan.0);
-                }
-            }
-        }
-
-        let rules: HashMap<(u16, u16), &TypeRule> =
-            cfg.rules.iter().map(|(nt, prod, r)| ((*nt, *prod), r)).collect();
-        let e = &self.files[uri];
-        let items: Vec<(std::sync::Arc<GreenNode>, u32)> =
-            e.items.iter().map(|s| (s.node.clone(), s.base_off)).collect();
-
-        // Open the vocabulary: grammar atoms first, then every type this
-        // DOCUMENT introduces (`deftype`), keyed by introduction site —
-        // identity is nominal-by-declaration, and which declaration an
-        // annotation denotes is the binding tier's scoped answer.
-        let mut vocab = cfg.atoms.clone();
-        let mut deftype_ids: HashMap<u32, TypeId> = HashMap::new();
-        {
-            let mut sites: Vec<(u32, String)> = Vec::new();
-            for (node, base) in &items {
-                collect_deftypes(node, *base, &rules, &mut sites);
-            }
-            for (start, name) in sites {
-                if let std::collections::hash_map::Entry::Vacant(v) = deftype_ids.entry(start) {
-                    vocab.push(name);
-                    v.insert((vocab.len() - 1) as TypeId);
-                }
-            }
-        }
-
-        // Every def SITE in the file, sorted — the arity source for
-        // arrow assembly (a param whose type is still unknown must keep
-        // the arrow unknown, not shorten it) — plus each site's NAME
-        // text (member-table keys), both from the binding fragments.
-        let (all_defs, def_names): (Vec<u32>, HashMap<u32, String>) = {
-            let e = &self.files[uri];
+                .collect();
+            let item_meta: Vec<(std::sync::Arc<GreenNode>, u32, usize)> =
+                e.items.iter().map(|s| (s.node.clone(), s.base_off, s.ptr)).collect();
             let mut v: Vec<u32> = Vec::new();
             let mut names: HashMap<u32, String> = HashMap::new();
             for s in &e.items {
@@ -665,69 +654,371 @@ impl SemDb {
                 }
             }
             v.sort_unstable();
-            (v, names)
+            (ref_meta, item_meta, v, names)
         };
-        // The document-types boundary in the run vocabulary: arrow
-        // types intern strictly after this point.
-        let arrows_at = vocab.len();
-        let mut arrows: HashMap<TypeId, (Vec<TypeId>, TypeId)> = HashMap::new();
-        let mut arrow_intern: HashMap<(Vec<TypeId>, TypeId), TypeId> = HashMap::new();
 
-        // Iterate def-typing AND member tables to a fixed point
-        // (bounded; each pass can only add or update entries along
-        // resolution edges — chains like `l.p.x` deepen one level per
-        // pass).
-        let mut def_types: HashMap<u32, TypeId> = HashMap::new();
-        let mut member_types: HashMap<(TypeId, String), Option<TypeId>> = HashMap::new();
-        let mut last = None;
-        for _ in 0..8 {
-            let (out_types, out_defs, out_members, diags) = {
-                let mut w = Walker {
-                    rules: rules.clone(),
-                    vocab: &mut vocab,
-                    arrows: &mut arrows,
-                    arrow_intern: &mut arrow_intern,
-                    ref_res: &ref_res,
-                    def_types: &def_types,
-                    deftype_ids: &deftype_ids,
-                    all_defs: &all_defs,
-                    def_names: &def_names,
-                    members: &member_types,
-                    out_members: HashMap::new(),
-                    span_types: HashMap::new(),
-                    ret_stack: Vec::new(),
-                    out_types: Vec::new(),
-                    out_defs: HashMap::new(),
-                    diags: Vec::new(),
-                };
-                for (node, base) in &items {
-                    w.node(node, *base);
+        // ---- resolution: local map + foreign targets ----
+        let mut ref_res: HashMap<u32, u32> = HashMap::new();
+        let mut foreign_targets: Vec<(u32, String, u32)> = Vec::new();
+        for start in ref_meta {
+            if let Some((duri, dspan)) = self.definition(uri, start) {
+                if duri == uri {
+                    ref_res.insert(start, dspan.0);
+                } else {
+                    foreign_targets.push((start, duri, dspan.0));
                 }
-                (w.out_types, w.out_defs, w.out_members, w.diags)
-            };
-            let new_defs: HashMap<u32, TypeId> =
-                out_defs.iter().map(|(k, (_, t))| (*k, *t)).collect();
-            let stable = new_defs == def_types && out_members == member_types;
-            def_types = new_defs;
-            member_types = out_members;
-            let mut defs: Vec<((u32, u32), TypeId)> = out_defs.into_values().collect();
-            defs.sort_unstable_by_key(|(s, _)| s.0);
-            let mut types = out_types;
-            types.sort_unstable_by_key(|((s, e), _)| (*s, u32::MAX - (*e - *s)));
-            last = Some(TypeReport {
-                types,
-                def_types: defs,
-                diags,
-                atoms: vocab.clone(),
-                grammar_atoms: cfg.atoms.len(),
-                arrows_at,
-            });
-            if stable {
-                break;
             }
         }
-        last.unwrap_or_default()
+        // Foreign types come from each dependency's OWN report (its
+        // memoization makes this cheap when the dependency is
+        // unchanged). Atom-only: those ids mean the same thing in every
+        // file of this SemDb.
+        let mut foreign_ref_types: HashMap<u32, TypeId> = HashMap::new();
+        {
+            let mut dep_uris: Vec<String> =
+                foreign_targets.iter().map(|(_, u, _)| u.clone()).collect();
+            dep_uris.sort();
+            dep_uris.dedup();
+            let mut dep_reports: HashMap<String, TypeReport> = HashMap::new();
+            for dep in dep_uris {
+                let r = self.types(&dep);
+                dep_reports.insert(dep, r);
+            }
+            for (ref_start, dep, dstart) in &foreign_targets {
+                if let Some(r) = dep_reports.get(dep) {
+                    if let Some(&(_, t)) =
+                        r.def_types.iter().find(|((s, _), _)| s == dstart)
+                    {
+                        if (t as usize) < r.grammar_atoms {
+                            foreign_ref_types.insert(*ref_start, t);
+                        }
+                    }
+                }
+            }
+        }
+        // Position-independent snapshot of the foreign inputs — part of
+        // the cache-validity comparison (a dependency changing a value
+        // must ripple here).
+        let foreign_snapshot: Vec<(u32, TypeId)> = {
+            let mut v: Vec<(u32, TypeId)> = foreign_ref_types
+                .iter()
+                .map(|(&s, &t)| {
+                    // ref start relative to its item
+                    let rel = item_meta
+                        .iter()
+                        .rev()
+                        .find(|(_, b, _)| *b <= s)
+                        .map(|(_, b, _)| s - b)
+                        .unwrap_or(s);
+                    (rel, t)
+                })
+                .collect();
+            v.sort_unstable();
+            v
+        };
+
+        let rules: HashMap<(u16, u16), &TypeRule> =
+            cfg.rules.iter().map(|(nt, prod, r)| ((*nt, *prod), r)).collect();
+
+        // ---- vocabulary generation (doc types, in document order) ----
+        let mut cache = self.type_caches.remove(uri).unwrap_or_default();
+        let mut gen_current: Vec<(usize, u32, String)> = Vec::new();
+        for (idx, (node, base, ptr)) in item_meta.iter().enumerate() {
+            if let Some(it) = cache.per_item.get(ptr) {
+                for (rel, name) in &it.rel_deftypes {
+                    gen_current.push((idx, *rel, name.clone()));
+                }
+            } else {
+                let mut sites: Vec<(u32, String)> = Vec::new();
+                collect_deftypes(node, *base, &rules, &mut sites);
+                for (abs, name) in sites {
+                    gen_current.push((idx, abs - base, name));
+                }
+            }
+        }
+        let vocab_reusable = cache.deftype_gen == gen_current && !cache.vocab.is_empty();
+        let (mut vocab, mut arrows, mut arrow_intern, warm_members) = if vocab_reusable {
+            (
+                cache.vocab.clone(),
+                cache.arrows.clone(),
+                cache.arrow_intern.clone(),
+                cache.member_types.clone(),
+            )
+        } else {
+            // Doc TypeIds change meaning: every cached output is stale.
+            cache.per_item.clear();
+            let mut v = cfg.atoms.clone();
+            for (_, _, name) in &gen_current {
+                v.push(name.clone());
+            }
+            (v, HashMap::new(), HashMap::new(), HashMap::new())
+        };
+        let arrows_at = cfg.atoms.len() + gen_current.len();
+        let mut deftype_ids: HashMap<u32, TypeId> = HashMap::new();
+        for (k, (idx, rel, _)) in gen_current.iter().enumerate() {
+            let base = item_meta[*idx].1;
+            deftype_ids.insert(base + rel, (cfg.atoms.len() + k) as TypeId);
+        }
+
+        // ---- warm start: cached converged values at CURRENT offsets.
+        // The replaced item (same index, dead ptr) seeds its old values
+        // too, so self-recursive items resolve in the first pass. ----
+        let mut warm_defs: HashMap<u32, TypeId> = HashMap::new();
+        for (idx, (_, base, ptr)) in item_meta.iter().enumerate() {
+            let it = cache.per_item.get(ptr).or_else(|| {
+                cache
+                    .items_order
+                    .get(idx)
+                    .and_then(|old| cache.per_item.get(old))
+            });
+            if let Some(it) = it {
+                for (rel, _, t) in &it.rel_defs {
+                    warm_defs.insert(base + rel, *t);
+                }
+            }
+        }
+
+        // One walk of one item, capturing its outputs relative to base.
+        let walk_item = |vocab: &mut Vec<String>,
+                         arrows: &mut HashMap<TypeId, (Vec<TypeId>, TypeId)>,
+                         arrow_intern: &mut HashMap<(Vec<TypeId>, TypeId), TypeId>,
+                         def_types: &HashMap<u32, TypeId>,
+                         members: &HashMap<(TypeId, String), Option<TypeId>>,
+                         node: &GreenNode,
+                         base: u32|
+         -> ItemOut {
+            let mut w = Walker {
+                rules: &rules,
+                vocab,
+                arrows,
+                arrow_intern,
+                ref_res: &ref_res,
+                foreign_ref_types: &foreign_ref_types,
+                def_types,
+                deftype_ids: &deftype_ids,
+                all_defs: &all_defs,
+                def_names: &def_names,
+                members,
+                out_members: HashMap::new(),
+                span_types: HashMap::new(),
+                ret_stack: Vec::new(),
+                out_types: Vec::new(),
+                out_defs: HashMap::new(),
+                diags: Vec::new(),
+            };
+            w.node(node, base);
+            let mut rel_defs: Vec<(u32, (u32, u32), TypeId)> = w
+                .out_defs
+                .into_iter()
+                .map(|(s, ((a, b), t))| (s - base, (a - base, b - base), t))
+                .collect();
+            rel_defs.sort_unstable_by_key(|(s, _, _)| *s);
+            let mut members_out: Vec<((TypeId, String), Option<TypeId>)> =
+                w.out_members.into_iter().collect();
+            members_out.sort();
+            let mut rel_deftypes: Vec<(u32, String)> = Vec::new();
+            let mut sites: Vec<(u32, String)> = Vec::new();
+            collect_deftypes(node, base, &rules, &mut sites);
+            for (abs, name) in sites {
+                rel_deftypes.push((abs - base, name));
+            }
+            ItemOut {
+                rel_types: w
+                    .out_types
+                    .into_iter()
+                    .map(|((a, b), t)| ((a - base, b - base), t))
+                    .collect(),
+                rel_defs,
+                members: members_out,
+                rel_diags: w
+                    .diags
+                    .into_iter()
+                    .map(|d| ((d.span.0 - base, d.span.1 - base), d.msg))
+                    .collect(),
+                rel_deftypes,
+            }
+        };
+
+        // ---- fast path: walk only FRESH items against the warm env;
+        // if their def sequences and member contributions match what
+        // the cache converged to, every cached item replays. ----
+        let mut outs: Vec<Option<ItemOut>> = vec![None; item_meta.len()];
+        let mut fast_ok = vocab_reusable || cache.per_item.is_empty();
+        let mut fresh_walked = 0u64;
+        if vocab_reusable {
+            for (idx, (node, base, ptr)) in item_meta.iter().enumerate() {
+                if cache.per_item.contains_key(ptr) {
+                    continue;
+                }
+                let out = walk_item(
+                    &mut vocab,
+                    &mut arrows,
+                    &mut arrow_intern,
+                    &warm_defs,
+                    &warm_members,
+                    node,
+                    *base,
+                );
+                fresh_walked += 1;
+                // Same def-type sequence + member contribution as the
+                // item this one replaced (same index)?
+                let old = cache
+                    .items_order
+                    .get(idx)
+                    .and_then(|old| cache.per_item.get(old));
+                let seq_ok = match old {
+                    Some(o) => {
+                        o.rel_defs.iter().map(|(_, _, t)| *t).collect::<Vec<_>>()
+                            == out.rel_defs.iter().map(|(_, _, t)| *t).collect::<Vec<_>>()
+                            && o.members == out.members
+                            && o.rel_deftypes == out.rel_deftypes
+                    }
+                    None => false,
+                };
+                if !seq_ok {
+                    fast_ok = false;
+                }
+                outs[idx] = Some(out);
+            }
+            fast_ok = fast_ok
+                && item_meta.len() == cache.items_order.len()
+                && foreign_snapshot == cache.foreign_snapshot;
+        } else {
+            fast_ok = false;
+        }
+
+        self.stats.type_item_walks += fresh_walked;
+
+        let (final_outs, member_final) = if fast_ok && !cache.per_item.is_empty() {
+            // Replay every cached item; fresh outputs slot in.
+            self.stats.type_passes += 1;
+            for (idx, (_, _, ptr)) in item_meta.iter().enumerate() {
+                if outs[idx].is_none() {
+                    outs[idx] = cache.per_item.get(ptr).cloned();
+                }
+            }
+            (outs, warm_members)
+        } else {
+            // Ripple (or cold): full fixpoint from the warm seed.
+            // Arrow ids are rebuilt from scratch — persistent intern
+            // tables would otherwise accumulate stale entries and drift
+            // from what a fresh computation assigns (the differential
+            // gate caught exactly this). Purging arrow ids from the
+            // warm seeds keeps the trajectory identical to a cold run.
+            cache.per_item.clear();
+            vocab.truncate(arrows_at);
+            arrows.clear();
+            arrow_intern.clear();
+            let mut def_types = warm_defs;
+            let mut member_types = warm_members;
+            def_types.retain(|_, t| (*t as usize) < arrows_at);
+            member_types.retain(|_, v| v.map_or(true, |t| (t as usize) < arrows_at));
+            let mut result: Vec<Option<ItemOut>> = vec![None; item_meta.len()];
+            for _ in 0..8 {
+                self.stats.type_passes += 1;
+                let mut pass_outs: Vec<Option<ItemOut>> = Vec::with_capacity(item_meta.len());
+                for (node, base, _) in &item_meta {
+                    pass_outs.push(Some(walk_item(
+                        &mut vocab,
+                        &mut arrows,
+                        &mut arrow_intern,
+                        &def_types,
+                        &member_types,
+                        node,
+                        *base,
+                    )));
+                    self.stats.type_item_walks += 1;
+                }
+                let mut new_defs: HashMap<u32, TypeId> = HashMap::new();
+                let mut new_members: HashMap<(TypeId, String), Option<TypeId>> = HashMap::new();
+                for (out, (_, base, _)) in pass_outs.iter().zip(&item_meta) {
+                    let out = out.as_ref().unwrap();
+                    for (rel, _, t) in &out.rel_defs {
+                        new_defs.insert(base + rel, *t);
+                    }
+                    for (k, v) in &out.members {
+                        new_members.insert(k.clone(), *v);
+                    }
+                }
+                let stable = new_defs == def_types && new_members == member_types;
+                def_types = new_defs;
+                member_types = new_members;
+                result = pass_outs;
+                if stable {
+                    break;
+                }
+            }
+            (result, member_types)
+        };
+
+        // ---- store the cache and assemble the absolute report ----
+        cache.deftype_gen = gen_current;
+        cache.vocab = vocab.clone();
+        cache.arrows = arrows;
+        cache.arrow_intern = arrow_intern;
+        cache.member_types = member_final;
+        cache.foreign_snapshot = foreign_snapshot;
+        cache.items_order = item_meta.iter().map(|(_, _, p)| *p).collect();
+        let mut report = TypeReport {
+            types: Vec::new(),
+            def_types: Vec::new(),
+            diags: Vec::new(),
+            atoms: vocab,
+            grammar_atoms: cfg.atoms.len(),
+            arrows_at,
+        };
+        for (out, (_, base, ptr)) in final_outs.into_iter().zip(&item_meta) {
+            let Some(out) = out else { continue };
+            for &((a, b), t) in &out.rel_types {
+                report.types.push(((base + a, base + b), t));
+            }
+            for &(_, (a, b), t) in &out.rel_defs {
+                report.def_types.push(((base + a, base + b), t));
+            }
+            for ((a, b), msg) in &out.rel_diags {
+                report
+                    .diags
+                    .push(TypeDiag { span: (base + a, base + b), msg: msg.clone() });
+            }
+            cache.per_item.insert(*ptr, out);
+        }
+        report.types.sort_unstable_by_key(|((s, e), _)| (*s, u32::MAX - (*e - *s)));
+        report.def_types.sort_unstable_by_key(|(s, _)| s.0);
+        report.diags.sort_unstable_by_key(|d| d.span);
+        self.type_caches.insert(uri.to_string(), cache);
+        report
     }
+}
+
+/// Per-file memoization of the type pass: the converged environment and
+/// every item's outputs, spans relative to the item so position shifts
+/// never invalidate.
+#[derive(Default)]
+pub(crate) struct TypeCache {
+    /// (item index, rel site, name) of every deftype — doc TypeIds are
+    /// positions in this list, so ANY change resets the vocabulary.
+    deftype_gen: Vec<(usize, u32, String)>,
+    vocab: Vec<String>,
+    arrows: HashMap<TypeId, (Vec<TypeId>, TypeId)>,
+    arrow_intern: HashMap<(Vec<TypeId>, TypeId), TypeId>,
+    member_types: HashMap<(TypeId, String), Option<TypeId>>,
+    /// Foreign inputs (item-relative ref start, type) — a dependency
+    /// changing a value must ripple here.
+    foreign_snapshot: Vec<(u32, TypeId)>,
+    /// Item subtree pointers at cache time, in order — how a replaced
+    /// item finds its predecessor for the body/signature comparison.
+    items_order: Vec<usize>,
+    per_item: HashMap<usize, ItemOut>,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct ItemOut {
+    rel_types: Vec<((u32, u32), TypeId)>,
+    /// (rel def-name start, rel def-name span, type), sorted by start.
+    rel_defs: Vec<(u32, (u32, u32), TypeId)>,
+    members: Vec<((TypeId, String), Option<TypeId>)>,
+    rel_diags: Vec<((u32, u32), String)>,
+    rel_deftypes: Vec<(u32, String)>,
 }
 
 /// Compose two declared tiers across an island boundary: host rules at

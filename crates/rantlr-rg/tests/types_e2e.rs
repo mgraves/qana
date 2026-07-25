@@ -612,3 +612,162 @@ fn member_forms_are_statically_checked() {
         out.diags
     );
 }
+
+// ---------------------------------------------------------------------------
+// Infrastructure: per-item memoization + cross-file flow
+// ---------------------------------------------------------------------------
+
+use rantlr_engine::{Line, LineEdit};
+
+/// Replace the first line containing `needle` in a live session.
+fn edit_line(
+    session: &mut rantlr_engine::IncSession<'_>,
+    sg: &rantlr_grammar::SynGrammar,
+    tables: &rantlr_grammar::LrTables,
+    needle: &str,
+    replacement: &str,
+) {
+    let li = session
+        .buf
+        .lines
+        .iter()
+        .position(|l| l.text.contains(needle))
+        .expect("needle line");
+    let term = session.buf.lines[li].term;
+    session
+        .edit(sg, tables, &[LineEdit { start: li, end: li + 1, replacement: vec![Line::new(replacement, term)] }])
+        .expect("edit parses");
+}
+
+/// The differential that anchors everything: a memoized report must be
+/// IDENTICAL to one computed by a fresh SemDb over the same tree.
+fn assert_fresh_equal(db: &mut SemDb, cfg: &rantlr_rg::compile::LangDef, uri: &str, tree: &std::sync::Arc<rantlr_grammar::GreenNode>) {
+    let memo = db.types(uri);
+    let mut fresh = SemDb::new(cfg.binding.clone());
+    fresh.set_types(cfg.types.clone());
+    fresh.set_tree(uri, tree.clone());
+    let clean = fresh.types(uri);
+    assert_eq!(memo.types, clean.types, "memoized ≡ fresh: node types");
+    assert_eq!(memo.def_types, clean.def_types, "memoized ≡ fresh: def types");
+    assert_eq!(memo.diags, clean.diags, "memoized ≡ fresh: diagnostics");
+    assert_eq!(memo.atoms, clean.atoms, "memoized ≡ fresh: vocabulary");
+}
+
+/// A BODY edit (def types unchanged) re-walks only the edited item, in
+/// one pass; a SIGNATURE edit (a def's type changes) ripples — and both
+/// stay identical to a from-scratch computation.
+#[test]
+fn memoization_body_edits_walk_one_item_signature_edits_ripple() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, APP_LANG);
+    let (lexer, tables) = certify(&out.def).unwrap();
+    let mut doc = String::from("fn add(a: Num, b: Num) -> Num { return a + b; }\n");
+    for i in 0..20 {
+        doc.push_str(&format!("let x{i} = add({i}, {i});\n"));
+    }
+    let mut session = IncSession::new(&lexer, &out.def.sg, &tables, &doc).unwrap();
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_types(out.def.types.clone());
+    db.set_tree("d", session.tree().unwrap().clone());
+    let cold = db.types("d");
+    assert!(cold.diags.is_empty());
+    let cold_walks = db.stats.type_item_walks;
+    assert!(cold_walks >= 21, "cold pass walks everything (got {cold_walks})");
+
+    // Body edit: same types, new value.
+    edit_line(&mut session, &out.def.sg, &tables, "let x7 ", "let x7 = add(700, 7);");
+    db.set_tree("d", session.tree().unwrap().clone());
+    let before = (db.stats.type_item_walks, db.stats.type_passes);
+    let r = db.types("d");
+    assert!(r.diags.is_empty());
+    let walks = db.stats.type_item_walks - before.0;
+    let passes = db.stats.type_passes - before.1;
+    assert!(walks <= 2, "body edit re-walks only the edited item (±newline adjacency), got {walks}");
+    assert_eq!(passes, 1, "body edit converges in one pass");
+    assert_fresh_equal(&mut db, &out.def, "d", session.tree().unwrap());
+
+    // Signature edit: x7's TYPE changes (Num → Str) — ripple, and the
+    // report is still exactly what a cold computation produces.
+    edit_line(&mut session, &out.def.sg, &tables, "let x7 ", "let x7 = \"now a string\";");
+    db.set_tree("d", session.tree().unwrap().clone());
+    let before = db.stats.type_item_walks;
+    let r = db.types("d");
+    assert!(r.diags.is_empty(), "nothing uses x7, so no diags: {:?}", r.diags);
+    let walks = db.stats.type_item_walks - before;
+    assert!(walks > 20, "signature edit ripples (got {walks})");
+    assert_fresh_equal(&mut db, &out.def, "d", session.tree().unwrap());
+
+    // And a signature edit that IS used downstream updates diagnostics.
+    edit_line(&mut session, &out.def.sg, &tables, "fn add", "fn add(a: Num, b: Num) -> Str { return \"s\"; }");
+    db.set_tree("d", session.tree().unwrap().clone());
+    let r = db.types("d");
+    assert!(r.diags.is_empty(), "calls still arity-clean; results now Str: {:?}", r.diags);
+    let defs = def_types(&r, &session.buf.reproduce());
+    assert_eq!(defs.iter().find(|(n, _)| n == "x3").unwrap().1, "Str", "new return type flowed to every call site");
+    assert_fresh_equal(&mut db, &out.def, "d", session.tree().unwrap());
+}
+
+/// Cross-file: a reference resolving into another file carries that
+/// file's converged type when it is a grammar atom; document types stay
+/// unknown (their ids are file-local); edits to the dependency are seen
+/// on the next query; cycles terminate.
+#[test]
+fn cross_file_atom_types_flow_doc_types_stay_local() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, APP_LANG);
+    let (lexer, tables) = certify(&out.def).unwrap();
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_types(out.def.types.clone());
+
+    let a = IncSession::new(&lexer, &out.def.sg, &tables, "let shared = 1;\n").unwrap();
+    db.set_tree("a", a.tree().unwrap().clone());
+    let b_doc = "let use_it = shared + 2;\nlet bad = shared;\nfn f(p: Num) -> Num { return p; }\nlet call_it = f(shared);\n";
+    let b = IncSession::new(&lexer, &out.def.sg, &tables, b_doc).unwrap();
+    db.set_tree("b", b.tree().unwrap().clone());
+
+    let r = db.types("b");
+    let defs = def_types(&r, b_doc);
+    assert_eq!(defs.iter().find(|(n, _)| n == "use_it").unwrap().1, "Num", "foreign atom type flows");
+    assert_eq!(defs.iter().find(|(n, _)| n == "call_it").unwrap().1, "Num", "foreign values feed calls");
+    assert!(r.diags.is_empty(), "{:?}", r.diags);
+
+    // The dependency changes type: the next query sees it.
+    let a2 = IncSession::new(&lexer, &out.def.sg, &tables, "let shared = \"str\";\n").unwrap();
+    db.set_tree("a", a2.tree().unwrap().clone());
+    let r = db.types("b");
+    assert_eq!(r.diags.len(), 2, "shared + 2 and f(shared) now mismatch: {:?}", r.diags);
+    assert!(r.diags.iter().all(|d| d.msg.contains("expected `Num`, found `Str`")));
+
+    // Mutual references terminate (one-hop semantics, no hang).
+    let c1 = IncSession::new(&lexer, &out.def.sg, &tables, "let c1 = d1;\n").unwrap();
+    let d1 = IncSession::new(&lexer, &out.def.sg, &tables, "let d1 = c1;\n").unwrap();
+    db.set_tree("c", c1.tree().unwrap().clone());
+    db.set_tree("e", d1.tree().unwrap().clone());
+    let _ = db.types("c");
+    let _ = db.types("e");
+}
+
+/// Foreign DOCUMENT types are file-local ids and must not leak: the
+/// using file stays silent rather than guessing.
+#[test]
+fn foreign_document_types_stay_unknown() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, MEM_LANG);
+    let (lexer, tables) = certify(&out.def).unwrap();
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_types(out.def.types.clone());
+
+    let a = IncSession::new(&lexer, &out.def.sg, &tables, "struct P { x: Num }\nlet p: P = new P;\n").unwrap();
+    db.set_tree("a", a.tree().unwrap().clone());
+    let b_doc = "let q: Num = p;\n";
+    let b = IncSession::new(&lexer, &out.def.sg, &tables, b_doc).unwrap();
+    db.set_tree("b", b.tree().unwrap().clone());
+    let r = db.types("b");
+    assert!(
+        r.diags.is_empty(),
+        "a foreign doc-typed value is unknown, never a guessed mismatch: {:?}",
+        r.diags
+    );
+    let defs = def_types(&r, b_doc);
+    assert_eq!(defs.iter().find(|(n, _)| n == "q").unwrap().1, "Num", "annotation still wins");
+}

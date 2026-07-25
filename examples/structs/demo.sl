@@ -42,3 +42,8 @@ fn probe(pt: Point) -> Num {
 
 macro spawns(f, t) => { probe(new t) }
 let grown: Num = spawns!{Wrap};
+
+# A richer FACET list: `m!!{T}` binds each member's name, type, and
+# INDEX, so the derive can number what it generates.
+macro tagged(f, t, i) => { origin.f + i }
+let tags: Num = tagged!!{Point};

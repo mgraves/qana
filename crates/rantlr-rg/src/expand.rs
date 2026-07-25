@@ -228,6 +228,7 @@ pub fn provenance_json(source_uri: &str, source: &str, out: &ExpandOutcome) -> S
             SegKind::Arg => "arg",
             SegKind::Sep => "sep",
             SegKind::Paren => "paren",
+            SegKind::Meta => "meta",
         };
         let file = match &seg.src_uri {
             Some(u) => format!(", \"file\": {u:?}"),

@@ -46,21 +46,54 @@ pub struct MacroConfig {
     /// sites; a ref without `@splice` never expands (which is what
     /// keeps C's `#ifdef LIMIT` intact while `return LIMIT;` opens).
     pub uses: Vec<(u16, u16, usize, Option<usize>)>,
-    /// (nt, prod, type-name child index, separator) — `@reflect(ty[,
-    /// sep])` on a `@splice` production: the macro's arguments come
-    /// from ITERATION over the resolved type's declared members, one
-    /// substitution per member — parameter 1 gets the member's name,
-    /// parameter 2 its declared type text — joined by `sep`. The
-    /// member map is the TYPE tier's own declared forms (`deftype`
-    /// bodies and their typed defs): reflection reads the language's
-    /// declarations, not an engine-side schema.
-    pub reflects: Vec<(u16, u16, usize, String)>,
+    /// (nt, prod, type-name child index, separator, facets) —
+    /// `@reflect(ty[, sep[, facet…]])` on a `@splice` production: the
+    /// macro's arguments come from ITERATION over the resolved type's
+    /// declared members, one substitution per member, joined by `sep`.
+    /// The macro's parameters bind to the declared FACETS in order
+    /// (default `name, type`). The member map is the TYPE tier's own
+    /// declared forms (`deftype` bodies and their typed defs):
+    /// reflection reads the language's declarations, not an
+    /// engine-side schema.
+    pub reflects: Vec<(u16, u16, usize, String, Vec<Facet>)>,
 }
 
 impl MacroConfig {
     pub fn declared(&self) -> bool {
         !self.defs.is_empty()
     }
+}
+
+/// What a reflection macro can ask about each member. Every facet is
+/// read from the type tier's declarations or computed from them —
+/// none of it is engine-invented metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Facet {
+    /// The member's declared name (points at the field).
+    Name,
+    /// Its declared type annotation (points at the annotation).
+    Type,
+    /// The reflected type's own name (points at its declaration).
+    Owner,
+    /// Position among the members, from 0 — computed, so it has no
+    /// source span.
+    Index,
+    /// How many members the type declares — likewise computed.
+    Count,
+}
+
+impl Facet {
+    pub fn parse(name: &str) -> Option<Facet> {
+        match name {
+            "name" => Some(Facet::Name),
+            "type" => Some(Facet::Type),
+            "owner" => Some(Facet::Owner),
+            "index" => Some(Facet::Index),
+            "count" => Some(Facet::Count),
+            _ => None,
+        }
+    }
+    pub const NAMES: &'static [&'static str] = &["name", "type", "owner", "index", "count"];
 }
 
 /// What the GRAMMAR declares about SHAPE — the whole basis for
@@ -260,13 +293,17 @@ pub enum SegKind {
     /// the spliced text. Also synthesized (no source) — and the one
     /// byte a reader of generated code most wants explained.
     Paren,
+    /// A value COMPUTED from declarations — a reflected member's index
+    /// or a member count. Synthesized: derived from the source, but
+    /// not copied from it.
+    Meta,
 }
 
 impl SegKind {
     /// Synthesized bytes have no source span (they came from the
     /// grammar's declarations, not from any document).
     pub fn synthesized(self) -> bool {
-        matches!(self, SegKind::Sep | SegKind::Paren)
+        matches!(self, SegKind::Sep | SegKind::Paren | SegKind::Meta)
     }
 }
 
@@ -348,8 +385,9 @@ struct Job {
     /// is silent without one (every C name is a splice site) and a
     /// diagnostic with one (`x!(…)` on a non-macro is an error).
     has_args: bool,
-    /// `@reflect`: (type-name ref index into st.refs, separator).
-    reflect: Option<(usize, String)>,
+    /// `@reflect`: (type-name ref index into st.refs, separator,
+    /// the facets its parameters bind to, in order).
+    reflect: Option<(usize, String, Vec<Facet>)>,
     /// Resolved reflection: the members to iterate, with the join.
     members: Option<(Vec<RMember>, String)>,
 }
@@ -362,6 +400,8 @@ struct Job {
 struct RMember {
     name_span: (u32, u32),
     ty_span: (u32, u32),
+    /// The reflected type's own name span (same home).
+    owner_span: (u32, u32),
     home: Option<String>,
 }
 
@@ -436,6 +476,18 @@ fn type_map(tree: &GreenNode, text: &str, tcfg: &TypeConfig) -> TypeMap {
             off += c.width();
         }
     }
+}
+
+/// Is this text a single bare name? A NAME position (a member name)
+/// admits an identifier and nothing else — splicing an expression
+/// there would produce `p.(1 + 2)`, which is not a mis-grouping the
+/// expander can parenthesize away, it is nonsense. So it is refused
+/// rather than emitted.
+fn is_bare_name(text: &str, span: (u32, u32)) -> bool {
+    let s = &text[span.0 as usize..span.1 as usize];
+    let mut cs = s.chars();
+    matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_')
+        && cs.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 fn trim_span(text: &str, span: (u32, u32)) -> (u32, u32) {
@@ -772,7 +824,7 @@ pub fn expand_pass(
         if let Some(fu) = &j.def_file {
             wanted.insert(fu.clone());
         }
-        if let Some((tri, _)) = &j.reflect {
+        if let Some((tri, _, _)) = &j.reflect {
             if let Some(Target::Foreign { uri, .. }) = res.get(*tri) {
                 wanted.insert(uri.clone());
             }
@@ -796,7 +848,7 @@ pub fn expand_pass(
     // read from ITS declarations, and the spans carry that file as
     // their home so substitution and provenance both stay honest.
     for j in jobs.iter_mut() {
-        let Some((tri, sep)) = &j.reflect else { continue };
+        let Some((tri, sep, _)) = &j.reflect else { continue };
         let target = match res.get(*tri) {
             Some(&Target::Local { def }) => Some((None, def)),
             Some(Target::Foreign { uri, def }) => Some((Some(uri.clone()), *def)),
@@ -820,6 +872,7 @@ pub fn expand_pass(
                     .map(|(ns, _, ts, _)| RMember {
                         name_span: *ns,
                         ty_span: *ts,
+                        owner_span: dspan,
                         home: home.clone(),
                     })
                     .collect::<Vec<_>>(),
@@ -910,11 +963,21 @@ pub fn expand_pass(
         // (provenance points at the fields) — joined by the declared
         // separator (synthesized bytes, marked Sep).
         if let Some((members, sep)) = &j.members {
-            if m.params.len() != 2 {
+            let facets: &[Facet] = match &j.reflect {
+                Some((_, _, f)) => f,
+                None => &[],
+            };
+            if m.params.len() != facets.len() {
+                let names: Vec<&str> = facets
+                    .iter()
+                    .map(|f| Facet::NAMES[*f as usize])
+                    .collect();
                 diags.push(MacroDiag {
                     span: j.span,
                     msg: format!(
-                        "a reflection macro takes (member, type) — this one has {} parameter(s)",
+                        "this reflection declares {} facet(s) ({}) — the macro has {} parameter(s)",
+                        facets.len(),
+                        names.join(", "),
                         m.params.len()
                     ),
                 });
@@ -963,8 +1026,29 @@ pub fn expand_pass(
                 let mut b = m.body.0;
                 for &(rspan, pi) in &m.param_refs {
                     push(&mut out, &mut segs, body_text, body_uri, (b, rspan.0), SegKind::Body);
-                    let src = if pi == 0 { mem.name_span } else { mem.ty_span };
-                    push(&mut out, &mut segs, mem_text, &mem.home, src, SegKind::Arg);
+                    // Each parameter carries its declared FACET: three
+                    // of them are copies of the declaration (so they
+                    // point at it), two are computed from it.
+                    match facets.get(pi).copied().unwrap_or(Facet::Name) {
+                        Facet::Name => {
+                            push(&mut out, &mut segs, mem_text, &mem.home, mem.name_span, SegKind::Arg)
+                        }
+                        Facet::Type => {
+                            push(&mut out, &mut segs, mem_text, &mem.home, mem.ty_span, SegKind::Arg)
+                        }
+                        Facet::Owner => push(
+                            &mut out,
+                            &mut segs,
+                            mem_text,
+                            &mem.home,
+                            mem.owner_span,
+                            SegKind::Arg,
+                        ),
+                        Facet::Index => synth(&mut out, &mut segs, &mi.to_string(), SegKind::Meta),
+                        Facet::Count => {
+                            synth(&mut out, &mut segs, &members.len().to_string(), SegKind::Meta)
+                        }
+                    }
                     b = rspan.1;
                 }
                 push(&mut out, &mut segs, body_text, body_uri, (b, m.body.1), SegKind::Body);
@@ -1015,6 +1099,24 @@ pub fn expand_pass(
         }
         if let (true, Some((o, _))) = (wrap, group) {
             synth(&mut out, &mut segs, o, SegKind::Paren);
+        }
+        // A name position accepts only a name — check before emitting
+        // anything, so a refusal leaves the use site untouched.
+        if let Some(bad) = m.param_refs.iter().enumerate().find(|(hi, &(_, pi))| {
+            matches!(m.holes.get(*hi), Some(Hole::Name))
+                && !is_bare_name(text, trim_span(text, j.args[pi].span))
+        }) {
+            let span = trim_span(text, j.args[bad.1 .1].span);
+            diags.push(MacroDiag {
+                span: j.span,
+                msg: format!(
+                    "`{}` cannot be substituted at a name position — a member name must be an identifier",
+                    &text[span.0 as usize..span.1 as usize]
+                ),
+            });
+            push(&mut out, &mut segs, text, &None, j.span, SegKind::Verbatim);
+            cursor = j.span.1;
+            continue;
         }
         let mut b = m.body.0;
         for (hi, &(rspan, pi)) in m.param_refs.iter().enumerate() {
@@ -1085,11 +1187,11 @@ fn walk(
                     let reflect = cfg
                         .reflects
                         .iter()
-                        .find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
-                        .and_then(|(_, _, ty_child, sep)| {
+                        .find(|(nt, p, _, _, _)| *nt == n.nt && *p == n.prod)
+                        .and_then(|(_, _, ty_child, sep, facets)| {
                             let (tspan, _) = symbol_child(n, base, *ty_child)?;
                             let tri = st.refs.iter().position(|r| r.span == tspan)?;
-                            Some((tri, sep.clone()))
+                            Some((tri, sep.clone(), facets.clone()))
                         });
                     // The replaced span is token-exact — leading
                     // trivia stays in the surrounding text.

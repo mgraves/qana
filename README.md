@@ -1433,6 +1433,31 @@ The gates pin both directions of capture AND the absence of false
 positives: the committed demo, blocks that shadow something else, and
 every existing example expand with a clean bill.
 
+## Reflection facets, and what a name position will accept
+
+The reflection shape is no longer fixed at `(name, type)`. A
+`@reflect(ty, sep, facet…)` declares which FACETS its macro's
+parameters take, in order — `name`, `type`, `owner`, `index`,
+`count` — and a facet/parameter mismatch is a diagnostic naming both
+counts. Three facets are copies of the declaration, so provenance
+points at the field or the struct that produced them; `index` and
+`count` are computed, and carry a provenance kind that says so:
+
+  macro tagged(f, t, i) => { origin.f + i }
+  let tags: Num = tagged!!{Point};
+     ⇩
+  let tags: Num = origin.x + 0 + (origin.y + 1);
+
+(The parens are the join-aware half of shape preservation: each
+element stays a unit under a left-associative separator.)
+
+And member positions got their missing guard. Substituting at a name
+position only makes sense for a NAME — `pick!(x)` becomes `origin.x`,
+while `pick!(1 + 2)` would become `origin.(1 + 2)`, which is not a
+mis-grouping any parenthesis can fix. That case is now refused with a
+diagnostic and the use site left intact and parseable, rather than
+emitted as nonsense.
+
 Building this also caught a REAL engine bug the suite had been
 hiding: the type tier's per-item memoization keyed its cache by raw
 subtree address without keeping the subtree alive, so a freed item's
@@ -1445,7 +1470,7 @@ tests.
 
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 164 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 165 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

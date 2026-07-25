@@ -110,7 +110,16 @@ rule expr =
   // (an ordinary binding ref, `new t`) — joined by the declared "+".
   // The member map IS the type tier's own declarations; the engine
   // brings no schema of its own.
+  // An ordinary macro call, `m!(args)`. Substituting at a member
+  // position needs a NAME, so `pick!(x)` works and `pick!(1 + 2)` is
+  // refused rather than emitted as `origin.(1 + 2)`.
+  | Splice:    name:IDENT "!" "(" a:args ")" @ref(name) @splice(name, a)
   | Reflect:   name:IDENT "!" "{" ty:IDENT "}" @ref(name) @ref(ty) @splice(name) @reflect(ty, " + ")
+  // The same reflection with a richer FACET list: this macro's three
+  // parameters bind to each member's name, its declared type, and its
+  // index. `owner` and `count` are available too — every facet is
+  // read from the type tier's declarations or computed from them.
+  | ReflectAt:  name:IDENT "!" "!" "{" ty:IDENT "}" @ref(name) @ref(ty) @splice(name) @reflect(ty, " + ", name, type, index)
   | NumLit:    NUMBER @type(Num)
   | StrLit:    STRING @type(Str)
   | NameRef:   name:IDENT @ref(name) @type(ref)

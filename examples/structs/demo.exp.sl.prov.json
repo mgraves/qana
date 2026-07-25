@@ -1,8 +1,8 @@
 {
   "generated_from": "examples/structs/demo.sl",
-  "source_fnv": "6034d5f0c084dade",
+  "source_fnv": "b95b9ffc981e7bd8",
   "passes": 1,
-  "substitutions": 2,
+  "substitutions": 3,
   "segments": [
     {"out": [0, 882], "src": [0, 882], "kind": "verbatim"},
     {"out": [882, 889], "src": [855, 862], "kind": "body"},
@@ -18,6 +18,18 @@
     {"out": [1063, 1073], "src": [1007, 1017], "kind": "body"},
     {"out": [1073, 1078], "src": [930, 935], "kind": "arg"},
     {"out": [1078, 1079], "src": [1018, 1019], "kind": "body"},
-    {"out": [1079, 1081], "src": [1052, 1054], "kind": "verbatim"}
+    {"out": [1079, 1261], "src": [1052, 1234], "kind": "verbatim"},
+    {"out": [1261, 1268], "src": [1203, 1210], "kind": "body"},
+    {"out": [1268, 1269], "src": [254, 255], "kind": "arg"},
+    {"out": [1269, 1272], "src": [1211, 1214], "kind": "body"},
+    {"out": [1272, 1273], "src": [0, 0], "kind": "meta"},
+    {"out": [1273, 1276], "src": [0, 0], "kind": "sep"},
+    {"out": [1276, 1277], "src": [0, 0], "kind": "paren"},
+    {"out": [1277, 1284], "src": [1203, 1210], "kind": "body"},
+    {"out": [1284, 1285], "src": [264, 265], "kind": "arg"},
+    {"out": [1285, 1288], "src": [1211, 1214], "kind": "body"},
+    {"out": [1288, 1289], "src": [0, 0], "kind": "meta"},
+    {"out": [1289, 1290], "src": [0, 0], "kind": "paren"},
+    {"out": [1290, 1292], "src": [1249, 1251], "kind": "verbatim"}
   ]
 }

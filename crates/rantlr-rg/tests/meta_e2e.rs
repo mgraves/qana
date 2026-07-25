@@ -541,3 +541,69 @@ fn hygiene_reports_capture() {
     let ok = ex("let unit = 10;\nmacro scaled(v) => { v * unit }\nlet z = { let other = 99; scaled!(2) };\n");
     assert!(!ok.diags.iter().any(|d| d.msg.starts_with("hygiene")), "{:?}", ok.diags);
 }
+
+/// REFLECTION FACETS and NAME POSITIONS. A reflection macro's
+/// parameters bind to the facets its `@reflect` declares — the
+/// member's name, its declared type, the owning type's name, its
+/// index, the member count — three of them copies of the declaration
+/// (so provenance points at it) and two computed from it. And a name
+/// position accepts only a name: splicing an expression there is
+/// refused, not emitted as nonsense.
+#[test]
+fn reflection_facets_and_name_positions() {
+    let sl_rg = include_str!("../../../examples/structs/structlang.rg");
+    let sl_demo = include_str!("../../../examples/structs/demo.sl");
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, sl_rg);
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    let (lexer, tables) = certify(&out.def).unwrap();
+    let ex = |doc: &str| expand_document(&lexer, &out.def, &tables, doc, &[], 8).unwrap();
+
+    // The committed demo's faceted derive numbers its members — and
+    // the join-aware parenthesization keeps each element a unit.
+    let exp = ex(sl_demo);
+    assert!(exp.diags.is_empty(), "{:?}", exp.diags);
+    assert!(
+        exp.text.contains("let tags: Num = origin.x + 0 + (origin.y + 1);"),
+        "index facet, join-aware parens: {}",
+        exp.text
+    );
+
+    // An index is COMPUTED (no source); a name is COPIED from the
+    // field it reflects.
+    let zero = exp.text.find("origin.x + 0").unwrap() + "origin.x + ".len();
+    let zseg = exp.segs.iter().find(|s| s.out.0 <= zero as u32 && (zero as u32) < s.out.1).unwrap();
+    assert_eq!((zseg.kind, zseg.src), (SegKind::Meta, (0, 0)), "{zseg:?}");
+    let x_at = exp.text.find("origin.x + 0").unwrap() + "origin.".len();
+    let xseg = exp.segs.iter().find(|s| s.out.0 <= x_at as u32 && (x_at as u32) < s.out.1).unwrap();
+    assert_eq!(xseg.kind, SegKind::Arg);
+    assert_eq!(xseg.src.0 as usize, sl_demo.find("x: Num").unwrap());
+    assert!(tiles(&exp.segs, exp.text.len() as u32));
+
+    // Facet count and parameter count must agree.
+    let bad = "struct P {\n  a: Num\n}\nmacro two(f, t) => { origin.f }\nlet z: Num = two!!{P};\n";
+    let e2 = ex(bad);
+    assert!(
+        e2.diags.iter().any(|d| d.msg.contains("3 facet(s) (name, type, index)")),
+        "{:?}",
+        e2.diags
+    );
+
+    // A NAME position takes a name…
+    let ok = "struct P {\n  a: Num\n}\nlet origin: P = new P;\nmacro pick(f) => { origin.f }\nlet g: Num = pick!(a);\n";
+    let e3 = ex(ok);
+    assert!(e3.diags.is_empty(), "{:?}", e3.diags);
+    assert!(e3.text.contains("let g: Num = origin.a;"), "{}", e3.text);
+
+    // …and refuses an expression, instead of emitting `origin.(1 + 2)`.
+    let nope = "struct P {\n  a: Num\n}\nlet origin: P = new P;\nmacro pick(f) => { origin.f }\nlet g: Num = pick!(1 + 2);\n";
+    let e4 = ex(nope);
+    assert!(
+        e4.diags.iter().any(|d| d.msg.contains("cannot be substituted at a name position")),
+        "{:?}",
+        e4.diags
+    );
+    assert!(e4.text.contains("pick!(1 + 2)"), "left intact: {}", e4.text);
+    let s = IncSession::new(&lexer, &out.def.sg, &tables, &e4.text).unwrap();
+    assert!(s.last_repairs.is_empty(), "the refusal leaves parseable text");
+}

@@ -1177,13 +1177,14 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         }
                     }
                     "reflect" => {
-                        // `@reflect(ty[, "sep"])` — this @splice's macro
-                        // iterates the resolved type's declared members
-                        // (param 1 = member name, param 2 = its type),
-                        // joined by the separator string.
-                        if a.args.is_empty() || a.args.len() > 2 {
-                            error(d, a.name_span, "@reflect takes (ty[, \"sep\"]) — a type label and an optional separator string".into());
-                        } else if a.args.len() == 2 && !a.args[1].2 {
+                        // `@reflect(ty[, "sep"[, facet…]])` — this
+                        // @splice's macro iterates the resolved type's
+                        // declared members, its parameters binding to
+                        // the named FACETS in order (default: the
+                        // member's name, then its declared type).
+                        if a.args.is_empty() {
+                            error(d, a.name_span, "@reflect takes (ty[, \"sep\"[, facet…]])".into());
+                        } else if a.args.len() >= 2 && !a.args[1].2 {
                             error(d, a.args[1].1, "@reflect's separator must be a string".into());
                         } else if pending_reflect.replace(ai).is_some() {
                             error(d, a.name_span, "duplicate @reflect".into());
@@ -1402,9 +1403,35 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             None
                         }
                     };
+                    // Facets, in the macro's parameter order.
+                    let mut facets = Vec::new();
+                    for arg in a.args.iter().skip(2) {
+                        if arg.2 {
+                            error(d, arg.1, "a @reflect facet is a bare name".into());
+                            continue;
+                        }
+                        match rantlr_sem::macros::Facet::parse(&arg.0) {
+                            Some(f) => facets.push(f),
+                            None => error(
+                                d,
+                                arg.1,
+                                format!(
+                                    "unknown reflection facet `{}` ({})",
+                                    arg.0,
+                                    rantlr_sem::macros::Facet::NAMES.join(", ")
+                                ),
+                            ),
+                        }
+                    }
+                    if facets.is_empty() {
+                        facets = vec![
+                            rantlr_sem::macros::Facet::Name,
+                            rantlr_sem::macros::Facet::Type,
+                        ];
+                    }
                     if let Some(ty) = ty {
                         let sep = a.args.get(1).map(|s| s.0.clone()).unwrap_or_else(|| " ".into());
-                        macros.reflects.push((nt, prod, ty, sep));
+                        macros.reflects.push((nt, prod, ty, sep, facets));
                     }
                 }
             }

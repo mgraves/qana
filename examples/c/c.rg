@@ -181,7 +181,11 @@ rule external_decl =
 rule pp_directive =
   | PpInclude:    "#" PP_INCLUDE PP_HEADER
   | PpIncludeStr: "#" PP_INCLUDE PP_STRING
-  | PpDefine:     "#" PP_DEFINE name:PP_NAME pp_tokens @def(name) @outline(name, constant)
+  // Object-like macros join the META tier: the body is the template,
+  // and code refs that resolve here OPEN at @splice sites. Directive
+  // refs (#ifdef, #undef) carry no @splice, so they never expand —
+  // the declared form draws exactly cpp's line.
+  | PpDefine:     "#" PP_DEFINE name:PP_NAME body:pp_tokens @def(name) @macro(body) @outline(name, constant)
   // Function-like: the composite PP_NAME_LP proves the adjacency, and
   // the parameter list is STRUCTURE (named, separated, closed) — but
   // the macro's name lives inside the composite token, so it does not
@@ -412,7 +416,7 @@ rule s_cexpr =
   | ScComma: s_cexpr "," expr
 
 rule s_expr =
-  | SeName: name:IDENT @ref(name)
+  | SeName: name:IDENT @ref(name) @splice(name)
   | SeWide: s_wide
 
 rule s_wide =
@@ -531,7 +535,7 @@ rule expr =
   | Arrow:     expr "->" IDENT
   | PostInc:   expr "++" @precedence(".")
   | PostDec:   expr "--" @precedence(".")
-  | NameRef:   name:IDENT @ref(name)
+  | NameRef:   name:IDENT @ref(name) @splice(name)
   | NumLit:    NUMBER
   | CharLit:   CHAR
   | StrLit:    STRING

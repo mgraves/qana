@@ -1,0 +1,33 @@
+{
+  "generated_from": "examples/macrolang/demo.mac",
+  "source_fnv": "7a8c5c355423e4df",
+  "passes": 2,
+  "substitutions": 8,
+  "segments": [
+    {"out": [0, 197], "src": [0, 197], "kind": "verbatim"},
+    {"out": [197, 198], "src": [204, 205], "kind": "arg"},
+    {"out": [198, 201], "src": [104, 107], "kind": "body"},
+    {"out": [201, 202], "src": [204, 205], "kind": "arg"},
+    {"out": [202, 212], "src": [206, 216], "kind": "verbatim"},
+    {"out": [212, 213], "src": [222, 223], "kind": "arg"},
+    {"out": [213, 216], "src": [104, 107], "kind": "body"},
+    {"out": [216, 217], "src": [222, 223], "kind": "arg"},
+    {"out": [217, 220], "src": [139, 142], "kind": "body"},
+    {"out": [220, 221], "src": [222, 223], "kind": "arg"},
+    {"out": [221, 224], "src": [104, 107], "kind": "body"},
+    {"out": [224, 225], "src": [222, 223], "kind": "arg"},
+    {"out": [225, 235], "src": [224, 234], "kind": "verbatim"},
+    {"out": [235, 236], "src": [175, 176], "kind": "body"},
+    {"out": [236, 241], "src": [242, 247], "kind": "arg"},
+    {"out": [241, 249], "src": [177, 185], "kind": "body"},
+    {"out": [249, 259], "src": [248, 258], "kind": "verbatim"},
+    {"out": [259, 260], "src": [272, 273], "kind": "arg"},
+    {"out": [260, 263], "src": [104, 107], "kind": "body"},
+    {"out": [263, 264], "src": [272, 273], "kind": "arg"},
+    {"out": [264, 267], "src": [104, 107], "kind": "body"},
+    {"out": [267, 268], "src": [272, 273], "kind": "arg"},
+    {"out": [268, 271], "src": [104, 107], "kind": "body"},
+    {"out": [271, 272], "src": [272, 273], "kind": "arg"},
+    {"out": [272, 274], "src": [275, 277], "kind": "verbatim"}
+  ]
+}

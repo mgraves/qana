@@ -434,3 +434,44 @@ int use_it(void) { return LIMIT; }\n";
     let unres: Vec<String> = db2.unresolved("r").into_iter().map(|(n, _)| n).collect();
     assert_eq!(unres, ["TWICE"], "fn-like names await the meta tier");
 }
+
+use rantlr_rg::expand::expand_document;
+
+/// The META tier reaches C: object-like #define is a declared macro
+/// (`@macro(body)` on PpDefine), and code references OPEN at @splice
+/// sites while directive references (#ifdef) stay closed — the
+/// declared form draws exactly cpp's line. Fn-like macros remain the
+/// pinned wall-6 residue: their name lives inside the composite
+/// token, so they do not expand.
+#[test]
+fn object_like_defines_expand_in_code_only() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, C_RG);
+    let (lexer, tables) = certify(&out.def).unwrap();
+    assert!(out.def.macros.declared(), "C declares its macro tier");
+
+    let exp = expand_document(&lexer, &out.def, &tables, DEMO, 8).expect("demo expands");
+    assert!(exp.diags.is_empty(), "{:?}", exp.diags);
+    assert_eq!(exp.repairs, 0);
+    assert!(exp.substitutions >= 6, "all LIMIT uses open: {}", exp.substitutions);
+
+    // Code uses opened; the directive world is untouched.
+    assert!(!exp.text.contains("> LIMIT"), "code uses expanded: {}", exp.text);
+    assert!(exp.text.contains("result > 100"), "…to the body text");
+    assert!(exp.text.contains("#define LIMIT 100"), "the definition stays");
+    assert!(exp.text.contains("#ifdef LIMIT"), "#ifdef never expands (no @splice)");
+    // Fn-like: pinned residue — the use shape survives verbatim.
+    assert!(exp.text.contains("#define SQUARE(v) ((v) * (v))"), "fn-like def stays");
+
+    // The materialization promise holds for C too: the expanded text
+    // is an ordinary document — parses clean, all refs resolve.
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, &exp.text).unwrap();
+    assert!(session.last_repairs.is_empty(), "{:?}", session.last_repairs);
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_tree("exp", session.tree().unwrap().clone());
+    assert!(db.unresolved("exp").is_empty(), "{:?}", db.unresolved("exp"));
+    assert!(
+        rantlr_sem::macros::tiles(&exp.segs, exp.text.len() as u32),
+        "provenance tiles the C expansion"
+    );
+}

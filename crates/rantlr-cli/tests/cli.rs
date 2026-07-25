@@ -214,3 +214,46 @@ fn structs_example_serves_document_level_types() {
     assert!(text.contains("document types: Point, Label"), "vocabulary opened:\n{text}");
     assert!(text.contains("Point") && text.contains("no type errors"), "{text}");
 }
+
+/// The meta tier through the CLI: expansion materializes as a
+/// deterministic sibling pair (text + provenance), rewrites are
+/// write-if-changed, `--check` proves the pair current — and FAILS
+/// after tampering. The drift gate IS the read-only model: generated
+/// files are ordinary, greppable workspace documents whose staleness
+/// is a red exit code, exactly astgen's contract.
+#[test]
+fn expand_materializes_and_the_drift_gate_bites() {
+    let dir = scratch("expand");
+    std::fs::create_dir_all(&dir).unwrap();
+    let g = dir.join("m.rg");
+    let d = dir.join("doc.m");
+    std::fs::copy("../../examples/macrolang/mac.rg", &g).unwrap();
+    std::fs::write(&d, "macro twice(x) => { x + x }\nlet a = twice!(21);\n").unwrap();
+    let (g, d) = (g.to_str().unwrap().to_string(), d.to_str().unwrap().to_string());
+
+    let out = run(&["expand", &g, &d]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("1 substitution(s)"), "{}", stdout(&out));
+    let exp = dir.join("doc.exp.m");
+    let prov = dir.join("doc.exp.m.prov.json");
+    let exp_text = std::fs::read_to_string(&exp).unwrap();
+    assert!(exp_text.contains("let a = 21 + 21;"), "{exp_text}");
+    let prov_text = std::fs::read_to_string(&prov).unwrap();
+    assert!(prov_text.contains("\"kind\": \"arg\""), "{prov_text}");
+    assert!(prov_text.contains("\"substitutions\": 1"), "{prov_text}");
+
+    // Unchanged rerun: same bytes, reported as such.
+    let out = run(&["expand", &g, &d]);
+    assert!(stdout(&out).contains("(unchanged)"), "{}", stdout(&out));
+
+    // Current pair passes --check…
+    let out = run(&["expand", &g, &d, "--check"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("is current"), "{}", stdout(&out));
+
+    // …and a tampered materialization is REFUSED (read-only, enforced).
+    std::fs::write(&exp, exp_text.replace("21 + 21", "hand-edited")).unwrap();
+    let out = run(&["expand", &g, &d, "--check"]);
+    assert!(!out.status.success(), "tampering must fail the drift gate");
+    assert!(stdout(&out).contains("drifted"), "{}", stdout(&out));
+}

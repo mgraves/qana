@@ -34,6 +34,7 @@ use rantlr_grammar::{GreenChild, GreenNode, SynGrammar};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod macros;
 pub mod types;
 pub use types::{compose_types, TypeConfig, TypeDiag, TypeId, TypeReport, TypeRule, TyTerm};
 
@@ -422,6 +423,11 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
         order: &mut u32,
     ) {
         let mut scope = scope;
+        // When a production BOTH defines and opens a scope, the def
+        // belongs to the ENCLOSING scope — function-name semantics:
+        // `macro m(x) => …` puts `m` outside and `x` inside. (Nothing
+        // else is sensible: a def inside its own scope is invisible.)
+        let outer = scope;
         if n.prod != RUN_PROD {
             if let Some(&(_, _, unordered, barrier)) =
                 cfg.scopes.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
@@ -446,9 +452,9 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
                 f.defs.push(Def {
                     span: (base + off, base + off + name.len() as u32),
                     name,
-                    scope,
+                    scope: outer,
                     order: *order,
-                    top_level: scope == 0,
+                    top_level: outer == 0,
                     exported: cfg.exports.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
                     ns: node_ns.to_string(),
                 });

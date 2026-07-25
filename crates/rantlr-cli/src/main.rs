@@ -51,6 +51,12 @@ COMMANDS
                             derived binding: defs, refs, unresolved
     types <grammar.rg> <file> [--all]
                             the declared type tier: typed defs, errors
+    expand <grammar.rg> <file> [--check] [--print] [--depth N]
+                            the declared META tier: materialize macro
+                            expansion as <file-stem>.exp.<ext> plus a
+                            provenance sidecar (write-if-changed);
+                            --check verifies the materialized pair is
+                            current (the read-only drift gate)
     edit <grammar.rg> <file> --line N --text \"...\"
                             reparse incrementally; report reuse and timing
     ts <grammar.rg> <outdir>
@@ -74,6 +80,7 @@ fn main() {
         "outline" => cmd_outline(&args),
         "defs" => cmd_defs(&args),
         "types" => cmd_types(&args),
+        "expand" => cmd_expand(&args),
         "edit" => cmd_edit(&args),
         "ts" => cmd_ts(&args),
         "ast" => cmd_ast(&args),
@@ -613,6 +620,96 @@ fn cmd_defs(args: &Args) {
     if !hidden.is_empty() || !qual_errs.is_empty() {
         std::process::exit(1);
     }
+}
+
+// ---------------------------------------------------------------------------
+// expand — the declared META tier, materialized
+// ---------------------------------------------------------------------------
+
+fn cmd_expand(args: &Args) {
+    let grammar_path = args.at(0, "grammar.rg");
+    let doc_path = args.at(1, "file");
+    let lang = load(grammar_path);
+    if !lang.def.macros.declared() {
+        println!("{} declares no macro tier (@macro) — nothing to expand", grammar_path);
+        return;
+    }
+    let src = read_file(doc_path);
+    let depth: u32 = args.val("depth").map(|v| v.parse().unwrap_or(8)).unwrap_or(8);
+    let out = rantlr_rg::expand::expand_document(&lang.lexer, &lang.def, &lang.tables, &src, depth)
+        .unwrap_or_else(|e| die(&e));
+    for d in &out.diags {
+        eprintln!("{} {}..{}: {}", red("macro"), d.span.0, d.span.1, d.msg);
+    }
+    if out.repairs > 0 {
+        eprintln!(
+            "{} expansion produced text with {} parse repair(s) — the materialized file will show them",
+            red("warning"),
+            out.repairs
+        );
+    }
+
+    // Deterministic naming: demo.c → demo.exp.c (extensionless: demo.exp).
+    let p = std::path::Path::new(doc_path);
+    let exp_path = match (p.file_stem().and_then(|s| s.to_str()), p.extension().and_then(|s| s.to_str())) {
+        (Some(stem), Some(ext)) => p.with_file_name(format!("{stem}.exp.{ext}")),
+        _ => p.with_file_name(format!(
+            "{}.exp",
+            p.file_name().and_then(|s| s.to_str()).unwrap_or("out")
+        )),
+    };
+    let prov_path = exp_path.with_file_name(format!(
+        "{}.prov.json",
+        exp_path.file_name().and_then(|s| s.to_str()).unwrap()
+    ));
+    let prov = rantlr_rg::expand::provenance_json(doc_path, &src, &out);
+
+    if args.has("print") {
+        print!("{}", out.text);
+    }
+    if args.has("check") {
+        // The read-only drift gate: the materialized pair must be
+        // byte-identical to a fresh expansion.
+        let disk_exp = std::fs::read_to_string(&exp_path).unwrap_or_default();
+        let disk_prov = std::fs::read_to_string(&prov_path).unwrap_or_default();
+        if disk_exp == out.text && disk_prov == prov {
+            println!(
+                "{} {} is current ({} substitution(s), {} pass(es))",
+                green("✓"),
+                exp_path.display(),
+                out.substitutions,
+                out.passes
+            );
+        } else {
+            println!(
+                "{} {} drifted from its source — regenerate with `rantlr expand`",
+                red("✗"),
+                exp_path.display()
+            );
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // Write-if-changed: unchanged expansions do not touch mtimes.
+    let mut wrote = 0;
+    for (path, content) in [(&exp_path, &out.text), (&prov_path, &prov)] {
+        if std::fs::read_to_string(path).ok().as_deref() != Some(content.as_str()) {
+            std::fs::write(path, content).unwrap_or_else(|e| {
+                die(&format!("cannot write {}: {e}", path.display()));
+            });
+            wrote += 1;
+        }
+    }
+    println!(
+        "{} {} — {} substitution(s), {} pass(es), {} segment(s){}",
+        green("✓"),
+        exp_path.display(),
+        out.substitutions,
+        out.passes,
+        out.segs.len(),
+        if wrote == 0 { " (unchanged)" } else { "" }
+    );
 }
 
 // ---------------------------------------------------------------------------

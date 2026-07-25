@@ -1,0 +1,11 @@
+// MacLang demo — expanded by `rantlr expand` into demo.exp.mac.
+let unit = 10;
+
+macro twice(x) => { x + x }
+macro quad(y) => { twice!(y) + twice!(y) }
+macro scaled(v) => { (v) * unit }
+
+let a = twice!(3);
+let b = quad!(2);
+let c = scaled!(a + 1);
+let d = twice!(twice!(4));

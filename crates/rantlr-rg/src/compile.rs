@@ -38,6 +38,9 @@ pub struct LangDef {
     /// The declared type tier (`@type` annotations, as data). Empty
     /// when the grammar declares none — and then so is the tier.
     pub types: TypeConfig,
+    /// The declared META tier (`@macro`/`@splice`, as data). Empty
+    /// when the grammar declares none — and then so is the tier.
+    pub macros: rantlr_sem::macros::MacroConfig,
     pub styles: Styles,
     pub outline: OutlineConfig,
     /// Token id → span of its declaring name (keywords: the item span).
@@ -884,6 +887,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
     }
 
     let mut binding = BindingConfig::default();
+    let mut macros = rantlr_sem::macros::MacroConfig::default();
     let mut type_cfg = TypeConfig::default();
     let mut outline = OutlineConfig::default();
     let mut prod_spans: Vec<(u32, u32)> = Vec::new();
@@ -1017,6 +1021,8 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
             let mut pending_export: Option<(u32, u32)> = None;
             let mut pending_import: Option<usize> = None;
             let mut pending_ns: Option<usize> = None;
+            let mut pending_macro: Option<usize> = None;
+            let mut pending_splice: Option<usize> = None;
             let mut pending_module: Option<usize> = None;
             let mut pending_qualify: Option<usize> = None;
 
@@ -1148,6 +1154,27 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             error(d, a.name_span, "duplicate @ns".into());
                         }
                     }
+                    "macro" => {
+                        // `@macro([params,] body)` — the meta tier: this
+                        // alternative's @def introduces a MACRO whose
+                        // parameters are the defs inside `params` and
+                        // whose template is the `body` child.
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@macro takes ([params,] body) labels".into());
+                        } else if pending_macro.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @macro".into());
+                        }
+                    }
+                    "splice" => {
+                        // `@splice(name[, args])` — expansion may happen
+                        // HERE: when `name`'s @ref resolves to a macro,
+                        // this node is replaced by the substituted body.
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@splice takes (name[, args]) labels".into());
+                        } else if pending_splice.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @splice".into());
+                        }
+                    }
                     "precedence" => {
                         if a.args.len() != 1 {
                             error(d, a.name_span, "@precedence takes one token argument".into());
@@ -1173,7 +1200,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         d,
                         a.name_span,
                         format!(
-                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence, @type, @export, @import, @module, @qualify, @ns)"
+                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence, @type, @export, @import, @module, @qualify, @ns, @macro, @splice)"
                         ),
                     ),
                 }
@@ -1279,6 +1306,58 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         binding.refs.push((nt, prod, name_child, RefKind::Qualified));
                         binding.quals.push((nt, prod, base_child, name_child));
                     }
+                }
+            }
+
+            // ---- the meta tier: `@macro` / `@splice` ----
+            if let Some(ai) = pending_macro {
+                let a = &alt.attrs[ai];
+                if !binding.defs.iter().any(|e| e.0 == nt && e.1 == prod) {
+                    error(d, a.name_span, "@macro requires @def on the same alternative".into());
+                } else {
+                    let (pargs, barg) = match a.args.len() {
+                        1 => (None, &a.args[0]),
+                        _ => (Some(&a.args[0]), &a.args[1]),
+                    };
+                    let params = match pargs {
+                        None => Some(None),
+                        Some(p) => rule_pos_of(d, &positions, &sg, prod, p).map(Some),
+                    };
+                    let body = rule_pos_of(d, &positions, &sg, prod, barg);
+                    if let (Some(params), Some(body)) = (params, body) {
+                        macros.defs.push((nt, prod, params, body));
+                    }
+                }
+            }
+            if let Some(ai) = pending_splice {
+                let a = &alt.attrs[ai];
+                let name = match positions.get(a.args[0].0.as_str()) {
+                    Some(&k) if binding.refs.iter().any(|r| r.0 == nt && r.1 == prod && r.2 == k) => {
+                        Some(k)
+                    }
+                    Some(_) => {
+                        error(
+                            d,
+                            a.args[0].1,
+                            "@splice's name must carry @ref on the same alternative".into(),
+                        );
+                        None
+                    }
+                    None => {
+                        error(
+                            d,
+                            a.args[0].1,
+                            format!("no symbol labeled `{}` in this alternative", a.args[0].0),
+                        );
+                        None
+                    }
+                };
+                let args = match a.args.get(1) {
+                    None => Some(None),
+                    Some(arg) => rule_pos_of(d, &positions, &sg, prod, arg).map(Some),
+                };
+                if let (Some(name), Some(args)) = (name, args) {
+                    macros.uses.push((nt, prod, name, args));
                 }
             }
 
@@ -1565,7 +1644,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
     }
 
     (
-        LangDef { lex, sg, binding, types: type_cfg, styles, outline, token_spans, prod_spans },
+        LangDef { lex, sg, binding, types: type_cfg, macros, styles, outline, token_spans, prod_spans },
         diags,
     )
 }

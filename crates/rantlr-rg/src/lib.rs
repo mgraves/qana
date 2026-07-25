@@ -8,6 +8,7 @@
 
 pub mod bootstrap;
 pub mod compile;
+pub mod expand;
 pub mod pat_parse;
 pub mod rg_ast;
 pub mod tsgen;

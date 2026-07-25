@@ -1265,12 +1265,68 @@ wholesale. The wall list for C is now EMPTY: every wall from the
 original campaign is either demolished or pinned as an explicit,
 gated residue with a named owner. 460 states, zero conflicts.
 
+## The meta tier (v0, shipped): macros whose semantics are the binding tier
+
+The tier the whole session pointed at. The toolchain predefines no
+macro system; a grammar DECLARES one in two annotations, and the
+thesis — meta-programming scaffolding built BY the first-order
+language definition — is now executable:
+
+  | MacroDef: "macro" name:IDENT "(" ps:mparams ")" "=>"
+             "{" body:expr "}"  @def(name) @macro(ps, body) @scope
+  | Splice:   name:IDENT "!" "(" args:sargs ")"
+                                 @ref(name) @splice(name, args)
+
+A macro body is REAL SYNTAX — parsed at the definition site, so a
+typo'd template is a parse error before any use exists — and
+SUBSTITUTION IS BINDING: a parameter occurrence in the body is an
+ordinary `@ref` resolving to the parameter's ordinary `@def`, so
+expansion means "replace each reference that resolves to parameter i
+with argument i's text". No token pattern-matching, no positional
+guesswork, no new resolution machinery: the binding tier the grammar
+already declared IS the macro semantics. (Declaring `MacroDef` also
+exposed and fixed a latent engine wart: a production that both
+defines and opens a scope now puts the def in the ENCLOSING scope —
+function-name semantics.)
+
+Expansion runs OUTSIDE the parser (L5 stands) as a fixpoint: each
+pass's output is re-parsed and re-bound by the ordinary engine, so
+nested macros and macros-calling-macros converge in passes (gated at
+exactly two for the committed demo), recursion hits a capped
+diagnostic instead of a hang, and uses inside macro BODIES never
+expand at the definition — cpp and Rust semantics, derived. v0
+substitution is deliberately cpp-grade TEXTUAL splicing (write
+bodies with the cpp parenthesization discipline); syntax-aware
+auto-parenthesization is the named v1 refinement the trees make
+possible.
+
+Materialization honors every locked commitment: `rantlr expand`
+writes `<stem>.exp.<ext>` (deterministic naming, write-if-changed)
+plus a sourcemap-style provenance sidecar in which every output byte
+is a COPY — verbatim, from a definition body, or from a use-site
+argument — segments tiling the output exactly, composed across
+passes, gated to point home. The materialized file is an ORDINARY
+document: it parses clean and every reference resolves — full editor
+intelligence inside expansion output, the thing `cargo expand` can
+never be. Read-only is enforced the astgen way: `rantlr expand
+--check` fails red on a tampered or stale materialization, and the
+committed `.exp` files are drift-gated in CI.
+
+C joins immediately: `@macro(body)` on `#define` plus `@splice` on
+the two name-reference productions makes object-like macros OPEN in
+code (`result > LIMIT` materializes as `result > 100`) while
+directive references stay closed (`#ifdef LIMIT` carries no
+`@splice`) — cpp's exact line, drawn by declaration. Fn-like macros
+remain the pinned wall-6 residue (their name lives inside the
+composite token), now with their owner tier standing. 153 tests.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 147 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 153 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
-AST + editor services + semantic binding + a declared type tier + LSP,
+AST + editor services + semantic binding + declared type, module, and
+meta tiers + LSP,
 self-hosted: the grammar
 language is defined in itself, parsed by its own engine, and its files
 get the same editor intelligence as the languages it defines** — and it

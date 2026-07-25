@@ -57,10 +57,12 @@ rule fields = field* % ","
 rule field = Field: name:IDENT ":" t:ty @def(name) @type(def, t)
 
 // The fn's params + return + body share one scope: params are visible
-// in the block and sealed from the top level. The tail's type is the
-// declared RETURN type — so the fn NAME carries it (via @type(def, t)
-// above), and every call site gets it back through @type(ref).
-rule fn_tail = FnTail: "(" params ")" "->" rt:ty block @scope @type(of, rt)
+// in the block and sealed from the top level. `@type(fn, p, rt)` gives
+// the tail an ARROW type assembled from the param defs and the return
+// annotation; `@type(def, t)` above hands it to the fn NAME, so calls
+// check arity and arguments (`@type(apply, a)`) and `return` statements
+// check against the declaration (`@type(returns, e)`).
+rule fn_tail = FnTail: "(" p:params ")" "->" rt:ty block @scope @type(fn, p, rt)
 
 rule params = param* % ","
 
@@ -84,13 +86,13 @@ rule stmts = stmt*
 
 rule stmt =
   | LetStmt:  "let" name:IDENT ti:typed_init ";" @def(name) @type(def, ti)
-  | RetStmt:  "return" expr ";"
+  | RetStmt:  "return" e:expr ";" @type(returns, e)
   | ExprStmt: expr ";"
 
 rule expr =
   | AddExpr:   expr "+" expr @type(sig, Num, Num, Num)
   | FieldExpr: expr "." IDENT
-  | CallExpr:  callee:IDENT "(" args ")" @ref(callee, call) @type(ref)
+  | CallExpr:  callee:IDENT "(" a:args ")" @ref(callee, call) @type(apply, a)
   | NewExpr:   "new" name:IDENT @ref(name) @type(named)
   | NumLit:    NUMBER @type(Num)
   | StrLit:    STRING @type(Str)

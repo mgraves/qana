@@ -331,3 +331,152 @@ fn deftype_and_named_require_their_binding_counterparts() {
         out.diags
     );
 }
+
+const APP_LANG: &str = r#"
+language App
+
+token WS     = /\s+/ @trivia
+token NUMBER = /\d+/ @style(number)
+token STRING = /"(\\.|[^"\\])*"/ @style(string)
+token IDENT  = /[\a_][\w_]*/ @specialize @style(variable)
+token LBRACE = "{" @style(bracket)
+token RBRACE = "}" @style(bracket)
+token LPAREN = "(" @style(bracket)
+token RPAREN = ")" @style(bracket)
+token COLON  = ":" @style(punctuation)
+token COMMA  = "," @style(punctuation)
+token SEMI   = ";" @style(punctuation)
+token ARROW  = "->" @style(operator)
+token EQ     = "=" @style(operator)
+token PLUS   = "+" @style(operator)
+
+keywords IDENT = fn let return Num Str
+
+pair LPAREN RPAREN
+pair LBRACE RBRACE
+
+prec left "+"
+
+start file
+
+rule file = File: decls @scope(unordered)
+
+rule decls = decl*
+
+rule decl =
+  | FnDecl:  "fn" name:IDENT t:fn_tail @def(name) @type(def, t)
+  | LetDecl: "let" name:IDENT "=" e:expr ";" @def(name) @type(def, e)
+
+rule fn_tail = FnTail: "(" p:params ")" "->" rt:ty block @scope @type(fn, p, rt)
+
+rule params = param* % ","
+
+rule param = Param: name:IDENT ":" t:ty @def(name) @type(def, t)
+
+rule ty =
+  | TyNum: "Num" @type(Num)
+  | TyStr: "Str" @type(Str)
+
+rule block = Block: "{" stmts "}" @scope
+
+rule stmts = stmt*
+
+rule stmt =
+  | RetStmt:  "return" e:expr ";" @type(returns, e)
+  | ExprStmt: expr ";"
+
+rule expr =
+  | AddExpr:  expr "+" expr @type(sig, Num, Num, Num)
+  | CallExpr: callee:IDENT "(" a:args ")" @ref(callee, call) @type(apply, a)
+  | NumLit:   NUMBER @type(Num)
+  | StrLit:   STRING @type(Str)
+  | NameRef:  name:IDENT @ref(name) @type(ref)
+
+rule args = expr* % ","
+"#;
+
+fn app_tier(doc: &str) -> (rantlr_sem::TypeReport, String) {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, APP_LANG);
+    assert!(out.diags.is_empty(), "app grammar compiles: {:?}", out.diags);
+    let (lexer, tables) = certify(&out.def).expect("in envelope");
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, doc).unwrap();
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_types(out.def.types.clone());
+    db.set_tree("d", session.tree().unwrap().clone());
+    (db.types("d"), doc.to_string())
+}
+
+/// Arrow types assemble from param defs + the return annotation, the
+/// fn NAME carries them, calls check and produce the return — and a
+/// zero-parameter arrow works.
+#[test]
+fn arrows_assemble_and_applications_check() {
+    let (r, doc) = app_tier(
+        "fn add(a: Num, b: Num) -> Num { return a + b; }\nfn zero() -> Str { return \"z\"; }\nlet x = add(1, 2);\nlet s = zero();\n",
+    );
+    let defs = def_types(&r, &doc);
+    assert_eq!(defs[0], ("add".to_string(), "fn(Num, Num) -> Num".to_string()));
+    assert_eq!(defs[3], ("zero".to_string(), "fn() -> Str".to_string()));
+    assert_eq!(defs[4], ("x".to_string(), "Num".to_string()), "call produces the return type");
+    assert_eq!(defs[5], ("s".to_string(), "Str".to_string()));
+    assert!(r.diags.is_empty(), "clean: {:?}", r.diags);
+    assert!(r.arrows_at <= r.atoms.len() && r.atoms[r.arrows_at..].iter().all(|a| a.starts_with("fn(")));
+}
+
+/// Arity, per-argument mismatches (on the exact argument), non-callable
+/// callees, and return-vs-declaration are all diagnosed.
+#[test]
+fn application_failure_modes_are_diagnosed() {
+    let (r, doc) = app_tier(
+        "fn add(a: Num, b: Num) -> Num { return a + b; }\nfn bad() -> Num { return \"s\"; }\nlet v = 5;\nlet w = v(3);\nlet x = add(1);\nlet y = add(1, \"two\");\n",
+    );
+    let msgs: Vec<&str> = r.diags.iter().map(|d| d.msg.as_str()).collect();
+    assert_eq!(r.diags.len(), 4, "{msgs:?}");
+    assert!(msgs.iter().any(|m| m.contains("return type mismatch: expected `Num`, found `Str`")), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m.contains("not callable") && m.contains("`Num`")), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m.contains("expected 2 argument(s), found 1")), "{msgs:?}");
+    let arg = r.diags.iter().find(|d| d.msg.contains("expected `Num`, found `Str`") && !d.msg.contains("return")).expect("arg mismatch");
+    let two = doc.rfind("\"two\"").unwrap() as u32;
+    assert!(arg.span.0 <= two && two < arg.span.1, "arg diag {:?} covers the exact argument at {two}", arg.span);
+}
+
+/// Functions flow like values: a def that carries an arrow via plain
+/// def-propagation is callable, and recursion converges through the
+/// fixpoint (the call inside the body sees the fn's own arrow on the
+/// next pass).
+#[test]
+fn first_class_flow_and_recursion_converge() {
+    let (r, doc) = app_tier(
+        "fn add(a: Num, b: Num) -> Num { return a + b; }\nlet g = add;\nlet y = g(1, 2);\nlet bad = g(\"s\", 2);\n",
+    );
+    let defs = def_types(&r, &doc);
+    assert_eq!(defs[3], ("g".to_string(), "fn(Num, Num) -> Num".to_string()), "arrow flows through a plain let");
+    assert_eq!(defs[4], ("y".to_string(), "Num".to_string()), "an arrow-carrying name is callable");
+    assert_eq!(r.diags.len(), 1, "{:?}", r.diags);
+    assert!(r.diags[0].msg.contains("expected `Num`, found `Str`"));
+
+    let (r2, doc2) = app_tier(
+        "fn fact(n: Num) -> Num { return fact(n + 1); }\nfn bad(n: Num) -> Num { return bad(\"s\"); }\n",
+    );
+    assert_eq!(def_types(&r2, &doc2)[0].1, "fn(Num) -> Num");
+    assert_eq!(r2.diags.len(), 1, "recursive call checked on pass 2: {:?}", r2.diags);
+    assert!(r2.diags[0].msg.contains("expected `Num`, found `Str`"));
+}
+
+/// The new forms carry compile-time cross-checks and arity like the rest.
+#[test]
+fn v2_forms_are_statically_checked() {
+    let tc = RgToolchain::new();
+    let src = APP_LANG.replace("@ref(callee, call) @type(apply, a)", "@type(apply, a)");
+    let out = compile_source(&tc, &src);
+    assert!(out.diags.iter().any(|d| d.msg.contains("requires @ref")), "{:?}", out.diags);
+
+    let src = APP_LANG.replace("@type(fn, p, rt)", "@type(fn, p, nolabel)");
+    let out = compile_source(&tc, &src);
+    assert!(out.diags.iter().any(|d| d.msg.contains("no symbol labeled `nolabel`")), "{:?}", out.diags);
+
+    let src = APP_LANG.replace("@type(returns, e)", "@type(returns, name)");
+    let out = compile_source(&tc, &src);
+    assert!(out.diags.iter().any(|d| d.msg.contains("no symbol labeled `name`")), "{:?}", out.diags);
+}

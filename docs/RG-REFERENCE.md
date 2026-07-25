@@ -155,7 +155,7 @@ prec left "*" "/"
 ```
 
 A production's precedence defaults to its last terminal; override it per
-alternative with `@prec(token)`.
+alternative with `@precedence(token)`.
 
 Precedence is how you keep an expression grammar inside the envelope.
 Without it, `expr "+" expr` is ambiguous and `rantlr check` refuses it.
@@ -298,6 +298,9 @@ At most one `@type` per alternative. Forms:
 | `@type(ref)` | The type the resolved definition CARRIES (a value's type) |
 | `@type(deftype)` | The name defined here (requires `@def`) INTRODUCES a document-level type |
 | `@type(named)` | The type the resolved definition IS (requires `@ref`; the target must be a `deftype` — a resolved non-type name is diagnosed) |
+| `@type(fn, params, rt)` | This node has an ARROW type: the typed defs inside `params` (in order) → the type of `rt`. Hand it to the declaration's name with `@type(def, …)` |
+| `@type(apply, args)` | Call checking (requires `@ref`): the callee's arrow is checked against `args`'s items — arity and each argument — and the node has the return type. A non-arrow callee is diagnosed as not callable |
+| `@type(returns, e)` | `e` is checked against the nearest enclosing `fn` node's declared return type |
 
 Type atoms are **Capitalized** names, invented freely — `Num`, `Str`,
 `Temperature`. Lowercase names inside a `sig` are **type variables**,
@@ -327,9 +330,17 @@ shown as ``expected `T`, found `T``` (a display refinement is planned).
 The grammar's atoms and the document's types unify seamlessly in
 signatures and mismatch reports.
 
+**Functions.** `@type(fn, …)` assembles arrow types (displayed
+`fn(Num, Num) -> Num`) from the parameter definitions and the return
+annotation. Because the arrow is an ordinary type a def carries,
+functions flow like values: a plain `let g = add;` makes `g` callable,
+and recursion converges through the same fixpoint that handles forward
+references. The `rt` child must precede the body in the production
+(it supplies the expectation `returns` checks against).
+
 Current limits: no type constructors, no subtyping, single-file flow,
-list-shaped children untyped, no member/field lookup yet, and calls
-flow only their return type (arity and arguments unchecked).
+list-shaped children untyped, and no member/field lookup yet
+(`p.x` is invisible — the next planned form).
 
 ---
 

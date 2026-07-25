@@ -816,9 +816,39 @@ non-type-name diagnosis, nominal-identity-by-site under shadowing,
 deftype/named binding cross-checks, and an example drift gate through
 the shipped binary.
 
+## Type tier v2 (shipped): applications
+
+Three forms close the remaining Structlang silences around functions.
+`@type(fn, params, rt)` assembles an ARROW type on the function node —
+parameter types collected from the typed defs inside the params child
+(arity taken from ALL def sites there, so an unknown param keeps the
+arrow unknown rather than silently shortening it), return from the rt
+child. Because the arrow is an ordinary carried type, `@type(def, …)`
+hands it to the function's NAME, `@type(ref)` flows it like any value
+(`let g = add;` makes `g` callable), and recursion converges through
+the existing fixpoint — the call inside a function's own body checks
+against its arrow on the next pass. `@type(apply, args)` checks calls:
+arity ("expected 2 argument(s), found 1"), each argument on its exact
+span, non-arrow callees ("not callable: this name has type `Num`"),
+and produces the return type. `@type(returns, e)` is the tier's first
+downward expectation: a walker stack of enclosing declared return
+types, pushed once the rt child is walked.
+
+Arrow types intern into the run vocabulary (displayed
+`fn(Num, Num) -> Num`; the tables persist across fixpoint passes so
+ids stay stable), and the vocabulary line now reports three segments:
+grammar atoms, document types, arrows-where-used. One real bug found
+and gated: transparent single-child wrappers share their child's byte
+span, and the outer untyped wrapper's None clobbered the inner node's
+type in the span map `apply` reads arguments through — Some now wins.
+
+Gates: 123 tests — arrow assembly + zero-param arrows, all four
+application failure modes with exact spans, first-class function flow,
+recursion convergence, and static cross-checks for the new forms.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 119 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 123 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

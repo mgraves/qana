@@ -1178,6 +1178,31 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             None
                         }
                     },
+                    ("fn", 3) => {
+                        let params = rule_pos(d, &a.args[1]);
+                        let rt = rule_pos(d, &a.args[2]);
+                        match (params, rt) {
+                            (Some(params_child), Some(rt_child)) => {
+                                Some(TypeRule::FnArrow { params_child, rt_child })
+                            }
+                            _ => None,
+                        }
+                    }
+                    ("apply", 2) => {
+                        let args = rule_pos(d, &a.args[1]);
+                        let callee = binding.refs.iter().find(|r| r.0 == nt && r.1 == prod);
+                        match (callee, args) {
+                            (Some(&(_, _, k, _)), Some(args_child)) => {
+                                Some(TypeRule::Apply { ref_child: k, args_child })
+                            }
+                            (None, _) => {
+                                error(d, a.name_span, "@type(apply, …) requires @ref on the same alternative".into());
+                                None
+                            }
+                            _ => None,
+                        }
+                    }
+                    ("returns", 2) => rule_pos(d, &a.args[1]).map(|expr_child| TypeRule::Returns { expr_child }),
                     ("of", 2) => rule_pos(d, &a.args[1]).map(TypeRule::OfChild),
                     ("def", 2) => {
                         let src = rule_pos(d, &a.args[1]);
@@ -1244,7 +1269,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             d,
                             a.name_span,
                             format!(
-                                "unknown @type form `{other}` (expected an Atom, `ref`, `named`, `deftype`, `of`, `def`, or `sig`)"
+                                "unknown @type form `{other}` (expected an Atom, `ref`, `named`, `deftype`, `of`, `def`, `sig`, `fn`, `apply`, or `returns`)"
                             ),
                         );
                         None

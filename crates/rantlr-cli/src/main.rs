@@ -567,12 +567,16 @@ fn cmd_types(args: &Args) {
     db.set_tree(doc_path, session.tree().expect("total").clone());
     let report = db.types(doc_path);
 
-    let (grammar_vocab, doc_vocab) = report.atoms.split_at(report.grammar_atoms.min(report.atoms.len()));
-    print!("{} {}", bold("vocabulary"), grammar_vocab.join(", "));
-    if doc_vocab.is_empty() {
+    // Vocabulary line: grammar atoms, then document-declared types.
+    // Arrow entries (interned `fn(…) -> …` displays) show where they
+    // are used — on the defs below — not as vocabulary.
+    let ga = report.grammar_atoms.min(report.atoms.len());
+    let aa = report.arrows_at.clamp(ga, report.atoms.len());
+    print!("{} {}", bold("vocabulary"), report.atoms[..ga].join(", "));
+    if ga == aa {
         println!();
     } else {
-        println!("  {} {}", dim("+ document types:"), cyan(&doc_vocab.join(", ")));
+        println!("  {} {}", dim("+ document types:"), cyan(&report.atoms[ga..aa].join(", ")));
     }
     println!();
     println!("{}", bold("typed definitions"));

@@ -290,12 +290,28 @@ scopes are genuinely different types — scoping, shadowing, and forward
 references all come from the same name resolution that powers
 go-to-definition.
 
-Current limits, honestly: atoms, document types, and per-production
-signatures with local variables — no constructors like `List<T>`, no
-subtyping, no member/field lookup yet; calls flow their return type
-but arity and arguments are unchecked; types flow within one file;
-list-shaped children stay untyped; checking is file-granular per query
-rather than per-item memoized.
+Functions get real signatures: `@type(fn, p, rt)` assembles an arrow
+type from the parameter defs and return annotation, `@type(apply, a)`
+checks every call (arity, each argument, produces the return), and
+`@type(returns, e)` checks return statements against the declaration:
+
+```text
+scale                    fn(Num) -> Num
+
+error: expected 2 argument(s), found 1
+error: return type mismatch: expected `Num`, found `Str`
+error: not callable: this name has type `Num`
+```
+
+Arrows are ordinary carried types, so `let g = add;` makes `g`
+callable, and recursive calls check against the function's own
+signature.
+
+Current limits, honestly: atoms, document types, signatures, and
+arrows — no constructors like `List<T>`, no subtyping, no member/field
+lookup yet (`p.x` is invisible; the next planned form); types flow
+within one file; list-shaped children stay untyped; checking is
+file-granular per query rather than per-item memoized.
 
 ---
 

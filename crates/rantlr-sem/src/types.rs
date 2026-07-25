@@ -65,6 +65,25 @@ pub enum TypeRule {
     /// `deftype` site — resolving to a non-type def is diagnosed).
     /// Contrast `FromRef`: the type a def CARRIES vs the type it IS.
     Named { ref_child: usize },
+    /// `@type(fn, params, rt)` — this node has an ARROW type assembled
+    /// from the typed definitions inside the `params` child (in
+    /// document order) and the `rt` child's type. Combine with
+    /// `@type(def, …)` on the enclosing declaration and the function
+    /// NAME carries the arrow — so `@type(ref)` makes functions flow
+    /// like any other value. The `rt` child must precede any `returns`
+    /// statements in the RHS (it supplies their expectation).
+    FnArrow { params_child: usize, rt_child: usize },
+    /// `@type(apply, args)` — this production's `@ref` child must
+    /// resolve to a def carrying an arrow type; the `args` child's list
+    /// items are checked against the arrow's parameters (arity and each
+    /// argument), and the node has the arrow's return type. A callee
+    /// carrying a non-arrow type is diagnosed; an untyped or unresolved
+    /// callee stays silent.
+    Apply { ref_child: usize, args_child: usize },
+    /// `@type(returns, e)` — the `e` child is checked against the
+    /// nearest enclosing `fn` node's declared return type (the tier's
+    /// one downward-flowing expectation). Outside any `fn`, silent.
+    Returns { expr_child: usize },
 }
 
 /// The whole declared tier: a vocabulary and per-production rules.
@@ -114,6 +133,10 @@ pub struct TypeReport {
     /// How many leading entries of `atoms` are grammar-declared; the
     /// rest are document-level.
     pub grammar_atoms: usize,
+    /// Index where arrow-type entries begin: `atoms[grammar_atoms..
+    /// arrows_at]` are the document's named types, and everything from
+    /// `arrows_at` on is an interned `fn(…) -> …` display entry.
+    pub arrows_at: usize,
 }
 
 impl TypeReport {
@@ -133,34 +156,126 @@ impl TypeReport {
 
 struct Walker<'a> {
     rules: HashMap<(u16, u16), &'a TypeRule>,
-    /// The run vocabulary (grammar atoms + document types), for display.
-    names: &'a [String],
+    /// The run vocabulary (grammar atoms + document types + arrows).
+    /// Mutable: arrow types intern on first encounter, and the tables
+    /// persist across fixpoint passes so ids stay stable.
+    vocab: &'a mut Vec<String>,
+    /// arrow TypeId → (parameter types, return type).
+    arrows: &'a mut HashMap<TypeId, (Vec<TypeId>, TypeId)>,
+    arrow_intern: &'a mut HashMap<(Vec<TypeId>, TypeId), TypeId>,
     /// abs ref-name start → abs def-name start (same file only, v0).
     ref_res: &'a HashMap<u32, u32>,
     /// abs def-name start → type (from the previous pass).
     def_types: &'a HashMap<u32, TypeId>,
     /// abs def-name start → the document-level type that def INTRODUCES.
     deftype_ids: &'a HashMap<u32, TypeId>,
+    /// EVERY def site in the file (sorted) — arity source for arrows,
+    /// independent of whether a def's type is known yet.
+    all_defs: &'a [u32],
+    /// (abs span) → computed type of every node walked THIS pass —
+    /// how `apply` reads its argument items without re-walking.
+    span_types: HashMap<(u32, u32), Option<TypeId>>,
+    /// Declared return types of enclosing `fn` nodes, innermost last.
+    ret_stack: Vec<Option<TypeId>>,
     out_types: Vec<((u32, u32), TypeId)>,
     out_defs: HashMap<u32, ((u32, u32), TypeId)>,
     diags: Vec<TypeDiag>,
 }
 
 impl<'a> Walker<'a> {
+    /// Intern an arrow type into the run vocabulary (stable across
+    /// passes: the tables outlive the fixpoint loop).
+    fn intern_arrow(&mut self, params: Vec<TypeId>, ret: TypeId) -> TypeId {
+        if let Some(&t) = self.arrow_intern.get(&(params.clone(), ret)) {
+            return t;
+        }
+        let show = |v: &Vec<String>, t: TypeId| {
+            v.get(t as usize).cloned().unwrap_or_else(|| "?".into())
+        };
+        let name = format!(
+            "fn({}) -> {}",
+            params.iter().map(|&p| show(self.vocab, p)).collect::<Vec<_>>().join(", "),
+            show(self.vocab, ret)
+        );
+        self.vocab.push(name);
+        let t = (self.vocab.len() - 1) as TypeId;
+        self.arrows.insert(t, (params.clone(), ret));
+        self.arrow_intern.insert((params, ret), t);
+        t
+    }
+
+    /// The argument ITEMS of an `apply` args child: descend through
+    /// list/run structure and transparent (untyped, rule-less) wrappers;
+    /// a node with a type rule is one item. Types come from the pass's
+    /// span map — items were walked before their call node.
+    fn item_types(&self, n: &GreenNode, base: u32, out: &mut Vec<((u32, u32), Option<TypeId>)>) {
+        use rantlr_grammar::green::{LIST_PROD, RUN_PROD};
+        let span = (base, base + n.width);
+        if n.prod != LIST_PROD && n.prod != RUN_PROD && self.rules.contains_key(&(n.nt, n.prod)) {
+            out.push((span, self.span_types.get(&span).copied().flatten()));
+            return;
+        }
+        let mut off = base;
+        for c in &n.children {
+            let w = c.width();
+            if let GreenChild::Node(m) = c {
+                if m.nt != ERROR_NT {
+                    self.item_types(m, off, out);
+                }
+            }
+            off += w;
+        }
+    }
+
     /// Post-order: children first, then this node's rule. Returns the
     /// node's type. Error-carrying nodes recurse but never type — the
     /// repaired shape need not match the production's RHS.
     fn node(&mut self, n: &GreenNode, base: u32) -> Option<TypeId> {
+        let ty = self.node_inner(n, base);
+        // Transparent single-child wrappers share their child's span
+        // (post-order: the child inserted first). An outer UNTYPED
+        // wrapper must not clobber the inner node's type — `apply`
+        // reads argument items through this map.
+        let slot = self.span_types.entry((base, base + n.width)).or_insert(None);
+        if ty.is_some() {
+            *slot = ty;
+        }
+        ty
+    }
+
+    fn node_inner<'n>(&mut self, n: &'n GreenNode, base: u32) -> Option<TypeId> {
+        // This node's rule, known up front: `fn` nodes push their
+        // declared return type once the rt child has been walked, so
+        // `returns` statements inside the body can read it.
+        let rule_now = self.rules.get(&(n.nt, n.prod)).copied();
+        let fn_rt_child = match (n.has_err, rule_now) {
+            (false, Some(TypeRule::FnArrow { rt_child, .. })) => Some(*rt_child),
+            _ => None,
+        };
+        let mut pushed_ret = false;
+
         // Symbol children with absolute spans, in symbol order.
         let mut pos_types: Vec<Option<TypeId>> = Vec::new();
         let mut pos_spans: Vec<(u32, u32)> = Vec::new();
         let mut node_types: Vec<(Option<TypeId>, (u32, u32))> = Vec::new();
+        let mut args_node: Option<(&'n GreenNode, u32)> = None;
+        let args_child = match rule_now {
+            Some(TypeRule::Apply { args_child, .. }) => Some(*args_child),
+            _ => None,
+        };
         let mut off = base;
         for c in &n.children {
             let w = c.width();
             match c {
                 GreenChild::Node(m) if m.nt != ERROR_NT => {
                     let t = self.node(m, off);
+                    if fn_rt_child == Some(pos_types.len()) {
+                        self.ret_stack.push(t);
+                        pushed_ret = true;
+                    }
+                    if args_child == Some(pos_types.len()) {
+                        args_node = Some((&**m, off));
+                    }
                     pos_types.push(t);
                     pos_spans.push((off, off + w));
                     node_types.push((t, (off, off + w)));
@@ -178,6 +293,8 @@ impl<'a> Walker<'a> {
             }
             off += w;
         }
+        let popped_ret = if pushed_ret { self.ret_stack.pop() } else { None };
+        let _ = popped_ret;
 
         if n.has_err {
             return None;
@@ -210,6 +327,103 @@ impl<'a> Walker<'a> {
                     },
                 }
             }
+            TypeRule::FnArrow { params_child, rt_child } => {
+                // Parameter types: the typed defs recorded (this pass)
+                // inside the params child's span, in document order.
+                // Arity comes from ALL def sites in that span, so a
+                // still-unknown param keeps the whole arrow unknown
+                // rather than silently shortening it.
+                let pspan = pos_spans.get(*params_child).copied();
+                let rt = pos_types.get(*rt_child).copied().flatten();
+                match (pspan, rt) {
+                    (Some((lo, hi)), Some(rt)) => {
+                        let sites =
+                            &self.all_defs[self.all_defs.partition_point(|&d| d < lo)
+                                ..self.all_defs.partition_point(|&d| d < hi)];
+                        let params: Vec<TypeId> = sites
+                            .iter()
+                            .filter_map(|s| self.out_defs.get(s).map(|&(_, t)| t))
+                            .collect();
+                        if params.len() == sites.len() {
+                            Some(self.intern_arrow(params, rt))
+                        } else {
+                            None // some param's type is not yet known
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            TypeRule::Apply { ref_child, args_child: _ } => {
+                let callee = pos_spans
+                    .get(*ref_child)
+                    .and_then(|s| self.ref_res.get(&s.0))
+                    .and_then(|d| self.def_types.get(d))
+                    .copied();
+                match callee {
+                    None => None, // untyped or unresolved callee: silent
+                    Some(t) => match self.arrows.get(&t).cloned() {
+                        None => {
+                            self.diags.push(TypeDiag {
+                                span: pos_spans[*ref_child],
+                                msg: format!(
+                                    "not callable: this name has type `{}`",
+                                    self.vocab.get(t as usize).map(|s| s.as_str()).unwrap_or("?")
+                                ),
+                            });
+                            None
+                        }
+                        Some((params, ret)) => {
+                            let mut items: Vec<((u32, u32), Option<TypeId>)> = Vec::new();
+                            if let Some((an, abase)) = args_node {
+                                self.item_types(an, abase, &mut items);
+                            }
+                            if items.len() != params.len() {
+                                self.diags.push(TypeDiag {
+                                    span,
+                                    msg: format!(
+                                        "expected {} argument(s), found {}",
+                                        params.len(),
+                                        items.len()
+                                    ),
+                                });
+                            } else {
+                                for (&p, (ispan, it)) in params.iter().zip(&items) {
+                                    if let Some(it) = it {
+                                        if *it != p {
+                                            self.diags.push(TypeDiag {
+                                                span: *ispan,
+                                                msg: format!(
+                                                    "type mismatch: expected `{}`, found `{}`",
+                                                    self.vocab.get(p as usize).map(|s| s.as_str()).unwrap_or("?"),
+                                                    self.vocab.get(*it as usize).map(|s| s.as_str()).unwrap_or("?"),
+                                                ),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            Some(ret)
+                        }
+                    },
+                }
+            }
+            TypeRule::Returns { expr_child } => {
+                let expected = self.ret_stack.last().copied().flatten();
+                let actual = pos_types.get(*expr_child).copied().flatten();
+                if let (Some(e), Some(a)) = (expected, actual) {
+                    if e != a {
+                        self.diags.push(TypeDiag {
+                            span: pos_spans[*expr_child],
+                            msg: format!(
+                                "return type mismatch: expected `{}`, found `{}`",
+                                self.vocab.get(e as usize).map(|s| s.as_str()).unwrap_or("?"),
+                                self.vocab.get(a as usize).map(|s| s.as_str()).unwrap_or("?"),
+                            ),
+                        });
+                    }
+                }
+                None
+            }
             TypeRule::DefFrom { src, def_child } => {
                 let t = pos_types.get(*src).copied().flatten();
                 if let (Some(t), Some(dspan)) = (t, pos_spans.get(*def_child).copied()) {
@@ -237,8 +451,8 @@ impl<'a> Walker<'a> {
                                     span: *cspan,
                                     msg: format!(
                                         "type mismatch: expected `{}`, found `{}`",
-                                        self.names.get(e as usize).map(|s| s.as_str()).unwrap_or("?"),
-                                        self.names.get(t as usize).map(|s| s.as_str()).unwrap_or("?"),
+                                        self.vocab.get(e as usize).map(|s| s.as_str()).unwrap_or("?"),
+                                        self.vocab.get(t as usize).map(|s| s.as_str()).unwrap_or("?"),
                                     ),
                                 });
                             }
@@ -355,6 +569,25 @@ impl SemDb {
             }
         }
 
+        // Every def SITE in the file, sorted — the arity source for
+        // arrow assembly (a param whose type is still unknown must keep
+        // the arrow unknown, not shorten it).
+        let all_defs: Vec<u32> = {
+            let e = &self.files[uri];
+            let mut v: Vec<u32> = e
+                .items
+                .iter()
+                .flat_map(|s| s.frag.defs.iter().map(move |d| s.base_off + d.span.0))
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        // The document-types boundary in the run vocabulary: arrow
+        // types intern strictly after this point.
+        let arrows_at = vocab.len();
+        let mut arrows: HashMap<TypeId, (Vec<TypeId>, TypeId)> = HashMap::new();
+        let mut arrow_intern: HashMap<(Vec<TypeId>, TypeId), TypeId> = HashMap::new();
+
         // Iterate def-typing to a fixed point (bounded; each pass can
         // only add or update def types along resolution edges).
         let mut def_types: HashMap<u32, TypeId> = HashMap::new();
@@ -363,10 +596,15 @@ impl SemDb {
             let (out_types, out_defs, diags) = {
                 let mut w = Walker {
                     rules: rules.clone(),
-                    names: &vocab,
+                    vocab: &mut vocab,
+                    arrows: &mut arrows,
+                    arrow_intern: &mut arrow_intern,
                     ref_res: &ref_res,
                     def_types: &def_types,
                     deftype_ids: &deftype_ids,
+                    all_defs: &all_defs,
+                    span_types: HashMap::new(),
+                    ret_stack: Vec::new(),
                     out_types: Vec::new(),
                     out_defs: HashMap::new(),
                     diags: Vec::new(),
@@ -390,6 +628,7 @@ impl SemDb {
                 diags,
                 atoms: vocab.clone(),
                 grammar_atoms: cfg.atoms.len(),
+                arrows_at,
             });
             if stable {
                 break;

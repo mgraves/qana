@@ -783,9 +783,42 @@ CLI test through the shipped binary. v0 limits recorded in the guide: atoms + si
 constructors, no subtyping), single-file flow, list children untyped,
 file-granular recompute (per-item memoization is the named refinement).
 
+## Type tier v1 (shipped): the document opens the vocabulary
+
+v0's wall, found by the Structlang stress test: the type vocabulary was
+fixed at grammar-compile time, so a document's `struct Point { … }`
+could not BE a type. v1 removes exactly that wall with two forms.
+`@type(deftype)` marks a def as INTRODUCING a type named by its def
+child; `@type(named)` makes type annotations and constructor
+expressions denote the type a reference resolves to (a resolved
+non-type name is diagnosed: "this name does not denote a type";
+unresolved stays silent — the binding tier owns it).
+
+The design decision that does the heavy lifting: **a document type's
+identity is its declaration site, not its name.** Which `T` an
+annotation denotes is the binding tier's ordinary scoped resolution, so
+type scoping, shadowing, and forward references are inherited rather
+than implemented — two `struct T`s in different scopes are different
+types, and cross-assigning them is a real mismatch (gated, including
+the deliberately confusing ``expected `T`, found `T``` display, noted
+for refinement). Grammar atoms and document types unify seamlessly in
+signatures; the run vocabulary reports both
+(`vocabulary Num, Str + document types: Point, Label`).
+
+Engine: a static pre-pass collects introduction sites (document order,
+site-keyed), the run vocabulary extends the grammar's atoms, and the
+existing fixpoint machinery needs no change. `compose_types` passes the
+new forms through untouched (they carry no atom ids). New surfaces:
+`rantlr types` splits the vocabulary line; examples/structs/ is a
+committed playground (structs + functions + `new`, served by the LSP
+via the BYO-grammar path). Gates: 119 tests — open-vocabulary flow,
+non-type-name diagnosis, nominal-identity-by-site under shadowing,
+deftype/named binding cross-checks, and an example drift gate through
+the shipped binary.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 114 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 119 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

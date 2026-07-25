@@ -295,7 +295,9 @@ At most one `@type` per alternative. Forms:
 | `@type(of, label)` | The type of the child at `label` |
 | `@type(sig, p…, R)` | The alternative's **rule symbols** (in order) must have types `p…`; the node has type `R` |
 | `@type(def, label)` | The name defined here (requires `@def`) carries the type of the child at `label`; the node itself stays untyped |
-| `@type(ref)` | The type of whatever this alternative's `@ref` resolved to |
+| `@type(ref)` | The type the resolved definition CARRIES (a value's type) |
+| `@type(deftype)` | The name defined here (requires `@def`) INTRODUCES a document-level type |
+| `@type(named)` | The type the resolved definition IS (requires `@ref`; the target must be a `deftype` — a resolved non-type name is diagnosed) |
 
 Type atoms are **Capitalized** names, invented freely — `Num`, `Str`,
 `Temperature`. Lowercase names inside a `sig` are **type variables**,
@@ -314,8 +316,20 @@ declaration order); **unknown never cascades** — unresolved names and
 parse-repaired regions type as nothing, and a diagnostic is emitted
 only where two known types disagree.
 
-v0 limits: no type constructors, no subtyping, single-file flow,
-list-shaped children untyped.
+**Document-level types.** `@type(deftype)` opens the vocabulary at the
+document level: each declaration (a `struct`, say) introduces a type
+named by its `@def` child, and `@type(named)` in type positions and
+constructor expressions denotes it. Identity is the **declaration
+site**, not the name — two `struct T`s in different scopes are
+different types, and which `T` an annotation denotes is ordinary
+scoped name resolution. Shadowing therefore produces real mismatches,
+shown as ``expected `T`, found `T``` (a display refinement is planned).
+The grammar's atoms and the document's types unify seamlessly in
+signatures and mismatch reports.
+
+Current limits: no type constructors, no subtyping, single-file flow,
+list-shaped children untyped, no member/field lookup yet, and calls
+flow only their return type (arity and arguments unchecked).
 
 ---
 

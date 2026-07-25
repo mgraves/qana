@@ -200,3 +200,17 @@ fn tree_sitter_and_ast_exports_produce_output() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The committed structs example stays certified and type-clean: the
+/// document's own `struct` declarations extend the vocabulary.
+#[test]
+fn structs_example_serves_document_level_types() {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let g = format!("{root}/examples/structs/structlang.rg");
+    let doc = format!("{root}/examples/structs/demo.sl");
+    let out = run(&["types", &g, &doc]);
+    assert!(out.status.success(), "example types clean: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("document types: Point, Label"), "vocabulary opened:\n{text}");
+    assert!(text.contains("Point") && text.contains("no type errors"), "{text}");
+}

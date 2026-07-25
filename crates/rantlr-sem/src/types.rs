@@ -53,6 +53,18 @@ pub enum TypeRule {
     /// `@type(ref)` — the type of whatever definition this production's
     /// `@ref` child resolved to (via the binding tier).
     FromRef { ref_child: usize },
+    /// `@type(deftype)` — this production's `@def` child INTRODUCES a
+    /// document-level type named by that child's text. The vocabulary
+    /// opens: grammar atoms + whatever the DOCUMENT declares. Identity
+    /// is the def SITE, not the name — two `struct T`s in different
+    /// scopes are different types, and which `T` an annotation denotes
+    /// is decided by the binding tier's ordinary scoped resolution.
+    DefType { def_child: usize },
+    /// `@type(named)` — the type DENOTED by the definition this
+    /// production's `@ref` child resolves to (which must be a
+    /// `deftype` site — resolving to a non-type def is diagnosed).
+    /// Contrast `FromRef`: the type a def CARRIES vs the type it IS.
+    Named { ref_child: usize },
 }
 
 /// The whole declared tier: a vocabulary and per-production rules.
@@ -96,8 +108,12 @@ pub struct TypeReport {
     /// a declared type.
     pub def_types: Vec<((u32, u32), TypeId)>,
     pub diags: Vec<TypeDiag>,
-    /// The vocabulary, for display (mirrors the config).
+    /// The RUN vocabulary: the grammar's atoms followed by the types
+    /// this document introduced (`deftype`), in document order.
     pub atoms: Vec<String>,
+    /// How many leading entries of `atoms` are grammar-declared; the
+    /// rest are document-level.
+    pub grammar_atoms: usize,
 }
 
 impl TypeReport {
@@ -117,11 +133,14 @@ impl TypeReport {
 
 struct Walker<'a> {
     rules: HashMap<(u16, u16), &'a TypeRule>,
-    cfg: &'a TypeConfig,
+    /// The run vocabulary (grammar atoms + document types), for display.
+    names: &'a [String],
     /// abs ref-name start → abs def-name start (same file only, v0).
     ref_res: &'a HashMap<u32, u32>,
     /// abs def-name start → type (from the previous pass).
     def_types: &'a HashMap<u32, TypeId>,
+    /// abs def-name start → the document-level type that def INTRODUCES.
+    deftype_ids: &'a HashMap<u32, TypeId>,
     out_types: Vec<((u32, u32), TypeId)>,
     out_defs: HashMap<u32, ((u32, u32), TypeId)>,
     diags: Vec<TypeDiag>,
@@ -173,6 +192,24 @@ impl<'a> Walker<'a> {
                 .and_then(|s| self.ref_res.get(&s.0))
                 .and_then(|d| self.def_types.get(d))
                 .copied(),
+            // The introduction itself was recorded in the pre-pass; the
+            // declaring node is not an expression and stays untyped.
+            TypeRule::DefType { .. } => None,
+            TypeRule::Named { ref_child } => {
+                match pos_spans.get(*ref_child).and_then(|s| self.ref_res.get(&s.0)) {
+                    None => None, // unresolved: the binding tier reports it
+                    Some(d) => match self.deftype_ids.get(d) {
+                        Some(&t) => Some(t),
+                        None => {
+                            self.diags.push(TypeDiag {
+                                span: pos_spans[*ref_child],
+                                msg: "this name does not denote a type".into(),
+                            });
+                            None
+                        }
+                    },
+                }
+            }
             TypeRule::DefFrom { src, def_child } => {
                 let t = pos_types.get(*src).copied().flatten();
                 if let (Some(t), Some(dspan)) = (t, pos_spans.get(*def_child).copied()) {
@@ -200,8 +237,8 @@ impl<'a> Walker<'a> {
                                     span: *cspan,
                                     msg: format!(
                                         "type mismatch: expected `{}`, found `{}`",
-                                        self.cfg.atom_name(e),
-                                        self.cfg.atom_name(t)
+                                        self.names.get(e as usize).map(|s| s.as_str()).unwrap_or("?"),
+                                        self.names.get(t as usize).map(|s| s.as_str()).unwrap_or("?"),
                                     ),
                                 });
                             }
@@ -218,6 +255,41 @@ impl<'a> Walker<'a> {
             self.out_types.push((span, t));
         }
         ty
+    }
+}
+
+/// Pre-pass: every `deftype` introduction site in document order —
+/// (absolute def-name start, name text). Static per tree (independent
+/// of any computed types), so it runs once, before the fixpoint.
+fn collect_deftypes(
+    n: &GreenNode,
+    base: u32,
+    rules: &HashMap<(u16, u16), &TypeRule>,
+    out: &mut Vec<(u32, String)>,
+) {
+    let mut pos = 0usize;
+    let mut off = base;
+    let target = match rules.get(&(n.nt, n.prod)) {
+        Some(TypeRule::DefType { def_child }) if !n.has_err => Some(*def_child),
+        _ => None,
+    };
+    for c in &n.children {
+        let w = c.width();
+        match c {
+            GreenChild::Node(m) if m.nt != ERROR_NT => {
+                collect_deftypes(m, off, rules, out);
+                pos += 1;
+            }
+            GreenChild::Node(m) => collect_deftypes(m, off, rules, out),
+            GreenChild::Token(t) if !t.trivia && !t.is_missing() => {
+                if target == Some(pos) {
+                    out.push((off, t.text.clone()));
+                }
+                pos += 1;
+            }
+            GreenChild::Token(_) => {}
+        }
+        off += w;
     }
 }
 
@@ -264,6 +336,25 @@ impl SemDb {
         let items: Vec<(std::sync::Arc<GreenNode>, u32)> =
             e.items.iter().map(|s| (s.node.clone(), s.base_off)).collect();
 
+        // Open the vocabulary: grammar atoms first, then every type this
+        // DOCUMENT introduces (`deftype`), keyed by introduction site —
+        // identity is nominal-by-declaration, and which declaration an
+        // annotation denotes is the binding tier's scoped answer.
+        let mut vocab = cfg.atoms.clone();
+        let mut deftype_ids: HashMap<u32, TypeId> = HashMap::new();
+        {
+            let mut sites: Vec<(u32, String)> = Vec::new();
+            for (node, base) in &items {
+                collect_deftypes(node, *base, &rules, &mut sites);
+            }
+            for (start, name) in sites {
+                if let std::collections::hash_map::Entry::Vacant(v) = deftype_ids.entry(start) {
+                    vocab.push(name);
+                    v.insert((vocab.len() - 1) as TypeId);
+                }
+            }
+        }
+
         // Iterate def-typing to a fixed point (bounded; each pass can
         // only add or update def types along resolution edges).
         let mut def_types: HashMap<u32, TypeId> = HashMap::new();
@@ -272,9 +363,10 @@ impl SemDb {
             let (out_types, out_defs, diags) = {
                 let mut w = Walker {
                     rules: rules.clone(),
-                    cfg: &cfg,
+                    names: &vocab,
                     ref_res: &ref_res,
                     def_types: &def_types,
+                    deftype_ids: &deftype_ids,
                     out_types: Vec::new(),
                     out_defs: HashMap::new(),
                     diags: Vec::new(),
@@ -292,7 +384,13 @@ impl SemDb {
             defs.sort_unstable_by_key(|(s, _)| s.0);
             let mut types = out_types;
             types.sort_unstable_by_key(|((s, e), _)| (*s, u32::MAX - (*e - *s)));
-            last = Some(TypeReport { types, def_types: defs, diags, atoms: cfg.atoms.clone() });
+            last = Some(TypeReport {
+                types,
+                def_types: defs,
+                diags,
+                atoms: vocab.clone(),
+                grammar_atoms: cfg.atoms.len(),
+            });
             if stable {
                 break;
             }

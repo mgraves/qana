@@ -273,10 +273,28 @@ Delete every `@type` annotation and the tier is exactly gone — empty
 vocabulary, zero rules, no type queries. Its power is precisely what
 the grammar declared.
 
-v0 limits, honestly: atoms and per-production signatures with local
-variables only (no constructors like `List<T>`, no subtyping); types
-flow within one file (cross-file references type as unknown); list-
-shaped children stay untyped; checking is file-granular per query
+And the vocabulary is not limited to what the grammar declares:
+`@type(deftype)` lets **documents** introduce types. In
+[examples/structs](../examples/structs/structlang.rg), each `struct`
+declaration creates a type, annotations and `new` expressions denote
+it, and mismatches name the document's own types:
+
+```text
+vocabulary Num, Str  + document types: Point, Label
+
+error: type mismatch: expected `Point`, found `Label`
+```
+
+Type identity is the declaration site, so two `struct T`s in different
+scopes are genuinely different types — scoping, shadowing, and forward
+references all come from the same name resolution that powers
+go-to-definition.
+
+Current limits, honestly: atoms, document types, and per-production
+signatures with local variables — no constructors like `List<T>`, no
+subtyping, no member/field lookup yet; calls flow their return type
+but arity and arguments are unchecked; types flow within one file;
+list-shaped children stay untyped; checking is file-granular per query
 rather than per-item memoized.
 
 ---

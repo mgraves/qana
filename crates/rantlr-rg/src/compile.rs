@@ -1164,6 +1164,20 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             None
                         }
                     },
+                    ("deftype", 1) => match binding.defs.iter().find(|e| e.0 == nt && e.1 == prod) {
+                        Some(&(_, _, k)) => Some(TypeRule::DefType { def_child: k }),
+                        None => {
+                            error(d, a.name_span, "@type(deftype) requires @def on the same alternative".into());
+                            None
+                        }
+                    },
+                    ("named", 1) => match binding.refs.iter().find(|r| r.0 == nt && r.1 == prod) {
+                        Some(&(_, _, k, _)) => Some(TypeRule::Named { ref_child: k }),
+                        None => {
+                            error(d, a.name_span, "@type(named) requires @ref on the same alternative".into());
+                            None
+                        }
+                    },
                     ("of", 2) => rule_pos(d, &a.args[1]).map(TypeRule::OfChild),
                     ("def", 2) => {
                         let src = rule_pos(d, &a.args[1]);
@@ -1229,7 +1243,9 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         error(
                             d,
                             a.name_span,
-                            format!("unknown @type form `{other}` (expected an Atom, `ref`, `of`, `def`, or `sig`)"),
+                            format!(
+                                "unknown @type form `{other}` (expected an Atom, `ref`, `named`, `deftype`, `of`, `def`, or `sig`)"
+                            ),
                         );
                         None
                     }

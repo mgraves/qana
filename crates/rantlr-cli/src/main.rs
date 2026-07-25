@@ -567,7 +567,13 @@ fn cmd_types(args: &Args) {
     db.set_tree(doc_path, session.tree().expect("total").clone());
     let report = db.types(doc_path);
 
-    println!("{} {}", bold("vocabulary"), report.atoms.join(", "));
+    let (grammar_vocab, doc_vocab) = report.atoms.split_at(report.grammar_atoms.min(report.atoms.len()));
+    print!("{} {}", bold("vocabulary"), grammar_vocab.join(", "));
+    if doc_vocab.is_empty() {
+        println!();
+    } else {
+        println!("  {} {}", dim("+ document types:"), cyan(&doc_vocab.join(", ")));
+    }
     println!();
     println!("{}", bold("typed definitions"));
     if report.def_types.is_empty() {

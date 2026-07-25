@@ -71,8 +71,17 @@ mode PP {
   token PP_ENDIF   = "endif" @style(keyword)
   token PP_HEADER  = /<[^>]+>/ @style(string)
   token PP_STRING  = /"(\\.|[^"\\])*"/ @style(string)
+  // ADJACENCY AS A LEXER FACT: a name immediately followed by `(` is
+  // one composite token — maximal munch prefers the longer match, so
+  // `F(` lexes as PP_NAME_LP while `F (` lexes as PP_NAME then trivia.
+  // That is exactly C's function-like/object-like #define distinction
+  // (real preprocessors carry a "previous whitespace" flag; the
+  // envelope's declared-data equivalent is this token).
+  token PP_NAME_LP = /[\a_][\w_]*\(/ @style(variable)
   token PP_NAME    = /[\a_][\w_]*/ @style(variable)
   token PP_NUM     = /\d[\w.]*/ @style(number)
+  token PP_COMMA   = "," @style(punctuation)
+  token PP_RP      = ")" @style(bracket)
   token PP_ANY     = /./ @style(regexp)
 }
 
@@ -173,6 +182,12 @@ rule pp_directive =
   | PpInclude:    "#" PP_INCLUDE PP_HEADER
   | PpIncludeStr: "#" PP_INCLUDE PP_STRING
   | PpDefine:     "#" PP_DEFINE name:PP_NAME pp_tokens @def(name) @outline(name, constant)
+  // Function-like: the composite PP_NAME_LP proves the adjacency, and
+  // the parameter list is STRUCTURE (named, separated, closed) — but
+  // the macro's name lives inside the composite token, so it does not
+  // @def yet: naming fn-like macros belongs to the meta tier, and the
+  // exerciser pins that residue explicitly.
+  | PpDefineFn:   "#" PP_DEFINE name:PP_NAME_LP pp_params PP_RP pp_tokens
   | PpUndef:      "#" PP_UNDEF name:PP_NAME @ref(name)
   | PpIfdef:      "#" PP_IFDEF name:PP_NAME @ref(name)
   | PpIfndef:     "#" PP_IFNDEF name:PP_NAME @ref(name)
@@ -181,14 +196,21 @@ rule pp_directive =
   | PpElse:       "#" PP_ELSE
   | PpEndif:      "#" PP_ENDIF
 
+rule pp_params = pp_param* % PP_COMMA
+
+rule pp_param = PpParam: PP_NAME
+
 rule pp_tokens = pp_tok*
 
 rule pp_tok =
-  | PpTokName: PP_NAME
-  | PpTokNum:  PP_NUM
-  | PpTokStr:  PP_STRING
-  | PpTokHdr:  PP_HEADER
-  | PpTokAny:  PP_ANY
+  | PpTokName:   PP_NAME
+  | PpTokNameLp: PP_NAME_LP
+  | PpTokNum:    PP_NUM
+  | PpTokStr:    PP_STRING
+  | PpTokHdr:    PP_HEADER
+  | PpTokComma:  PP_COMMA
+  | PpTokRp:     PP_RP
+  | PpTokAny:    PP_ANY
 
 rule decl_specs = decl_spec+
 

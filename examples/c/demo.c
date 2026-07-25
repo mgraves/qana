@@ -7,6 +7,7 @@
 #include <stdio.h>
 #define LIMIT 100
 #define UNUSED_FLAG 1
+#define SQUARE(v) ((v) * (v))   /* fn-like: adjacency IS the lexer fact */
 
 #ifdef LIMIT
 #endif

@@ -378,3 +378,59 @@ done:\n\
     let unres: Vec<String> = db2.unresolved("g").into_iter().map(|(n, _)| n).collect();
     assert_eq!(unres, ["inner"], "goto INTO a block is the pinned residue");
 }
+
+/// C wall 6: function-like macro adjacency. `#define F(x)` versus
+/// `#define F (x)` differ by ONE SPACE that lives in trivia — invisible
+/// to any grammar. The envelope's answer: adjacency is a LEXER fact.
+/// A composite PP-mode token `/name\(/` wins maximal munch exactly
+/// when the paren is adjacent, so the two spellings lex differently
+/// and parse as different productions — line-local, no flags, no
+/// feedback. The residue is pinned: the fn-like macro's NAME lives
+/// inside the composite token, so it does not define yet (that is the
+/// meta tier's job, which owns macro objects wholesale).
+#[test]
+fn macro_adjacency_is_a_lexer_fact() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, C_RG);
+    let (lexer, tables) = certify(&out.def).unwrap();
+
+    // One space, two structures. Both parse clean; only the
+    // OBJECT-like spelling defines its name.
+    let fn_like = "#define SQ(x) ((x) * (x))\n";
+    let obj_like = "#define SQ (x) ((x) * (x))\n";
+    for (doc, defines) in [(fn_like, false), (obj_like, true)] {
+        let s = IncSession::new(&lexer, &out.def.sg, &tables, doc).unwrap();
+        assert!(s.last_repairs.is_empty(), "parses clean: {doc:?} {:?}", s.last_repairs);
+        let mut db = SemDb::new(out.def.binding.clone());
+        db.set_tree("m", s.tree().unwrap().clone());
+        let has_sq = db.symbols("m").defs.iter().any(|d| d.name == "SQ");
+        assert_eq!(has_sq, defines, "adjacency decides whether SQ is a definition: {doc:?}");
+    }
+
+    // Parameters are structure: a two-param macro with a body full of
+    // parens and commas parses clean, and `#if defined(X)` keeps
+    // working with the composite token in directive bodies.
+    let world = "\
+#define MAX(a, b) ((a) < (b) ? (b) : (a))\n\
+#define EMPTY() 0\n\
+#if defined(LIMIT)\n\
+#endif\n\
+#define LIMIT 9\n\
+int use_it(void) { return LIMIT; }\n";
+    let s = IncSession::new(&lexer, &out.def.sg, &tables, world).unwrap();
+    assert!(s.last_repairs.is_empty(), "{:?}", s.last_repairs);
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_tree("w", s.tree().unwrap().clone());
+    assert!(db.unresolved("w").is_empty(), "{:?}", db.unresolved("w"));
+
+    // PINNED residue: a fn-like macro does NOT define its name, so a
+    // code use of it is diagnosed unresolved — explicitly, until the
+    // meta tier owns macros.
+    let residue = "#define TWICE(x) ((x) + (x))\nint y = TWICE;\n";
+    let s2 = IncSession::new(&lexer, &out.def.sg, &tables, residue).unwrap();
+    assert!(s2.last_repairs.is_empty(), "{:?}", s2.last_repairs);
+    let mut db2 = SemDb::new(out.def.binding.clone());
+    db2.set_tree("r", s2.tree().unwrap().clone());
+    let unres: Vec<String> = db2.unresolved("r").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(unres, ["TWICE"], "fn-like names await the meta tier");
+}

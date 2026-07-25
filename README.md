@@ -1236,9 +1236,38 @@ function-scoped, so a goto cannot jump INTO a nested block — it
 parses clean and diagnoses as "cannot find", gated as such. 448
 states, zero conflicts.
 
+## C wall 6: macro adjacency — the space that is not trivia
+
+`#define F(x) body` versus `#define F (x) body`: one space decides
+function-like versus object-like, and that space lives in TRIVIA —
+invisible to any grammar, seemingly fatal for a parser that refuses
+lexer feedback. The envelope's answer: adjacency is a LEXER fact, so
+state it as one. A composite PP-mode token
+
+  token PP_NAME_LP = /[\a_][\w_]*\(/
+
+wins maximal munch exactly when the paren is adjacent (`F(` is one
+token; `F (` is a name, trivia, and a paren), so the two spellings
+LEX differently and parse as different productions — line-local,
+deterministic, no flags. Real preprocessors carry a "previous
+whitespace" bit on every token; the declared-data equivalent is this
+one pattern. Function-like parameter lists are full structure
+(`#define MAX(a, b)` parses its params named and separated), and
+`#if defined(LIMIT)` keeps working with the composite token in
+directive bodies.
+
+The pinned residue: the fn-like macro's NAME lives inside its
+composite token, so it does not `@def` yet — a code use of `TWICE`
+diagnoses unresolved, gated as such. Naming it means slicing a token,
+and that belongs to the meta tier, which will own macro objects
+(parameters, bodies, materialized expansion with provenance)
+wholesale. The wall list for C is now EMPTY: every wall from the
+original campaign is either demolished or pinned as an explicit,
+gated residue with a named owner. 460 states, zero conflicts.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 144 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 147 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

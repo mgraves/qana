@@ -7,6 +7,8 @@
 //! edits, line/col ranges) but transport-free; the LSP server binary is
 //! the next increment's plumbing.
 
+pub mod paint;
+
 use rantlr_engine::{DamageReport, IncSession, LexedBuffer};
 use rantlr_grammar::green::{ancestor_spans, ERROR_NT};
 use rantlr_grammar::incremental::{Repair, RepairKind};

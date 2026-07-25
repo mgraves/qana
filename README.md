@@ -1489,9 +1489,63 @@ when run alone. The cache now pins its subtrees (as the binding tier's
 fragment cache always did) and keeps exactly two generations. 161
 tests.
 
+## The native editor protocol: paint + facts
+
+The prime imperative, stated as an interface. LSP and tree-sitter
+remain supported exports — but they are COMPATIBILITY tiers, and the
+project's own answer is `rantlr_services::paint`: the protocol an
+editor built FOR this engine consumes, designed around the two facts
+the architecture guarantees and generic servers cannot. Damage is
+line-bounded and known synchronously (L1/L2), so highlighting can be
+PUSHED with the keystroke instead of requested after it. And every
+semantic fact is already memoized per item, so hover is a lookup, not
+a round trip.
+
+The shape: LINE-KEYED, TWO-WAVE, four bytes per run.
+
+  Run { len: u16, style: u8, mods: u8 }
+
+WAVE 0 recomputes only the damaged lines' runs, synchronously with
+the edit — and paints from the same declared `@style` classes the
+final frame uses. There is no TextMate approximation to disagree
+with, so there is nothing to flicker. WAVE 1 adds modifier bits to
+the same runs — definition, resolved/unresolved reference, public,
+foreign, typed — from the binding, module, and type tiers. Wave 1
+never changes a style, only adds bits: refinement is monotone by
+construction, and gated as such.
+
+A delta names the lines that changed and NOTHING else. Runs are
+line-relative, so lines that merely shifted re-emit nothing — and the
+repaint set becomes a diagnostic in its own right: rename a function
+and the delta lists exactly the lines that called it (gated: 401
+callers, 401 repaints, zero strays). The wire form is the memory
+form, little-endian; decoding is a bounds check, not a parse.
+
+The FACTS plane answers hover from the warm tiers: one call returns
+the name, its definition site, its problem ("cannot find", "exists
+but is not exported"), its display type, and its namespace — and
+`type_hints` derives the inline-decoration plane (`: Num` after every
+typed definition) from the same report. No serialization, no
+Markdown, no debounce.
+
+paintbench, 12k lines of C in release mode:
+
+  initial parse                   19.5 ms
+  full two-wave paint              4.3 ms
+  keystroke → wave-0 delta        44.5 µs median      67 µs p90
+  keystroke → two-wave delta       3.3 ms median
+  hover facts (warm)               0.5 ms
+
+The frame-critical path — keystroke to correct painted colors — is
+measured in tens of microseconds; the fully semantic frame lands
+inside the same 60 fps budget. Named successors: per-item overlay
+incrementality and a cached symbol table (today's wave-1 cost is
+dominated by whole-table rebuilds), richer facet bits, and wiring the
+Synkro adapter to consume paint directly.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 165 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 171 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

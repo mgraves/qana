@@ -308,3 +308,78 @@ fn reflection_iterates_declared_members() {
     );
     assert!(e3.text.contains("m!{zero}"), "left intact: {}", e3.text);
 }
+
+/// CROSS-FILE REFLECTION: the reflected type may live in a sibling.
+/// Its members come from ITS declarations, the substituted spans
+/// splice from that file, and provenance points there — so a derive
+/// written here follows a struct declared next door.
+#[test]
+fn reflection_crosses_files() {
+    let sl_rg = include_str!("../../../examples/structs/structlang.rg");
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, sl_rg);
+    let (lexer, tables) = certify(&out.def).unwrap();
+
+    // lib declares the type AND the derive macro; app owns neither.
+    let lib = "struct Vec3 {\n  x: Num,\n  y: Num,\n  z: Num\n}\nmacro coords(f, t) => { here.f }\n";
+    let app = "let here: Vec3 = new Vec3;\nlet span: Num = coords!{Vec3};\n";
+    let sibs = vec![("lib.sl".to_string(), lib.to_string())];
+    let exp = expand_document(&lexer, &out.def, &tables, app, &sibs, 8).expect("expands");
+    assert!(exp.diags.is_empty(), "{:?}", exp.diags);
+    assert_eq!(
+        exp.text, "let here: Vec3 = new Vec3;\nlet span: Num = here.x + here.y + here.z;\n",
+        "a foreign struct's members drive the derive"
+    );
+    assert!(tiles(&exp.segs, exp.text.len() as u32));
+
+    // Provenance: the generated `x` points at lib's FIELD, and the
+    // macro body's `here.` prefix at lib's macro — both foreign, both
+    // named. (The join is synthesized.)
+    let gx = exp.text.find("here.x").unwrap() + "here.".len();
+    let xseg = exp.segs.iter().find(|s| s.out.0 <= gx as u32 && (gx as u32) < s.out.1).unwrap();
+    assert_eq!((xseg.kind, xseg.src_uri.as_deref()), (SegKind::Arg, Some("lib.sl")), "{xseg:?}");
+    assert_eq!(xseg.src.0 as usize, lib.find("x: Num").unwrap(), "…at the field");
+    let gh = exp.text.find("here.x").unwrap();
+    let hseg = exp.segs.iter().find(|s| s.out.0 <= gh as u32 && (gh as u32) < s.out.1).unwrap();
+    assert_eq!((hseg.kind, hseg.src_uri.as_deref()), (SegKind::Body, Some("lib.sl")), "{hseg:?}");
+
+    // The materialized app is an ordinary document in its two-file
+    // world: it resolves AND type-checks — the member accesses the
+    // derive generated are checked against the foreign struct.
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, &exp.text).unwrap();
+    assert!(session.last_repairs.is_empty(), "{:?}", session.last_repairs);
+    let lib_session = IncSession::new(&lexer, &out.def.sg, &tables, lib).unwrap();
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_types(out.def.types.clone());
+    db.set_macro_bodies(&out.def.macros);
+    db.set_tree("lib.sl", lib_session.tree().unwrap().clone());
+    db.set_tree("app.sl", session.tree().unwrap().clone());
+    assert!(db.unresolved("app.sl").is_empty(), "{:?}", db.unresolved("app.sl"));
+    assert!(db.types("app.sl").diags.is_empty(), "{:?}", db.types("app.sl").diags);
+
+    // Editing the SIBLING's membership changes this file's derive —
+    // reflection reads declarations, wherever they live.
+    let lib2 = lib.replace("  z: Num\n", "  z: Num,\n  w: Num\n");
+    let sibs2 = vec![("lib.sl".to_string(), lib2)];
+    let exp2 = expand_document(&lexer, &out.def, &tables, app, &sibs2, 8).unwrap();
+    assert!(exp2.text.contains("here.x + here.y + here.z + here.w"), "{}", exp2.text);
+
+    // A name that resolves cross-file but is NOT a type still
+    // diagnoses (and leaves the use intact).
+    let notty = "let coords: Num = 0;\nlet q: Num = coords!{scale};\n";
+    let libf = "fn scale(v: Num) -> Num { return v; }\nmacro m(f, t) => { f }\n";
+    let e3 = expand_document(
+        &lexer,
+        &out.def,
+        &tables,
+        notty,
+        &[("l.sl".to_string(), libf.to_string())],
+        8,
+    )
+    .unwrap();
+    assert!(
+        e3.diags.iter().any(|d| d.msg.contains("does not resolve to a declared type")),
+        "{:?}",
+        e3.diags
+    );
+}

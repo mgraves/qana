@@ -257,3 +257,46 @@ fn expand_materializes_and_the_drift_gate_bites() {
     assert!(!out.status.success(), "tampering must fail the drift gate");
     assert!(stdout(&out).contains("drifted"), "{}", stdout(&out));
 }
+
+/// Cross-file reflection through the CLI: `rantlr expand` joins
+/// same-extension siblings automatically, so a derive written in one
+/// file follows a struct declared in another — and the provenance
+/// sidecar names that file.
+#[test]
+fn expand_reflects_a_struct_declared_next_door() {
+    let dir = scratch("reflect");
+    std::fs::create_dir_all(&dir).unwrap();
+    let g = dir.join("s.rg");
+    std::fs::copy("../../examples/structs/structlang.rg", &g).unwrap();
+    std::fs::write(
+        dir.join("lib.sl"),
+        "struct Vec3 {\n  x: Num,\n  y: Num,\n  z: Num\n}\n",
+    )
+    .unwrap();
+    let app = dir.join("app.sl");
+    std::fs::write(
+        &app,
+        "let here: Vec3 = new Vec3;\nmacro coords(f, t) => { here.f }\nlet span: Num = coords!{Vec3};\n",
+    )
+    .unwrap();
+
+    let out = run(&["expand", g.to_str().unwrap(), app.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = std::fs::read_to_string(dir.join("app.exp.sl")).unwrap();
+    assert!(text.contains("let span: Num = here.x + here.y + here.z;"), "{text}");
+    let prov = std::fs::read_to_string(dir.join("app.exp.sl.prov.json")).unwrap();
+    assert!(prov.contains("lib.sl"), "provenance names the declaring file:\n{prov}");
+
+    // The materialized pair is current, and a new field in the
+    // SIBLING makes it stale — the drift gate sees cross-file edits.
+    let out = run(&["expand", g.to_str().unwrap(), app.to_str().unwrap(), "--check"]);
+    assert!(out.status.success(), "{}", stdout(&out));
+    std::fs::write(
+        dir.join("lib.sl"),
+        "struct Vec3 {\n  x: Num,\n  y: Num,\n  z: Num,\n  w: Num\n}\n",
+    )
+    .unwrap();
+    let out = run(&["expand", g.to_str().unwrap(), app.to_str().unwrap(), "--check"]);
+    assert!(!out.status.success(), "a sibling edit must invalidate the materialization");
+    assert!(stdout(&out).contains("drifted"), "{}", stdout(&out));
+}

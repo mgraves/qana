@@ -29,7 +29,8 @@
 use crate::types::{TypeConfig, TypeRule};
 use crate::{SemDb, SymbolTable, Target};
 use rantlr_grammar::green::{GreenChild, GreenNode, LIST_PROD};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 /// The declared macro tier. Empty vectors = no tier (open world).
 #[derive(Clone, Debug, Default)]
@@ -132,10 +133,23 @@ struct Job {
 
 /// One reflected member: spans of its declared name and its type
 /// annotation — both substitution source AND provenance (generated
-/// code points at the field that generated it).
+/// code points at the field that generated it) — plus the file those
+/// spans index (None = the expanding document, Some(uri) = the
+/// sibling that declared the type).
 struct RMember {
     name_span: (u32, u32),
     ty_span: (u32, u32),
+    home: Option<String>,
+}
+
+/// Everything one pass needs from a SIBLING document: its text (for
+/// splicing), its macro registry, and — for reflection — its symbols
+/// and the type tier's declared shapes.
+struct ForeignFile {
+    text: String,
+    registry: HashMap<usize, MacroDef>,
+    st: Arc<SymbolTable>,
+    tmap: TypeMap,
 }
 
 /// What one tree walk learns from the TYPE tier's declared forms:
@@ -425,53 +439,69 @@ pub fn expand_pass(
     let mut jobs: Vec<Job> = Vec::new();
     walk(tree, 0, cfg, &st, &res, &mut jobs);
 
-    // Foreign registries (and texts, recovered losslessly from the
-    // trees) for every sibling a job points into.
-    let mut foreign: HashMap<String, (HashMap<usize, MacroDef>, String)> = HashMap::new();
+    // Sibling documents this pass needs: the homes of foreign macro
+    // DEFINITIONS and of foreign reflected TYPES. Sorted, so a pass is
+    // deterministic regardless of map iteration order.
+    let mut wanted: BTreeSet<String> = BTreeSet::new();
     for j in &jobs {
         if let Some(fu) = &j.def_file {
-            if !foreign.contains_key(fu) {
-                let Some(ftree) = db.tree(fu) else { continue };
-                let ftext = ftree.text();
-                let fst = db.symbols(fu);
-                let fres = db.resolve(fu);
-                let fmap = tcfg.map(|t| type_map(&ftree, &ftext, t)).unwrap_or_default();
-                let freg =
-                    build_registry(&ftree, &ftext, &fst, &fres, cfg, &fmap.member_positions);
-                foreign.insert(fu.clone(), (freg, ftext));
+            wanted.insert(fu.clone());
+        }
+        if let Some((tri, _)) = &j.reflect {
+            if let Some(Target::Foreign { uri, .. }) = res.get(*tri) {
+                wanted.insert(uri.clone());
             }
         }
     }
+    let mut foreign: HashMap<String, ForeignFile> = HashMap::new();
+    for fu in wanted {
+        let Some(ftree) = db.tree(&fu) else { continue };
+        // Lossless trees mean the sibling's text needs no second read.
+        let ftext = ftree.text();
+        let fst = db.symbols(&fu);
+        let fres = db.resolve(&fu);
+        let tmap = tcfg.map(|t| type_map(&ftree, &ftext, t)).unwrap_or_default();
+        let registry = build_registry(&ftree, &ftext, &fst, &fres, cfg, &tmap.member_positions);
+        foreign.insert(fu, ForeignFile { text: ftext, registry, st: fst, tmap });
+    }
 
-    // Resolve @reflect jobs to member lists: the type-name ref must
-    // resolve to a LOCAL deftype (v0); its body's typed defs are the
-    // members, in declaration order.
+    // Resolve @reflect jobs to member lists. The type-name ref may
+    // resolve HERE or into a sibling — a foreign type's members are
+    // read from ITS declarations, and the spans carry that file as
+    // their home so substitution and provenance both stay honest.
     for j in jobs.iter_mut() {
         let Some((tri, sep)) = &j.reflect else { continue };
-        match res.get(*tri) {
-            Some(&Target::Local { def }) => {
-                let dspan = st.defs[def].span;
-                match tmap.deftypes.iter().find(|(ds, _)| *ds == dspan) {
-                    Some(&(_, body)) => {
-                        let ms: Vec<RMember> = tmap
-                            .fields
-                            .iter()
-                            .filter(|(ns, ..)| ns.0 >= body.0 && ns.1 <= body.1)
-                            .map(|(ns, _, ts, _)| RMember { name_span: *ns, ty_span: *ts })
-                            .collect();
-                        j.members = Some((ms, sep.clone()));
-                    }
-                    None => diags.push(MacroDiag {
-                        span: j.span,
-                        msg: "reflected name does not resolve to a declared type".into(),
-                    }),
+        let target = match res.get(*tri) {
+            Some(&Target::Local { def }) => Some((None, def)),
+            Some(Target::Foreign { uri, def }) => Some((Some(uri.clone()), *def)),
+            _ => None,
+        };
+        let members = target.and_then(|(home, def)| {
+            let (fst, ftmap): (&SymbolTable, &TypeMap) = match &home {
+                None => (&st, &tmap),
+                Some(u) => {
+                    let f = foreign.get(u)?;
+                    (&f.st, &f.tmap)
                 }
-            }
-            Some(Target::Foreign { .. }) => diags.push(MacroDiag {
-                span: j.span,
-                msg: "reflected type must be defined in this document (v0)".into(),
-            }),
-            _ => diags.push(MacroDiag {
+            };
+            let dspan = fst.defs.get(def)?.span;
+            let &(_, body) = ftmap.deftypes.iter().find(|(ds, _)| *ds == dspan)?;
+            Some(
+                ftmap
+                    .fields
+                    .iter()
+                    .filter(|(ns, ..)| ns.0 >= body.0 && ns.1 <= body.1)
+                    .map(|(ns, _, ts, _)| RMember {
+                        name_span: *ns,
+                        ty_span: *ts,
+                        home: home.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        });
+        match members {
+            Some(ms) => j.members = Some((ms, sep.clone())),
+            None => diags.push(MacroDiag {
                 span: j.span,
                 msg: "reflected name does not resolve to a declared type".into(),
             }),
@@ -516,15 +546,15 @@ pub fn expand_pass(
     for j in &kept {
         push(&mut out, &mut segs, text, &None, (cursor, j.span.0), SegKind::Verbatim);
         // The macro's home: this file or a sibling.
-        let (m, body_text, body_uri) = match &j.def_file {
-            None => (registry.get(&j.def), text, &None),
+        let (m, body_text) = match &j.def_file {
+            None => (registry.get(&j.def), text),
             Some(fu) => match foreign.get(fu) {
-                Some((freg, ftext)) => {
-                    (freg.get(&j.def), ftext.as_str(), &Some(fu.clone()))
-                }
-                None => (None, text, &None),
+                Some(f) => (f.registry.get(&j.def), f.text.as_str()),
+                None => (None, text),
             },
         };
+        let body_uri = j.def_file.clone();
+        let body_uri = &body_uri;
         let Some(m) = m else {
             // Callee resolves, but not to a macro.
             if j.has_args || j.reflect.is_some() {
@@ -566,11 +596,16 @@ pub fn expand_pass(
                         src_uri: None,
                     });
                 }
+                // Member spans index the file that DECLARED the type.
+                let mem_text = match &mem.home {
+                    None => text,
+                    Some(u) => foreign.get(u).map_or(text, |f| f.text.as_str()),
+                };
                 let mut b = m.body.0;
                 for &(rspan, pi) in &m.param_refs {
                     push(&mut out, &mut segs, body_text, body_uri, (b, rspan.0), SegKind::Body);
                     let src = if pi == 0 { mem.name_span } else { mem.ty_span };
-                    push(&mut out, &mut segs, text, &None, src, SegKind::Arg);
+                    push(&mut out, &mut segs, mem_text, &mem.home, src, SegKind::Arg);
                     b = rspan.1;
                 }
                 push(&mut out, &mut segs, body_text, body_uri, (b, m.body.1), SegKind::Body);

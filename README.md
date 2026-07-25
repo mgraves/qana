@@ -1358,11 +1358,21 @@ The move that made it sound: macro bodies are TYPE-EXEMPT at the
 definition — a template is not an expression; its typing happens per
 instantiation, in the materialized output, which is checked as an
 ordinary document (both directions gated: the source with templates
-type-checks clean, and so does the expansion). 157 tests.
+type-checks clean, and so does the expansion).
+
+Reflection crosses files too, on the same rails: a type resolving
+into a sibling reflects ITS declarations, the substituted spans
+splice from that file, and provenance names it — so `coords!{Vec3}`
+here follows a `struct Vec3` declared next door, and adding a field
+THERE changes the derive HERE (gated, including through the CLI's
+drift check: a sibling edit makes the materialization stale). The
+generated member accesses then type-check against the foreign struct,
+because the global type vocabulary already made members cross-file.
+159 tests.
 
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 157 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 159 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

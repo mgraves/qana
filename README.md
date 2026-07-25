@@ -939,9 +939,48 @@ staleness flip when the field retypes), foreign functions (direct +
 first-class, arity + argument errors), cycles terminate, nominal
 shadowing preserved, and the canonical differential on every path.
 
+## The module tier (v0, shipped): exports, imports, visibility as data
+
+The third declared tier, with Rust's module system as the semantic
+reference. Two forms: `@export` on a def-carrying alternative
+(visible to other files) and `@import(label)` (a token position that
+resolves against other files' exports only — never local scopes, so
+`use x;` can put @def and @import on the same token without binding to
+itself). Declaring either activates strict semantics: file-private by
+default, cross-file through imports only, no ambient names. A grammar
+declaring neither keeps the open world — every prior test passes
+unchanged.
+
+"Not exported" is a first-class diagnostic distinct from "cannot
+find": the engine distinguishes a name that exists privately somewhere
+from one that exists nowhere. Navigation jumps THROUGH imports (the
+import ref wins over the def-at-cursor — Rust's `use` behavior), types
+flow through import chains via plain @type(ref), and aliasing
+(`use x as y`) is just @def and @import on different labels.
+
+The Rust bet that pays twice: `pub` is an incrementality contract.
+With the tier on, a file's P6 signature is its EXPORT surface, so
+editing a private definition cannot invalidate any other file's
+resolutions — gated by counter (0 re-resolutions in the dependent
+after a private body edit; removing a `pub` flips the dependent's
+import to the access error).
+
+examples/modules/ is the committed playground (lib.ml exports, app.ml
+imports, one alias), drift-gated by the e2e suite include_str'ing it.
+`rantlr check` reports the tier; `rantlr defs` marks pub/private,
+shows cross-file arrows, loads sibling files, and exits 1 on access
+errors. Named next steps: module scopes within a file, qualified
+paths, re-exports, visibility levels.
+
+Gates: 136 tests — the example world (resolution, types through
+imports, navigation through `use`, exported flags as data), strict
+semantics (private/typo/ambient distinctions), the signature firewall
+counter, open-world compatibility, static cross-checks, and the LSP
+wire.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 130 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 136 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

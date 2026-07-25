@@ -253,6 +253,8 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@outline(label)` / `@outline(label, kind)` | Contribute a document symbol; kinds are `variable` (default), `constant`, `function`, `struct`, `module`, `class` |
 | `@precedence(token)` | Override this alternative's precedence (yacc's `%prec`) |
 | `@type(…)` | Declare this alternative's typing rule (see **The type tier** below) |
+| `@export` | This alternative's `@def` is visible to other files (see **The module tier**) |
+| `@import(label)` | The `label` token names an import: it resolves against other files' EXPORTS only (see **The module tier**) |
 
 Attribute names cannot be `.rg` reserved words, which is why the
 precedence override is spelled `@precedence` rather than `@prec`. Use it
@@ -356,6 +358,35 @@ within-file shadowing keeps distinct types.
 
 Current limits: no type constructors, no subtyping, list-shaped
 children untyped, span-based membership.
+
+---
+
+## The module tier
+
+The toolchain predefines no module system; a grammar declares one.
+`@export` on a def-carrying alternative makes that definition visible
+to other files; `@import(label)` makes a token position an import,
+resolving against other files' exports. Combine `@def` and `@import`
+on the same token for `use x;` (the local binding and the foreign
+reference are one name), or on different labels for `use x as y;`.
+
+Declaring either form activates STRICT semantics, Rust-flavored:
+
+* definitions are file-private unless `@export`ed;
+* cross-file resolution goes through imports only — no ambient names;
+* importing a private name is its own diagnostic ("exists but is not
+  exported"), distinct from a typo's "cannot find";
+* go-to-definition on an import jumps THROUGH to the foreign export;
+* types flow through imports (`@type(ref)` on the import production);
+* and `@export` is an incrementality contract: a file's signature is
+  its export surface, so editing a private definition can never
+  re-resolve another file.
+
+A grammar declaring neither form keeps the open world: every top-level
+name is ambiently visible to every file.
+
+Not yet built: named module scopes within a file, qualified paths
+(`a::b::c`), re-exports, and visibility levels — the named next steps.
 
 ---
 

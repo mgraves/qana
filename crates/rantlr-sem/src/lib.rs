@@ -48,6 +48,12 @@ pub enum RefKind {
     /// A callee position — resolves for navigation, never diagnosed
     /// (the demo host provides functions).
     Call,
+    /// An IMPORT position (`@import`): resolves against other files'
+    /// EXPORTS only — never against local scopes (so `use x;` with
+    /// `@def` on the same token cannot bind to itself). Unresolved
+    /// imports are diagnosed; imports of existing-but-private names are
+    /// diagnosed separately ("not exported").
+    Import,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -67,6 +73,19 @@ pub struct BindingConfig {
     /// (declaration languages) resolve forward anywhere; the default
     /// (false) is sequential definition-before-use with shadowing.
     pub unordered: bool,
+    /// Productions whose definitions are EXPORTED from their file
+    /// (`@export`). Declaring any export or import activates the module
+    /// tier: cross-file resolution then goes through imports only, and
+    /// only exported names are importable. A grammar that declares
+    /// neither keeps the open world (every top-level name ambient).
+    pub exports: Vec<(u16, u16)>,
+}
+
+impl BindingConfig {
+    /// Is the module tier declared? (Any `@export` or `@import`.)
+    pub fn module_tier(&self) -> bool {
+        !self.exports.is_empty() || self.refs.iter().any(|r| r.3 == RefKind::Import)
+    }
 }
 
 /// Compose a guest language's binding into a host's over a composed
@@ -98,6 +117,9 @@ pub fn compose_binding(
             unordered,
             barrier,
         ));
+    }
+    for &(nt, prod) in &guest.exports {
+        out.exports.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset));
     }
     out.unordered = host.unordered;
     out
@@ -134,6 +156,8 @@ pub struct Def {
     /// Walk order — definition-before-use.
     pub order: u32,
     pub top_level: bool,
+    /// Declared `@export` (meaningful when the module tier is on).
+    pub exported: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,6 +285,8 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
     let depths: Vec<u32> = (0..f.scope_parents.len() as u32).map(|s| f.scope_depth(s)).collect();
     for r in &f.refs {
         let mut best: Option<(u32, u32, u32)> = None; // (depth, order, idx)
+        // Imports resolve against other files' exports ONLY.
+        if r.kind != RefKind::Import {
         if let Some(cands) = by_name.get(r.name.as_str()) {
             for &i in cands {
                 let d = &f.defs[i as usize];
@@ -276,6 +302,7 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
                     }
                 }
             }
+        }
         }
         f.local.push(match best {
             Some((_, _, i)) => LocalRes::Def(i),
@@ -337,6 +364,7 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
                     scope,
                     order: *order,
                     top_level: scope == 0,
+                    exported: cfg.exports.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
                 });
             }
         }
@@ -385,9 +413,12 @@ enum Classified {
 #[derive(Debug, PartialEq, Eq)]
 struct ItemRes {
     targets: Vec<Classified>,
-    /// Indices of unresolved VARIABLE refs (precomputed so the
+    /// Indices of unresolved VARIABLE/IMPORT refs (precomputed so the
     /// per-keystroke diagnostics pass touches nothing else).
     unresolved: Vec<u32>,
+    /// Refs naming something that EXISTS in another file but is not
+    /// exported — the module tier's access diagnostic.
+    private: Vec<u32>,
 }
 
 /// A file's exported signature: sorted top-level definition names. The
@@ -435,7 +466,7 @@ struct FileEntry {
     /// Top-level name → occurrence count, maintained EXACTLY from the
     /// per-edit fragment delta — membership answers in O(1), and an
     /// unchanged signature is proven in O(edit).
-    top_counts: HashMap<String, i64>,
+    top_counts: HashMap<String, (i64, i64)>,
     sig_dirty: bool,
     /// name → top-level def sites [(item idx, def idx in fragment)], in
     /// item order — the query-time POSITION index, built lazily per
@@ -591,8 +622,10 @@ impl SemDb {
                     let f = Arc::new(build_fragment(&node, cfg));
                     fragments_computed += 1;
                     for &di in &f.top_defs {
-                        let n = &f.defs[di as usize].name;
-                        *e.top_counts.entry(n.clone()).or_insert(0) += 1;
+                        let d = &f.defs[di as usize];
+                        let c = e.top_counts.entry(d.name.clone()).or_insert((0, 0));
+                        c.0 += 1;
+                        c.1 += d.exported as i64;
                         e.sig_dirty = true;
                     }
                     e.frag_cache.insert(ptr, (node.clone(), f.clone()));
@@ -607,12 +640,13 @@ impl SemDb {
             if !new_mid.contains(&slot.ptr) {
                 if let Some((_, f)) = e.frag_cache.remove(&slot.ptr) {
                     for &di in &f.top_defs {
-                        let n = &f.defs[di as usize].name;
-                        if let Some(c) = e.top_counts.get_mut(n) {
-                            *c -= 1;
+                        let d = &f.defs[di as usize];
+                        if let Some(c) = e.top_counts.get_mut(&d.name) {
+                            c.0 -= 1;
+                            c.1 -= d.exported as i64;
                             e.sig_dirty = true;
-                            if *c <= 0 {
-                                e.top_counts.remove(n);
+                            if c.0 <= 0 {
+                                e.top_counts.remove(&d.name);
                             }
                         }
                     }
@@ -630,11 +664,24 @@ impl SemDb {
     /// move on body edits — and body edits never even mark it dirty.
     fn ensure_signature(&mut self, uri: &str) {
         let rev = self.files[uri].tree_rev;
-        let e = self.files.get_mut(uri).unwrap();
-        if !e.sig_dirty && e.signature.is_some() {
-            return;
+        {
+            let e = &self.files[uri];
+            if !e.sig_dirty && e.signature.is_some() {
+                return;
+            }
         }
-        let mut names: Vec<String> = e.top_counts.keys().cloned().collect();
+        // Module tier on: the signature is the EXPORT surface — a
+        // private def cannot appear in it, so editing one can never
+        // invalidate another file's resolutions. `pub` is an
+        // incrementality contract.
+        let tier = self.cfg.module_tier();
+        let e = self.files.get_mut(uri).unwrap();
+        let mut names: Vec<String> = e
+            .top_counts
+            .iter()
+            .filter(|(_, c)| if tier { c.1 > 0 } else { c.0 > 0 })
+            .map(|(n, _)| n.clone())
+            .collect();
         names.sort();
         let sig = Arc::new(names);
         match &mut e.signature {
@@ -685,6 +732,7 @@ impl SemDb {
         // top-level NAME sequences (ordered), or the whole file's
         // (unordered — every item sees the same environment).
         let unordered = self.cfg.unordered;
+        let tier = self.cfg.module_tier();
         let e = &self.files[uri];
         let n_items = e.items.len();
         let mut env_fps = Vec::with_capacity(n_items);
@@ -737,32 +785,55 @@ impl SemDb {
             if !hit {
                 let mut targets = Vec::with_capacity(slot.frag.refs.len());
                 let mut unresolved = Vec::new();
+                let mut private = Vec::new();
                 for (ri, r) in slot.frag.refs.iter().enumerate() {
                     let t = match slot.frag.local[ri] {
                         LocalRes::Def(d) => Classified::Local(d),
                         LocalRes::Contained => Classified::Unresolved,
                         LocalRes::Escape => {
-                            if env.contains(r.name.as_str()) {
+                            if r.kind != RefKind::Import && env.contains(r.name.as_str()) {
                                 Classified::Top
-                            } else {
-                                let foreign = other_uris.iter().find(|u| {
+                            } else if r.kind == RefKind::Import || !tier {
+                                // Cross-file: imports always may; plain
+                                // refs only in the open world (tier off).
+                                // Tier on ⇒ only EXPORTED names import.
+                                let visible = other_uris.iter().find(|u| {
                                     self.files[u.as_str()]
                                         .top_counts
-                                        .contains_key(r.name.as_str())
+                                        .get(r.name.as_str())
+                                        .is_some_and(|c| if tier { c.1 > 0 } else { c.0 > 0 })
                                 });
-                                match foreign {
+                                match visible {
                                     Some(u) => Classified::Foreign(u.clone()),
-                                    None => Classified::Unresolved,
+                                    None => {
+                                        // Exists somewhere but private?
+                                        let hidden = tier
+                                            && other_uris.iter().any(|u| {
+                                                self.files[u.as_str()]
+                                                    .top_counts
+                                                    .get(r.name.as_str())
+                                                    .is_some_and(|c| c.0 > 0)
+                                            });
+                                        if hidden {
+                                            private.push(ri as u32);
+                                        }
+                                        Classified::Unresolved
+                                    }
                                 }
+                            } else {
+                                Classified::Unresolved
                             }
                         }
                     };
-                    if r.kind == RefKind::Var && t == Classified::Unresolved {
+                    if matches!(r.kind, RefKind::Var | RefKind::Import)
+                        && t == Classified::Unresolved
+                        && !private.last().is_some_and(|&p| p == ri as u32)
+                    {
                         unresolved.push(ri as u32);
                     }
                     targets.push(t);
                 }
-                computed.push((k, Arc::new(ItemRes { targets, unresolved })));
+                computed.push((k, Arc::new(ItemRes { targets, unresolved, private })));
                 new_resolves += 1;
             }
             if !unordered {
@@ -812,10 +883,20 @@ impl SemDb {
         }
     }
 
-    /// A foreign file's export site for `name` (its own last binding).
+    /// A foreign file's export site for `name` (its own last binding;
+    /// module tier on ⇒ exported bindings only).
     fn export_site(&mut self, uri: &str, name: &str) -> Option<(u32, u32)> {
+        let tier = self.cfg.module_tier();
         self.ensure_top_index(uri);
-        self.files[uri].top_index.as_ref().unwrap().get(name)?.last().copied()
+        let e = &self.files[uri];
+        let sites = e.top_index.as_ref().unwrap().get(name)?;
+        sites
+            .iter()
+            .rev()
+            .find(|&&(i, di)| {
+                !tier || e.items[i as usize].frag.defs[di as usize].exported
+            })
+            .copied()
     }
 
     fn abs_def_span(&self, uri: &str, item: u32, def: u32) -> (u32, u32) {
@@ -839,9 +920,20 @@ impl SemDb {
         let k = self.item_at(uri, offset)?;
         let slot = &self.files[uri].items[k as usize];
         let rel = offset - slot.base_off;
-        if let Some(d) = slot.frag.defs.iter().find(|d| d.span.0 <= rel && rel < d.span.1) {
-            let span = (slot.base_off + d.span.0, slot.base_off + d.span.1);
-            return Some((uri.to_string(), span));
+        // `use scale;` makes one token BOTH the local binding (@def) and
+        // the import reference (@import). Navigation jumps THROUGH: the
+        // import ref wins over the def-at-cursor, so go-to-definition
+        // lands on the foreign export (Rust's `use` behavior).
+        let import_here = slot
+            .frag
+            .refs
+            .iter()
+            .any(|r| r.kind == RefKind::Import && r.span.0 <= rel && rel < r.span.1);
+        if !import_here {
+            if let Some(d) = slot.frag.defs.iter().find(|d| d.span.0 <= rel && rel < d.span.1) {
+                let span = (slot.base_off + d.span.0, slot.base_off + d.span.1);
+                return Some((uri.to_string(), span));
+            }
         }
         let ri = slot.frag.refs.iter().position(|r| r.span.0 <= rel && rel < r.span.1)?;
         let name = slot.frag.refs[ri].name.clone();
@@ -963,6 +1055,26 @@ impl SemDb {
         out
     }
 
+    /// The module tier's access errors: references (imports, usually)
+    /// naming something that exists in another file but is NOT
+    /// exported. Empty when the grammar declares no module tier.
+    pub fn not_exported(&mut self, uri: &str) -> Vec<(String, (u32, u32))> {
+        self.ensure_resolved(uri);
+        let e = &self.files[uri];
+        let mut out = Vec::new();
+        for slot in &e.items {
+            let res = &slot.res.as_ref().unwrap().2;
+            for &ri in &res.private {
+                let r = &slot.frag.refs[ri as usize];
+                out.push((
+                    r.name.clone(),
+                    (slot.base_off + r.span.0, slot.base_off + r.span.1),
+                ));
+            }
+        }
+        out
+    }
+
     /// Names visible at an offset (innermost scopes first, then exports
     /// of other files) — the binding-aware completion source.
     pub fn names_in_scope(&mut self, uri: &str, offset: u32) -> Vec<String> {
@@ -1020,6 +1132,7 @@ impl SemDb {
                     scope: remap(d.scope),
                     order: base_order + d.order,
                     top_level: d.top_level,
+                    exported: d.exported,
                 });
             }
             for r in &slot.frag.refs {

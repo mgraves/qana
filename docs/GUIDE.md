@@ -343,6 +343,34 @@ list-shaped children stay untyped.
 
 ---
 
+## The module tier: imports and exports, declared
+
+Like binding and types, the module system is declared, not predefined.
+[examples/modules](../examples/modules/modlang.rg) makes a
+Rust-flavored one from two annotations — `@export` (the `pub`
+productions) and `@import` (the `use` productions):
+
+```
+| UseDecl:    "use" name:IDENT ";" @def(name) @import(name) @type(ref)
+| PubFnDecl:  "pub" "fn" name:IDENT t:fn_tail @def(name) @export @type(def, t)
+```
+
+Declaring either activates strict semantics: private by default,
+cross-file only through imports, and a dedicated diagnostic when an
+import names something real but private:
+
+```text
+error: `secret` exists but is not exported by its file
+```
+
+Types flow through the import chain, go-to-definition jumps through a
+`use` into the exporting file, and `pub` doubles as an incrementality
+contract — editing a private definition re-resolves nothing anywhere
+else (gated by counter). A grammar that declares neither form keeps
+the open world.
+
+---
+
 ## In an editor
 
 The VS Code extension is a thin client over `rantlr-lsp`. It serves two

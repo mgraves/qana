@@ -426,6 +426,42 @@ fn declared_type_errors_publish_and_heal() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The module tier over the wire: importing a private name publishes
+/// the dedicated access diagnostic (severity 1), distinct from
+/// "cannot find".
+#[test]
+fn module_access_errors_publish() {
+    let dir = std::env::temp_dir().join(format!("rantlr-lsp-mod-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    const MODLANG: &str = include_str!("../../../examples/modules/modlang.rg");
+    std::fs::write(dir.join("chartlang.rg"), MODLANG).unwrap();
+
+    let mut s = Server::new();
+    s.root = Some(dir.clone());
+    init(&mut s);
+    // lib defines a private `secret`; app imports it.
+    s.handle(&json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": "file:///lib.ml", "text": "let secret = 1;\n", "version": 1}}
+    }));
+    let out = s.handle(&json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": "file:///app.ml", "text": "use secret;\n", "version": 1}}
+    }));
+    let diag = out
+        .iter()
+        .filter(|m| m["method"] == "textDocument/publishDiagnostics")
+        .filter(|m| m.pointer("/params/uri").and_then(|u| u.as_str()) == Some("file:///app.ml"))
+        .filter_map(|m| m.pointer("/params/diagnostics"))
+        .flat_map(|d| d.as_array().unwrap())
+        .find(|d| d["message"].as_str().unwrap_or("").contains("not exported"))
+        .cloned()
+        .expect("access diagnostic published");
+    assert_eq!(diag["severity"], 1);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Bring your own language: the grammar file does NOT have to be called
 /// `chartlang.rg`. Any single `.rg` in the workspace root is the
 /// language definition, and it hot-reloads under its own name.

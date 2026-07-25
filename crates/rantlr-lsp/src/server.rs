@@ -443,6 +443,7 @@ impl Server {
                 // Semantic layer: unresolved variable reads (warnings)
                 // and declared-type-tier mismatches (errors).
                 let unresolved = self.sem.unresolved(uri);
+                let not_exported = self.sem.not_exported(uri);
                 let type_diags = self.sem.types(uri).diags;
                 let doc = self.docs.get(uri).unwrap();
                 for (name, span) in unresolved {
@@ -450,6 +451,13 @@ impl Server {
                         "range": range_json(doc, span),
                         "severity": 2,
                         "message": format!("cannot find `{name}`")
+                    }));
+                }
+                for (name, span) in not_exported {
+                    diags.push(json!({
+                        "range": range_json(doc, span),
+                        "severity": 1,
+                        "message": format!("`{name}` exists but is not exported by its file")
                     }));
                 }
                 for d in type_diags {

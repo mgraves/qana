@@ -223,6 +223,26 @@ fn session_for<'a>(lang: &'a Lang, text: &str) -> IncSession<'a> {
     IncSession::new(&lang.lexer, &lang.def.sg, &lang.tables, text).expect("parsing is total")
 }
 
+
+/// Load every sibling document with the same extension into the
+/// semantic db — imports and cross-file types need the whole world.
+fn load_siblings(lang: &Lang, db: &mut SemDb, doc_path: &str) {
+    let path = std::path::Path::new(doc_path);
+    let (Some(dir), Some(ext)) = (path.parent(), path.extension()) else { return };
+    // A bare filename's parent is the EMPTY path; read_dir needs ".".
+    let dir = if dir.as_os_str().is_empty() { std::path::Path::new(".") } else { dir };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.extension() == Some(ext) && p != path && p.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&p) {
+                let session = session_for(lang, &text);
+                db.set_tree(p.to_str().unwrap_or_default(), session.tree().expect("total").clone());
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // new — scaffold
 // ---------------------------------------------------------------------------
@@ -345,6 +365,23 @@ fn cmd_check(args: &Args) {
             def.binding.refs.len(),
             def.binding.scopes.len()
         ),
+    );
+    row(
+        "module tier",
+        &{
+            let imports =
+                def.binding.refs.iter().filter(|r| r.3 == rantlr_sem::RefKind::Import).count();
+            if def.binding.exports.is_empty() && imports == 0 {
+                format!("none declared  {}", dim("(@export/@import — open world)"))
+            } else {
+                format!(
+                    "{} exporting production(s), {} import form(s)  {}",
+                    def.binding.exports.len(),
+                    imports,
+                    dim("(strict)")
+                )
+            }
+        },
     );
     row(
         "type tier",
@@ -493,6 +530,7 @@ fn cmd_defs(args: &Args) {
     let s = Src::new(doc_path, &text);
 
     let mut db = SemDb::new(lang.def.binding.clone());
+    load_siblings(&lang, &mut db, doc_path);
     db.set_tree(doc_path, session.tree().expect("total").clone());
     let syms = db.symbols(doc_path);
     let unresolved: HashSet<(String, (u32, u32))> = db.unresolved(doc_path).into_iter().collect();
@@ -501,13 +539,22 @@ fn cmd_defs(args: &Args) {
     if syms.defs.is_empty() {
         println!("  {}", dim("none — add @def(name) to a rule alternative"));
     }
+    let tier = lang.def.binding.module_tier();
     for d in &syms.defs {
         let (line, col) = s.line_col(d.span.0);
         let where_ = if d.top_level { "top level" } else { "nested scope" };
+        let vis = if !tier || !d.top_level {
+            String::new()
+        } else if d.exported {
+            green("pub")
+        } else {
+            dim("private")
+        };
         println!(
-            "  {:<24} {:<12} {}",
+            "  {:<24} {:<12} {:<10} {}",
             green(&d.name),
             dim(where_),
+            vis,
             dim(&format!("{line}:{col}"))
         );
     }
@@ -521,10 +568,11 @@ fn cmd_defs(args: &Args) {
         let (line, col) = s.line_col(r.span.0);
         let target = db.definition(doc_path, r.span.0);
         let status = match &target {
-            Some((_, dspan)) => {
+            Some((duri, dspan)) if duri == doc_path => {
                 let (dl, dc) = s.line_col(dspan.0);
                 green(&format!("→ {dl}:{dc}"))
             }
+            Some((duri, _)) => green(&format!("→ {duri}")),
             None if unresolved.contains(&(r.name.clone(), r.span)) => red("unresolved"),
             // The name exists somewhere in the file but is not in scope
             // at this point — declared later in an ordered language, or
@@ -534,12 +582,29 @@ fn cmd_defs(args: &Args) {
         println!("  {:<24} {:<12} {}", cyan(&r.name), dim(&format!("{line}:{col}")), status);
     }
 
+    let hidden = db.not_exported(doc_path);
+    if !hidden.is_empty() {
+        println!();
+        for (name, span) in &hidden {
+            render::diagnostic(
+                &s,
+                1,
+                *span,
+                &format!("`{name}` exists but is not exported by its file"),
+            );
+        }
+    }
+
     let n_unres = unresolved.len();
     println!();
-    if n_unres == 0 {
-        println!("{} every reference resolves", green("✓"));
-    } else {
-        println!("{} {n_unres} unresolved reference(s)", red("✗"));
+    match (n_unres, hidden.len()) {
+        (0, 0) => println!("{} every reference resolves", green("✓")),
+        (u, 0) => println!("{} {u} unresolved reference(s)", red("✗")),
+        (0, h) => println!("{} {h} access error(s)", red("✗")),
+        (u, h) => println!("{} {u} unresolved reference(s), {h} access error(s)", red("✗")),
+    }
+    if !hidden.is_empty() {
+        std::process::exit(1);
     }
 }
 
@@ -564,6 +629,7 @@ fn cmd_types(args: &Args) {
 
     let mut db = SemDb::new(lang.def.binding.clone());
     db.set_types(lang.def.types.clone());
+    load_siblings(&lang, &mut db, doc_path);
     db.set_tree(doc_path, session.tree().expect("total").clone());
     let report = db.types(doc_path);
 

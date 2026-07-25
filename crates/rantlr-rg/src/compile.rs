@@ -970,10 +970,14 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
             let prod = sg.prod_named(nt, &alt.label, rhs) as u16;
             prod_spans.push(alt.label_span);
 
-            // `@type` is resolved AFTER the other attributes: its `def`
-            // and `ref` forms read the binding entries `@def`/`@ref`
-            // create, and attribute order must not matter.
+            // `@type`, `@export`, and `@import` are resolved AFTER the
+            // other attributes: they read the binding entries `@def`/
+            // `@ref` create, and attribute order must not matter.
+            // (`@import` runs before `@type` so `@type(ref)` can flow a
+            // foreign type through an import.)
             let mut pending_type_ir: Vec<usize> = Vec::new();
+            let mut pending_export: Option<(u32, u32)> = None;
+            let mut pending_import: Option<usize> = None;
 
             for (ai, a) in alt.attrs.iter().enumerate() {
                 let pos_of = |d: &mut Vec<RgDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
@@ -1064,6 +1068,20 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                     // surface, so `@prec` lexes as a keyword and can
                     // never reach an attribute name.
                     "type" => pending_type_ir.push(ai),
+                    "export" => {
+                        if !a.args.is_empty() {
+                            error(d, a.name_span, "@export takes no arguments".into());
+                        } else if pending_export.replace(a.name_span).is_some() {
+                            error(d, a.name_span, "duplicate @export".into());
+                        }
+                    }
+                    "import" => {
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@import takes one label argument".into());
+                        } else if pending_import.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @import".into());
+                        }
+                    }
                     "precedence" => {
                         if a.args.len() != 1 {
                             error(d, a.name_span, "@precedence takes one token argument".into());
@@ -1089,9 +1107,47 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         d,
                         a.name_span,
                         format!(
-                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence, @type)"
+                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence, @type, @export, @import)"
                         ),
                     ),
+                }
+            }
+
+            // ---- the module tier: `@export` / `@import` ----
+            if let Some(span) = pending_export {
+                if binding.defs.iter().any(|e| e.0 == nt && e.1 == prod) {
+                    binding.exports.push((nt, prod));
+                } else {
+                    error(d, span, "@export requires @def on the same alternative".into());
+                }
+            }
+            if let Some(ai) = pending_import {
+                let a = &alt.attrs[ai];
+                let arg = &a.args[0];
+                match positions.get(arg.0.as_str()) {
+                    None => error(
+                        d,
+                        arg.1,
+                        format!("no symbol labeled `{}` in this alternative", arg.0),
+                    ),
+                    Some(&k) => match sg.prods[prod as usize].rhs.get(k) {
+                        Some(Sym::T(_)) => {
+                            if binding.refs.iter().any(|r| r.0 == nt && r.1 == prod) {
+                                error(
+                                    d,
+                                    a.name_span,
+                                    "at most one reference per alternative (@ref or @import)".into(),
+                                );
+                            } else {
+                                binding.refs.push((nt, prod, k, RefKind::Import));
+                            }
+                        }
+                        _ => error(
+                            d,
+                            arg.1,
+                            format!("`{}` labels a rule — the imported name must be a token", arg.0),
+                        ),
+                    },
                 }
             }
 

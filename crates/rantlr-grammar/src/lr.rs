@@ -277,44 +277,133 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
         set
     };
 
-    // ---- canonical collection ----
-    let start_kernel: BTreeSet<Item> = [(0u16, 0u16, EOF)].into_iter().collect();
-    let mut states: Vec<BTreeSet<Item>> = vec![closure(&start_kernel)];
-    let mut index: HashMap<BTreeSet<Item>, u16> = HashMap::new();
-    index.insert(states[0].clone(), 0);
-    // transitions[state] : Sym -> state
+    // ---- collection with PAGER MERGING (weak compatibility) ----
+    //
+    // Canonical LR(1) keys states by their full item sets, which
+    // explodes on C-sized grammars (this very wall was found by the C
+    // exerciser — the first `check` never returned). Pager's method
+    // keys states by their kernel CORES and merges lookaheads whenever
+    // the merge provably cannot create a conflict that neither source
+    // had: same-core states with kernel lookahead sets K and L are
+    // WEAKLY COMPATIBLE iff for every item pair i≠j,
+    //   (K_i ∩ L_j = ∅ ∧ K_j ∩ L_i = ∅) ∨ K_i ∩ K_j ≠ ∅ ∨ L_i ∩ L_j ≠ ∅.
+    // Merging only grows lookahead sets, so propagation is a monotone
+    // worklist; parses are unchanged, and if a grammar ever does
+    // surface a merge-induced conflict, certification REPORTS it with a
+    // counterexample rather than misparsing — the envelope stays honest.
+    type Kernel = std::collections::BTreeMap<(u16, u16), BTreeSet<TokenId>>;
+    let mut start_kernel: Kernel = Kernel::new();
+    start_kernel.insert((0, 0), [EOF].into_iter().collect());
+    let mut kernels: Vec<Kernel> = vec![start_kernel];
+    let mut core_index: HashMap<Vec<(u16, u16)>, Vec<u16>> = HashMap::new();
+    core_index.insert(vec![(0, 0)], vec![0]);
     let mut transitions: Vec<HashMap<Sym, u16>> = vec![HashMap::new()];
 
-    let mut wi = 0usize;
-    while wi < states.len() {
-        let cur = states[wi].clone();
-        // Group by next symbol.
-        let mut by_sym: HashMap<Sym, BTreeSet<Item>> = HashMap::new();
+    let weakly_compatible = |k: &Kernel, l: &Kernel| -> bool {
+        let ks: Vec<&BTreeSet<TokenId>> = k.values().collect();
+        let ls: Vec<&BTreeSet<TokenId>> = l.values().collect();
+        for i in 0..ks.len() {
+            for j in (i + 1)..ks.len() {
+                let cross_free = ks[i].is_disjoint(ls[j]) && ks[j].is_disjoint(ls[i]);
+                if !cross_free && ks[i].is_disjoint(ks[j]) && ls[i].is_disjoint(ls[j]) {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+
+    let mut queue: VecDeque<u16> = VecDeque::from([0]);
+    let mut in_queue = vec![true];
+    let mut processed = vec![false];
+    while let Some(s) = queue.pop_front() {
+        in_queue[s as usize] = false;
+        // Expand this state's kernel to full LR(1) items.
+        let expanded: BTreeSet<Item> = kernels[s as usize]
+            .iter()
+            .flat_map(|(&(p, dot), las)| las.iter().map(move |&la| (p, dot, la)))
+            .collect();
+        let cur = closure(&expanded);
+        // Group successor kernels by next symbol.
+        let mut by_sym: std::collections::BTreeMap<Sym, Kernel> = std::collections::BTreeMap::new();
         for &(p, dot, la) in &cur {
             let rhs = &aug[p as usize].1;
             if (dot as usize) < rhs.len() {
-                by_sym.entry(rhs[dot as usize]).or_default().insert((p, dot + 1, la));
+                by_sym
+                    .entry(rhs[dot as usize])
+                    .or_default()
+                    .entry((p, dot + 1))
+                    .or_default()
+                    .insert(la);
             }
         }
-        let mut syms: Vec<Sym> = by_sym.keys().copied().collect();
-        syms.sort();
-        for sym in syms {
-            let kernel = &by_sym[&sym];
-            let full = closure(kernel);
-            let id = match index.get(&full) {
-                Some(&id) => id,
+        for (sym, target) in by_sym {
+            let core: Vec<(u16, u16)> = target.keys().copied().collect();
+            let candidates = core_index.entry(core).or_default();
+            let mut chosen: Option<u16> = None;
+            for &cand in candidates.iter() {
+                if weakly_compatible(&kernels[cand as usize], &target) {
+                    chosen = Some(cand);
+                    break;
+                }
+            }
+            let id = match chosen {
+                Some(cand) => {
+                    // Merge: union lookaheads; regrown processed states
+                    // re-propagate.
+                    let mut grew = false;
+                    let dest = &mut kernels[cand as usize];
+                    for (core_item, las) in target {
+                        let slot = dest.entry(core_item).or_default();
+                        for la in las {
+                            grew |= slot.insert(la);
+                        }
+                    }
+                    // Re-propagate on ANY growth of a state that is not
+                    // already queued — including the state currently
+                    // being processed (a left-recursive construct can
+                    // merge into ITSELF mid-expansion; requiring
+                    // `processed` here leaked exactly that case, caught
+                    // by the incremental fuzz differential).
+                    if grew && !in_queue[cand as usize] {
+                        queue.push_back(cand);
+                        in_queue[cand as usize] = true;
+                    }
+                    cand
+                }
                 None => {
-                    let id = states.len() as u16;
-                    index.insert(full.clone(), id);
-                    states.push(full);
+                    let id = kernels.len() as u16;
+                    kernels.push(target);
                     transitions.push(HashMap::new());
+                    in_queue.push(false);
+                    processed.push(false);
+                    // Re-borrow: the entry above may have been moved by
+                    // the pushes only logically — re-register the id.
+                    core_index
+                        .get_mut(&kernels[id as usize].keys().copied().collect::<Vec<_>>())
+                        .expect("core registered")
+                        .push(id);
+                    queue.push_back(id);
+                    in_queue[id as usize] = true;
                     id
                 }
             };
-            transitions[wi].insert(sym, id);
+            transitions[s as usize].insert(sym, id);
         }
-        wi += 1;
+        processed[s as usize] = true;
     }
+
+    // Final closed item sets for the action/conflict phase.
+    let states: Vec<BTreeSet<Item>> = kernels
+        .iter()
+        .map(|k| {
+            let expanded: BTreeSet<Item> = k
+                .iter()
+                .flat_map(|(&(p, dot), las)| las.iter().map(move |&la| (p, dot, la)))
+                .collect();
+            closure(&expanded)
+        })
+        .collect();
 
     // ---- ACTION / GOTO with precedence resolution ----
     let mut action: Vec<HashMap<TokenId, LrAct>> = vec![HashMap::new(); states.len()];

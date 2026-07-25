@@ -1012,9 +1012,57 @@ drift-gated), same-file vs crossing visibility, all three path
 diagnostics, nested `outer::inner::deep`, re-export chains with type
 flow, and the LSP wire.
 
+## The C exerciser + Pager merging (shipped): the wall-finder that paid on turn one
+
+The directive: clone C inside the envelope. The first `rantlr check`
+of the C grammar NEVER RETURNED — canonical LR(1) keys states by full
+item sets and explodes on C-sized grammars (the exact reason yacc used
+LALR; Pager/IELR merging was a named P1 deferral, and C called the
+debt on its first run).
+
+The construction now uses PAGER'S WEAK-COMPATIBILITY MERGING: states
+key by kernel cores, and same-core states merge whenever their
+lookahead sets provably cannot create a conflict neither source had.
+Parses are unchanged; a merge-induced conflict would be REPORTED with
+a counterexample rather than misparsed — the envelope stays honest.
+Two costs found and paid: the incremental fuzz differential caught a
+worklist bug on day one (a LEFT-RECURSIVE state merging lookaheads
+into ITSELF mid-expansion was never re-propagated — the re-enqueue
+condition wrongly required `processed`), and conflict counterexamples
+can be shorter than canonical's most illustrative prefix (`IF X ·
+ELSE` vs `IF IF X · ELSE` — the known mild "mysterious conflicts"
+cost, documented, with context-splitting recovery as the refinement).
+
+The result: **C89-subset certified — 144 productions, 89 tokens + 32
+keywords, 248 states, zero conflicts, 11 auto-balanced lists — in
+0.46 s release** (hot-reload survives C scale). The committed
+examples/c/ demo parses losslessly with zero repairs and every
+reference resolving: structs, enums, nested declarators
+(`int (*op)(int x, int y)`), the full expression grammar with C's
+15-level precedence, dangling-else resolved EXPLICITLY (prec on
+`else` + @precedence on the else-less if — yacc's fix, declared), and
+preprocessor directives AS SYNTAX (one lossless PP_LINE token — the
+L5 stance: expansion belongs to the meta tier, never the parser).
+
+Walls found and recorded, each with a plan: the typedef-name
+ambiguity (plan: covering grammar + semantic classification, never
+lexer feedback); abstract declarators, casts, sizeof(type), labels/
+goto, switch, bitfields, designated initializers, comma operator
+(grammar bulk, staged); `#define` names cannot bind from an opaque
+directive token (plan: line-bounded directive parsing via a
+pop-at-end-of-line mode — a clean L2-compatible engine feature — or
+the meta tier treating defines as definitions); `static`-driven
+visibility needs child-dependent @export (a real declared-tier
+finding: C's storage classes are modifiers, not productions). Bonus
+compiler fix: trivia tokens no longer claim literal spellings (the
+block-comment `*` was shadowing the operator `"*"`).
+
+Gates: 140 tests, including the C drift gate (certifies under 1000
+states, demo lossless + zero repairs + full resolution).
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 139 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 140 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

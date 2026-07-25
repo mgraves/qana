@@ -612,7 +612,11 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
         }
         token_ids.insert(t.name.clone(), id);
         token_spans.push(t.name_span);
-        if let Pat::Lit(s) = &pat {
+        // Trivia tokens never appear in productions, so they must not
+        // claim literal spellings — a block-comment-mode `/\*/` must
+        // not shadow the operator `"*"` (found by the C exerciser).
+        let is_trivia = t.attrs.iter().any(|a| a.name == "trivia");
+        if let (Pat::Lit(s), false) = (&pat, is_trivia) {
             lit_text.entry(s.clone()).or_insert(id);
         }
     }

@@ -316,3 +316,65 @@ int len(node_t *n) { return node + n->val; }\n";
     let unres: Vec<String> = db3.unresolved("b").into_iter().map(|(n, _)| n).collect();
     assert_eq!(unres, ["node"], "missing tag diagnosed");
 }
+
+/// C wall 5: labels and goto. Two prior walls made this one cheap:
+/// the statement tier keeps `:` out of the bare name's lookahead, so
+/// `name: stmt` shifts uncontested, and the hoisted label namespace
+/// (`@ns(label)`) makes FORWARD gotos resolve. The residue is scoping:
+/// labels are block-scoped here, not C's function-scoped, so a goto
+/// cannot jump INTO a nested block — pinned below.
+#[test]
+fn labels_and_goto_navigate() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, C_RG);
+    let (lexer, tables) = certify(&out.def).unwrap();
+
+    // Forward and backward gotos, a value sharing the label's name,
+    // and the ternary keeping its `:` — all in one function.
+    let doc = "\
+int f(int retry) {\n\
+    int acc = 0;\n\
+retry:\n\
+    acc = retry > 0 ? acc + retry : acc;\n\
+    retry -= 1;\n\
+    if (retry > 0)\n\
+        goto retry;\n\
+    if (acc > 9)\n\
+        goto done;\n\
+    acc = 0;\n\
+done:\n\
+    return acc;\n\
+}\n";
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, doc).unwrap();
+    assert!(session.last_repairs.is_empty(), "labels parse clean: {:?}", session.last_repairs);
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_tree("d", session.tree().unwrap().clone());
+    assert!(db.unresolved("d").is_empty(), "{:?}", db.unresolved("d"));
+
+    // `goto retry;` navigates to the LABEL, not the int parameter —
+    // the namespaces partition.
+    let goto_at = doc.find("goto retry").unwrap() + "goto ".len();
+    let (_, dspan) = db.definition("d", goto_at as u32).expect("goto resolves");
+    assert_eq!(dspan.0 as usize, doc.find("retry:").unwrap(), "…to the label");
+
+    // The FORWARD goto resolves too (hoisted namespace), landing on
+    // the later label.
+    let fwd_at = doc.find("goto done").unwrap() + "goto ".len();
+    let (_, fspan) = db.definition("d", fwd_at as u32).expect("forward goto resolves");
+    assert_eq!(fspan.0 as usize, doc.find("done:").unwrap());
+
+    // And the VALUE `retry` still navigates to the parameter.
+    let val_at = doc.find("retry > 0").unwrap();
+    let (_, vspan) = db.definition("d", val_at as u32).expect("value resolves");
+    assert_eq!(vspan.0 as usize, doc.find("int retry").unwrap() + "int ".len());
+
+    // PINNED residue: labels are block-scoped, so a goto cannot jump
+    // INTO a nested block. Parses clean; resolves as "cannot find".
+    let into = "int g(int x) { if (x) { inner: x += 1; } goto inner; return x; }\n";
+    let s2 = IncSession::new(&lexer, &out.def.sg, &tables, into).unwrap();
+    assert!(s2.last_repairs.is_empty(), "{:?}", s2.last_repairs);
+    let mut db2 = SemDb::new(out.def.binding.clone());
+    db2.set_tree("g", s2.tree().unwrap().clone());
+    let unres: Vec<String> = db2.unresolved("g").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(unres, ["inner"], "goto INTO a block is the pinned residue");
+}

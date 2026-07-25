@@ -1215,6 +1215,27 @@ and the incremental fingerprints fold the namespace so classification
 caches stay exact. Signatures and cross-file counts key the pair too,
 so tags export and import like any other name.
 
+## C wall 5: labels and goto — two walls' interest, collected
+
+The wall that was expected to need "default-shift semantics" cost two
+productions and zero conflicts, because two earlier walls already
+paid for it. The statement-expression tier (wall 3) keeps `:` out of
+the bare name's lookahead — a statement-leading IDENT followed by `:`
+shifts into `LabelStmt` uncontested, while `?:` ternaries keep their
+colon. And the label namespace (wall 4's `@ns(label)`, hoisted) makes
+the FORWARD goto — `goto done;` before `done:` exists — resolve, the
+same way tags forward-declare:
+
+  | LabelStmt: name:IDENT ":" stmt @def(name) @ns(label)
+  | GotoStmt:  "goto" name:IDENT ";" @ref(name) @ns(label)
+
+Gotos navigate to their labels; a parameter named `retry` and a label
+`retry:` coexist, each use landing on its own definition. The pinned
+residue is scoping: labels here are block-scoped, not C's
+function-scoped, so a goto cannot jump INTO a nested block — it
+parses clean and diagnoses as "cannot find", gated as such. 448
+states, zero conflicts.
+
 ## Status
 
 Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 144 tests (`cargo test --workspace`); the full story runs:

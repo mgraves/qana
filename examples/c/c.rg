@@ -24,8 +24,12 @@
 //    core these convergences dodge is machine-provable: ask for
 //    `sizeof "(" IDENT ptr+ ")"` and the certifier refuses with a
 //    shift/reduce counterexample on `*` (see the exerciser gate).
-//  * Labels/goto need default-shift semantics; function-like macro
-//    adjacency is space-sensitive and invisible over trivia.
+//  * Labels/goto: the statement tier keeps `:` out of the bare name's
+//    lookahead, so `name: stmt` shifts uncontested, and the hoisted
+//    label namespace makes forward gotos resolve. Labels are
+//    block-scoped (not C's function-scoped): goto INTO a nested
+//    block is the pinned residue. Function-like macro adjacency is
+//    space-sensitive and invisible over trivia (meta-tier leaning).
 //
 // Dangling else is resolved the envelope way: EXPLICITLY. `else` gets a
 // precedence, and the else-less `if` is marked lower — the classic yacc
@@ -335,6 +339,14 @@ rule stmt =
   | ExprStmt:    s_cexpr ";"
   | EmptyStmt:   ";"
   | CompoundS:   compound_stmt
+  // Labels ride BOTH campaigns at once: the statement tier keeps `:`
+  // out of the bare name's lookahead (a statement-leading IDENT
+  // followed by `:` shifts here, uncontested), and the label
+  // namespace is hoisted (@ns) so a forward `goto done;` resolves.
+  // Residue: labels are BLOCK-scoped here, not function-scoped — a
+  // goto cannot jump INTO a nested block (see the exerciser gate).
+  | LabelStmt:   name:IDENT ":" stmt @def(name) @ns(label)
+  | GotoStmt:    "goto" name:IDENT ";" @ref(name) @ns(label)
   | IfStmt:      "if" "(" cexpr ")" stmt @precedence(",")
   | IfElseStmt:  "if" "(" cexpr ")" stmt "else" stmt
   | WhileStmt:   "while" "(" cexpr ")" stmt

@@ -71,6 +71,21 @@ static unsigned long checksum(const struct point *pt) {
     return alias == 0 ? salt + width : salt * widened;
 }
 
+static int drain(int n) {
+    int acc = 0;
+retry:                        /* wall 5: labels bind (hoisted ns)   */
+    if (n > 0) {
+        acc += n;
+        n -= 2;
+        goto retry;           /* backward goto                      */
+    }
+    if (acc > LIMIT)
+        goto done;            /* FORWARD goto — resolves hoisted    */
+    acc = acc % LIMIT;
+done:
+    return acc;
+}
+
 int main(void) {
     struct point p;
     int total = 0;
@@ -102,6 +117,7 @@ int main(void) {
 
     check = checksum(&p);
     total ^= (int)check;
+    total += drain(9);
 
     return total == 0 ? -1 : ~total + sizeof big;
 }

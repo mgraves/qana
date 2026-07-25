@@ -184,6 +184,19 @@ fn escape(p: &mut P, at: usize) -> Result<Esc, PatError> {
         Some('a') => Ok(Esc::Short(Shorthand::Alpha)),
         Some('w') => Ok(Esc::Short(Shorthand::Alnum)),
         Some('s') => Ok(Esc::Short(Shorthand::Space)),
+        // A letter that is not one of the shorthands above is almost
+        // always someone reaching for a PCRE class rantlr does not have
+        // (`\S`, `\D`, `\b`, `\p{…}`). Treating it as a literal letter —
+        // the old behaviour — silently produces a token that matches the
+        // wrong thing, so refuse it and name the alternatives.
+        Some(c) if c.is_ascii_alphabetic() => err(
+            at,
+            &format!(
+                "unknown escape `\\{c}` — rantlr patterns support \\d \\a \\w \\s \\t; \
+                 use `.` for any character (newlines are excluded by L1) \
+                 or a class like `[^\"\\\\]`"
+            ),
+        ),
         Some(c) => Ok(Esc::Lit(c)),
     }
 }

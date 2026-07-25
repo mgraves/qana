@@ -1051,9 +1051,12 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             outline.entries.push(OutlineEntry { nt, prod, name_child: k, kind });
                         }
                     }
-                    "prec" => {
+                    // Spelled in full: `prec` is a reserved word of the
+                    // surface, so `@prec` lexes as a keyword and can
+                    // never reach an attribute name.
+                    "precedence" => {
                         if a.args.len() != 1 {
-                            error(d, a.name_span, "@prec takes one token argument".into());
+                            error(d, a.name_span, "@precedence takes one token argument".into());
                         } else {
                             let arg = &a.args[0];
                             let r = TokRefIr { text: arg.0.clone(), span: arg.1, is_string: arg.2 };
@@ -1076,7 +1079,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         d,
                         a.name_span,
                         format!(
-                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @prec)"
+                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence)"
                         ),
                     ),
                 }
@@ -1115,6 +1118,15 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
     }
     if ir.rules.is_empty() {
         error(d, (0, 0), "a grammar needs at least one rule".into());
+    }
+
+    // `@scope(unordered)` on the START rule means the FILE's own scope is
+    // unordered — a declaration language, where top-level names see each
+    // other regardless of order. Per-scope entries only govern ordering
+    // within one item, so the whole-file case needs the global flag too;
+    // without this the annotation on the root would silently do nothing.
+    if binding.scopes.iter().any(|&(nt, _, unordered, _)| unordered && nt == sg.start) {
+        binding.unordered = true;
     }
 
     (

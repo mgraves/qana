@@ -1,0 +1,174 @@
+//! End-to-end gates on the command surface a new user actually meets.
+//!
+//! These re-prove the toolchain's headline properties THROUGH the CLI —
+//! a scaffolded grammar certifies, an ambiguous one is refused with a
+//! counterexample, a broken document still parses losslessly, and an
+//! incremental edit agrees with a full reparse — so the quick start in
+//! `docs/GUIDE.md` cannot rot without a test going red.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+const BIN: &str = env!("CARGO_BIN_EXE_rantlr");
+
+fn scratch(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rantlr-cli-{tag}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    dir
+}
+
+fn run(args: &[&str]) -> Output {
+    Command::new(BIN)
+        .args(args)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the rantlr binary runs")
+}
+
+fn stdout(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+/// Scaffold a starter language and return (grammar, document) paths.
+fn scaffold(dir: &Path) -> (String, String) {
+    let out = run(&["new", dir.to_str().unwrap(), "--name", "Mylang", "--ext", ".my"]);
+    assert!(out.status.success(), "scaffold failed: {}", stderr(&out));
+    (
+        dir.join("mylang.rg").to_str().unwrap().to_string(),
+        dir.join("example.my").to_str().unwrap().to_string(),
+    )
+}
+
+/// The quick start's first three commands, in order.
+#[test]
+fn scaffolded_language_certifies_parses_and_resolves() {
+    let dir = scratch("new");
+    let (g, doc) = scaffold(&dir);
+
+    let check = run(&["check", &g]);
+    assert!(check.status.success(), "scaffold must certify: {}", stderr(&check));
+    let report = stdout(&check);
+    for expected in ["certified", "conflicts", "auto-balanced lists", "binding sites"] {
+        assert!(report.contains(expected), "check report missing {expected}:\n{report}");
+    }
+
+    let parse = run(&["parse", &g, &doc]);
+    assert!(parse.status.success(), "sample must parse: {}", stderr(&parse));
+    let tree = stdout(&parse);
+    assert!(tree.contains("lossless"), "parse must confirm losslessness:\n{tree}");
+    assert!(tree.contains("no errors"), "clean sample must have no errors:\n{tree}");
+    // The L4 shape is visible in the tree, not just claimed in docs.
+    assert!(tree.contains("balanced list"), "list rules must show as balanced:\n{tree}");
+
+    let defs = run(&["defs", &g, &doc]);
+    assert!(defs.status.success());
+    let binding = stdout(&defs);
+    assert!(binding.contains("every reference resolves"), "sample resolves:\n{binding}");
+    assert!(binding.contains("nested scope"), "block scope is reported:\n{binding}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The envelope's whole value: an ambiguous grammar is refused BEFORE it
+/// can ship, with an input that demonstrates the ambiguity.
+#[test]
+fn ambiguous_grammar_is_refused_with_a_counterexample() {
+    let dir = scratch("ambig");
+    let (g, _) = scaffold(&dir);
+
+    // Deleting the precedence lines makes the expression rule ambiguous.
+    let src = std::fs::read_to_string(&g).unwrap();
+    let ambiguous: String =
+        src.lines().filter(|l| !l.starts_with("prec ")).collect::<Vec<_>>().join("\n");
+    let bad = dir.join("ambiguous.rg");
+    std::fs::write(&bad, ambiguous).unwrap();
+
+    let out = run(&["check", bad.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "an ambiguous grammar must be refused");
+    let msg = stderr(&out);
+    assert!(msg.contains("conflict"), "refusal names the conflict:\n{msg}");
+    assert!(msg.contains("example input"), "refusal carries a counterexample:\n{msg}");
+    assert!(msg.contains("L3"), "refusal names the envelope rule:\n{msg}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A PCRE habit that used to compile into a silently wrong token.
+#[test]
+fn unknown_pattern_escapes_are_refused_not_silently_literal() {
+    let dir = scratch("escape");
+    let (g, _) = scaffold(&dir);
+    let src = std::fs::read_to_string(&g).unwrap();
+    let bad = dir.join("escape.rg");
+    std::fs::write(&bad, src.replace("/#.*/", "/#[\\s\\S]*/")).unwrap();
+
+    let out = run(&["check", bad.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    let msg = stderr(&out);
+    assert!(msg.contains("unknown escape"), "names the problem:\n{msg}");
+    assert!(msg.contains("\\d \\a \\w \\s \\t"), "lists what IS supported:\n{msg}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Parsing is total: a document with a syntax error still yields a
+/// complete, lossless tree — which is why an editor never goes blank.
+#[test]
+fn broken_documents_still_parse_losslessly() {
+    let dir = scratch("broken");
+    let (g, doc) = scaffold(&dir);
+    let src = std::fs::read_to_string(&doc).unwrap();
+    let broken_path = dir.join("broken.my");
+    std::fs::write(&broken_path, src.replacen("let width  = 3;", "let width  = 3", 1)).unwrap();
+
+    let out = run(&["parse", &g, broken_path.to_str().unwrap()]);
+    assert!(out.status.success(), "a broken document is still parsed");
+    let tree = stdout(&out);
+    assert!(tree.contains("lossless"), "still byte-for-byte lossless:\n{tree}");
+    assert!(tree.contains("[error]"), "the error region is marked:\n{tree}");
+    assert!(stderr(&out).contains("missing"), "and reported: {}", stderr(&out));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Incremental reparse must agree with batch — the differential the
+/// `edit` command re-runs on every invocation.
+#[test]
+fn incremental_edit_agrees_with_full_reparse() {
+    let dir = scratch("edit");
+    let (g, doc) = scaffold(&dir);
+
+    let out = run(&["edit", &g, &doc, "--line", "4", "--text", "let width  = 300;"]);
+    assert!(out.status.success(), "edit failed: {}", stderr(&out));
+    let report = stdout(&out);
+    assert!(
+        report.contains("identical to a full reparse"),
+        "incremental must equal batch:\n{report}"
+    );
+    assert!(report.contains("terminals reused"), "reuse is reported:\n{report}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The export paths named in the guide actually write files.
+#[test]
+fn tree_sitter_and_ast_exports_produce_output() {
+    let dir = scratch("export");
+    let (g, _) = scaffold(&dir);
+
+    let ts_dir = dir.join("ts");
+    let ts = run(&["ts", &g, ts_dir.to_str().unwrap()]);
+    assert!(ts.status.success(), "tree-sitter emit failed: {}", stderr(&ts));
+    let js = std::fs::read_to_string(ts_dir.join("grammar.js")).expect("grammar.js written");
+    assert!(js.contains("module.exports"), "emits a tree-sitter grammar");
+    assert!(ts_dir.join("queries/highlights.scm").exists(), "emits highlight queries");
+
+    let ast = run(&["ast", &g]);
+    assert!(ast.status.success(), "ast emit failed: {}", stderr(&ast));
+    assert!(stdout(&ast).contains("pub struct"), "emits typed Rust");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

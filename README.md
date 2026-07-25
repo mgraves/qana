@@ -1,4 +1,4 @@
-# rantlr — P0 spike
+# rantlr
 
 Working name (crates.io naming TBD — `rantlr` was claimed by a third party on
 2026-07-18; verify before publishing anything).
@@ -9,6 +9,30 @@ intelligence, error containment, lossless trees, and parallel cold parsing
 **by construction**. The tool refuses grammars outside the envelope, with
 counterexamples. Design rationale and research grounding: see the feasibility
 report (artifact link in the project notes).
+
+## Quick start
+
+```bash
+cargo build --release
+cargo install --path crates/rantlr-cli    # puts `rantlr` on your PATH
+rantlr new mylang --name Mylang --ext .my
+rantlr check mylang/mylang.rg
+rantlr parse mylang/mylang.rg mylang/example.my
+```
+
+One `.rg` file is the whole language: tokens, keywords, precedence,
+syntax, highlighting, outline, and name binding. `check` certifies it
+against the envelope and prints the certificate — or refuses it with a
+counterexample. Everything else is derived.
+
+* **[docs/GUIDE.md](docs/GUIDE.md)** — the user guide: your own language in
+  ten minutes, the editor path, embedding, and an honest list of what is
+  not built yet.
+* **[docs/RG-REFERENCE.md](docs/RG-REFERENCE.md)** — the `.rg` language
+  reference: every declaration, annotation, and envelope rule.
+
+The rest of this file is the engineering log: what each increment
+proves, how it is gated, and what it measures.
 
 ## What this spike proves (`crates/rantlr-lex`)
 
@@ -667,16 +691,71 @@ other); the seal is diagnosed in both directions; and unresolved
 diagnostics inside a garbage-filled island stay CONTAINED to the
 island span while host navigation flows around it. 97 tests.
 
+## The on-ramp (shipped): the `rantlr` CLI, the guide, and four surface fixes
+
+Everything before this increment was reachable only from Rust or from a
+running editor. This one makes the toolchain drivable: a `rantlr` binary
+(`crates/rantlr-cli`, no third-party dependencies) whose subcommands each
+expose one derived layer — `new` scaffolds a working grammar, `check`
+prints the envelope certificate or the refusal, `tokens` shows the lex,
+`parse` the lossless tree, `outline`/`defs` the derived services, `edit`
+the incremental reparse, and `ts`/`ast` the exports. Diagnostics render
+rustc-style with `file:line:col`, the source line, and a caret.
+
+Two commands re-run a proof on every invocation rather than asserting
+one: `parse` checks that the tree reproduces its input byte for byte,
+and `edit` compares the incrementally-spliced tree against a full
+reparse of the same final text and fails if they differ.
+
+**Dogfooding the on-ramp found four defects**, each now gated:
+
+* **Unknown pattern escapes compiled to literal letters.** `/[\s\S]*/`
+  — a reflex for anyone who knows PCRE — silently became "whitespace or
+  the letter S". Alphabetic escapes outside `\d \a \w \s \t` are now
+  refused, naming what *is* supported. Punctuation escapes are untouched.
+* **`@prec` was unreachable.** `prec` is a reserved word of the surface,
+  so it lexed as a keyword and never arrived as an attribute name; the
+  compiler arm behind it was dead code. Spelled `@precedence(tok)` it
+  now works — gated on `- 2 * 3` grouping as `(-2) * 3`.
+* **`@scope(unordered)` on the start rule did nothing.** Per-scope
+  ordering only governs one item; whole-file ordering reads a global
+  flag with no `.rg` surface, so declaring the root unordered silently
+  failed and forward references at top level went unresolved *without*
+  being reported unresolved. The root annotation now lifts to the file.
+* **The tree printer crashed on synthetic node ids.** L4 LIST/RUN nodes
+  and engine-synthesized NEWLINE trivia have out-of-vocabulary ids; the
+  printer now names them (and shows the balanced-list shape, which makes
+  L4 visible rather than merely claimed).
+
+The grammar file also no longer has to be called `chartlang.rg`: the LSP
+takes any single `.rg` in the workspace root as the language definition,
+gated by `serves_a_grammar_under_any_name`.
+
+Gates: six CLI integration tests drive the shipped binary end to end
+(scaffold certifies/parses/resolves; ambiguity refused with a
+counterexample; unknown escapes refused; broken documents stay lossless;
+incremental equals batch; exports write files), plus the two `.rg`
+regressions above. The self-hosting fixed point and the `chartlang.rg ≡
+demo` differential both still hold across the pattern-parser change.
+Docs: [docs/GUIDE.md](docs/GUIDE.md) and
+[docs/RG-REFERENCE.md](docs/RG-REFERENCE.md), every command in them run
+against a fresh scaffold before shipping.
+
 ## Status
 
-Seven library crates + a server binary; 97 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 106 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + LSP, self-hosted: the grammar
 language is defined in itself, parsed by its own engine, and its files
-get the same editor intelligence as the languages it defines.**
+get the same editor intelligence as the languages it defines** — and it
+is now drivable from a command line and documented for someone who has
+never seen the codebase.
 Remaining roadmap (per the feasibility report): the `.rg` `island`
 declaration surface + foreign guests (Markdown) + composed pipelines
 served over LSP, grouping on the `.rg` surface, per-name semantic
 dependency tracking / real salsa swap-in, and the macro tier (declared
-argument grammars over the island machinery).
+argument grammars over the island machinery). Nearer-term gaps the guide
+records honestly: nothing is published anywhere, the VS Code extension is
+an unpackaged development shell, and hover/formatting/code actions are
+unimplemented.

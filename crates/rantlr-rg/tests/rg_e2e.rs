@@ -363,3 +363,92 @@ fn rg_navigation_is_unordered() {
     // No unresolved references in rg.rg (every name is declared).
     assert!(db.unresolved("rg.rg").is_empty());
 }
+
+/// `@scope(unordered)` on the START rule declares the FILE's own scope
+/// unordered — a declaration language, where top-level names see each
+/// other regardless of order. Per-scope entries only govern ordering
+/// within one item, so without lifting this to the global flag the
+/// annotation on the root would silently do nothing.
+#[test]
+fn unordered_root_scope_makes_the_file_a_declaration_language() {
+    const DECL_LANG: &str = r#"
+language Decls
+
+token WS    = /\s+/ @trivia
+token IDENT = /[\a_][\w_]*/ @specialize @style(variable)
+token SEMI  = ";" @style(punctuation)
+
+keywords IDENT = use def
+
+start unit
+
+rule unit = Unit: items @scope(unordered)
+
+rule items = item*
+
+rule item =
+  | Def: "def" name:IDENT ";" @def(name)
+  | Use: "use" name:IDENT ";" @ref(name)
+"#;
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, DECL_LANG);
+    assert!(out.diags.is_empty(), "grammar compiles: {:?}", out.diags);
+    assert!(out.def.binding.unordered, "@scope(unordered) on the start rule lifts to the file");
+    let (lexer, tables) = certify(&out.def).expect("in envelope");
+
+    // `use later;` precedes `def later;` — a forward reference.
+    let doc = "use later;\ndef later;\n";
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, doc).unwrap();
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_tree("d", session.tree().unwrap().clone());
+
+    let use_at = doc.find("later").unwrap() as u32;
+    let (_, span) = db.definition("d", use_at).expect("forward reference resolves");
+    let def_at = doc.rfind("later").unwrap() as u32;
+    assert_eq!(span.0, def_at, "it resolves to the LATER declaration");
+    assert!(db.unresolved("d").is_empty(), "and nothing is left unresolved");
+}
+
+/// `@precedence(tok)` is yacc's `%prec`: it overrides an alternative's
+/// precedence so unary minus can bind tighter than subtraction. The
+/// attribute is spelled in full because `prec` is a reserved word of the
+/// surface — spelled `@prec` it lexes as a keyword and never reaches the
+/// attribute name, which made the feature unreachable.
+#[test]
+fn precedence_override_binds_an_alternative_tighter() {
+    const PREC: &str = r#"
+language Prec
+
+token WS    = /\s+/ @trivia
+token NUM   = /\d+/ @style(number)
+token MINUS = "-" @style(operator)
+token STAR  = "*" @style(operator)
+
+prec left "-"
+prec left "*"
+
+start expr
+
+rule expr =
+  | Sub: expr "-" expr
+  | Mul: expr "*" expr
+  | Neg: "-" expr @precedence("*")
+  | Lit: NUM
+"#;
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, PREC);
+    assert!(out.diags.is_empty(), "grammar compiles: {:?}", out.diags);
+    let (lexer, tables) = certify(&out.def).expect("precedence keeps it deterministic");
+
+    // With Neg at `*` level, `- 2 * 3` groups as `(-2) * 3`.
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, "- 2 * 3").unwrap();
+    let root = session.tree().unwrap();
+    assert_eq!(out.def.sg.prod_name(root.prod as usize), "Mul", "the product is outermost");
+    let first = root.symbol_children().next().expect("left operand");
+    match first {
+        rantlr_grammar::GreenChild::Node(n) => {
+            assert_eq!(out.def.sg.prod_name(n.prod as usize), "Neg", "negation binds tighter");
+        }
+        _ => panic!("expected a node"),
+    }
+}

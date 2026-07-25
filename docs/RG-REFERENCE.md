@@ -1,0 +1,300 @@
+# The `.rg` language reference
+
+A `.rg` file is a complete language definition: lexical structure,
+syntax, precedence, highlighting, outline, and name binding. It is
+parsed and compiled by the same toolchain it describes — the surface is
+[self-hosted](../crates/rantlr-rg/rg.rg), and `rg.rg` compiled by the
+bootstrap must reproduce the bootstrap exactly.
+
+For the practical path, start with the [guide](GUIDE.md).
+
+---
+
+## File shape
+
+Declarations may appear in any order, but ids are assigned in file
+order, so the conventional layout is:
+
+```
+language Name
+max_stack 8            // only when using modes that push
+
+token …                // lexical layer
+keywords OWNER = …
+mode NAME { … }
+pair OPEN CLOSE
+prec left|right …
+
+start rule_name        // syntax layer
+rule … = …
+```
+
+Comments are `//` to end of line.
+
+---
+
+## `language Name`
+
+Names the language. Used in generated artifacts and reports.
+
+## `max_stack N`
+
+The static bound on mode-stack depth (envelope rule L2). Required when
+any token pushes a mode; `N` must fit in a `u8`. Without pushes, omit
+it — the bound is 0.
+
+---
+
+## Tokens
+
+```
+token NAME = pattern @attribute …
+```
+
+The pattern is either a **literal string** (`"{"`, `"else"`) or a
+**regex between slashes** (`/[\a_][\w_]*/`).
+
+### Pattern syntax
+
+| Form | Meaning |
+| --- | --- |
+| `abc` | literal characters |
+| `.` | any character except a line terminator |
+| `[abc]`, `[a-z]` | character class |
+| `[^abc]` | negated class (line terminators are always excluded) |
+| `(…)` | grouping |
+| `a\|b` | alternation |
+| `x*` `x+` `x?` | repetition |
+| `\d` | digit |
+| `\a` | alphabetic |
+| `\w` | alphanumeric |
+| `\s` | whitespace (never a line terminator) |
+| `\t` | tab |
+| `\.` `\/` `\\` `\"` … | an escaped punctuation character, literally |
+
+There are no PCRE class shorthands beyond those four: `\S`, `\D`, `\b`,
+and `\p{…}` are refused rather than silently read as literal letters.
+There are no anchors, backreferences, or lookaround — the patterns
+compile to a DFA.
+
+`\n` and `\r` are refused outright (envelope rule L1). Multi-line
+constructs are expressed with modes, not multi-line tokens.
+
+### Token attributes
+
+| Attribute | Effect |
+| --- | --- |
+| `@trivia` | Whitespace/comments: kept in the tree, skipped by the parser |
+| `@error` | A real, lossless token that is diagnostics-worthy (e.g. an unterminated string) |
+| `@specialize` | Matched text is looked up in the keyword table and re-tagged |
+| `@style(class)` | Highlight class (see below) |
+| `@push(MODE)` | Enter `MODE` after this token |
+| `@pop` | Leave the current mode after this token |
+
+### Style classes
+
+`keyword`, `variable`, `number`, `string`, `comment`, `operator`,
+`punctuation`, `bracket`, `regexp`. These are the LSP semantic-token
+legend; the VS Code extension maps them to TextMate scopes.
+
+---
+
+## `keywords OWNER = a b "c" …`
+
+Declares keywords for an `@specialize` token. Each keyword gets its own
+terminal, so rules can reference `"else"` directly instead of matching a
+generic identifier.
+
+Keywords are **owned** by the token they specialize. That is what keeps
+composed languages separate: a host language's keyword remains an
+ordinary identifier inside a guest island.
+
+Bare words and quoted strings are both accepted; quote a word when it
+collides with a `.rg` keyword (`language`, `max_stack`, `keywords`,
+`token`, `mode`, `pair`, `prec`, `left`, `right`, `start`, `rule`).
+
+---
+
+## `mode NAME { token … }`
+
+A lexer mode: a distinct token set entered with `@push(NAME)` and left
+with `@pop`. Nested block comments are the canonical use:
+
+```
+token BLOCK_OPEN = "/*" @trivia @push(BLOCK) @style(comment)
+
+mode BLOCK {
+  token B_OPEN    = "/*"      @trivia @push(BLOCK) @style(comment)
+  token B_CLOSE   = "*/"      @trivia @pop         @style(comment)
+  token B_CONTENT = /[^*\/]+/ @trivia              @style(comment)
+  token B_MISC    = /[*\/]/   @trivia              @style(comment)
+}
+```
+
+Modes may push themselves. `max_stack` bounds the nesting, which is what
+keeps a line's entry state a small value the engine can cache.
+
+---
+
+## `pair OPEN CLOSE`
+
+Declares a bracket pair by token name or literal. Pairs drive folding
+and the incremental skeleton that lets the engine find a damaged
+region's enclosing block without reparsing.
+
+---
+
+## `prec left|right tok …`
+
+Precedence levels, lowest first — the same convention as yacc. Each
+declaration binds tighter than the ones before it:
+
+```
+prec left "+" "-"
+prec left "*" "/"
+```
+
+A production's precedence defaults to its last terminal; override it per
+alternative with `@prec(token)`.
+
+Precedence is how you keep an expression grammar inside the envelope.
+Without it, `expr "+" expr` is ambiguous and `rantlr check` refuses it.
+
+---
+
+## `start rule_name`
+
+The start symbol.
+
+---
+
+## Rules
+
+```
+rule name = Label: sym sym … @attribute …
+```
+
+Multiple alternatives are separated by `|`, and a leading `|` is
+allowed:
+
+```
+rule stmt =
+  | LetStmt: "let" name:IDENT "=" expr ";" @def(name)
+  | ExprStmt: expr ";"
+```
+
+Every alternative carries a **label** (`LetStmt`). Labels become node
+kinds in the tree, variant names in the generated typed AST, and the
+handles `@outline`/`@def`/`@ref` refer to.
+
+### Symbol forms
+
+| Form | Meaning |
+| --- | --- |
+| `name` | another rule, or a token by name |
+| `"lit"` | a token by its literal text |
+| `label:name` | a named position (`@def`/`@ref`/`@outline` target it) |
+| `label:"lit"` | a named literal position |
+| `name?` `name*` `name+` | optional / zero-or-more / one-or-more |
+
+Repetition inside an alternative generates a shared helper rule per
+(symbol, operator) pair — every `expr?` in the grammar is the same
+`expr_opt` rule, and `stmt*` becomes `stmt_star`. Symbol-level
+repetition takes no separator; use a rule-level list for that.
+
+**The repeated element must be a rule, not a token.** `IDENT*` is
+refused; wrap it first, which is also what gives the list a typed node
+to hold:
+
+```
+rule params = param*
+rule param  = Param: name:IDENT @def(name)
+```
+
+### Rule-level EBNF sugar
+
+```
+rule stmts = stmt*            // zero or more
+rule items = item+            // one or more
+rule args  = expr* % ","      // zero or more, comma-separated
+rule ops   = op+   % "|"      // one or more, pipe-separated
+rule tail  = suffix?          // optional
+```
+
+These desugar to ordinary left-recursive productions, which the engine
+then recognises as **auto-balanced lists** (envelope rule L4): the tree
+holds shallow balanced runs instead of a cons spine, so editing one item
+in a 10,000-item file stays cheap. The generated labels — which is what
+you see in `rantlr parse` — follow a fixed convention:
+
+| Sugar | Generated alternatives |
+| --- | --- |
+| `x*` | `…Empty`, `…More` |
+| `x+` | `…First`, `…More` |
+| `x?` | `…None`, `…Some` |
+| `x+ % s` | `…First`, `…More` (with separator) |
+| `x* % s` | `…None`, `…Some` over an inner `name_ne` rule |
+
+A sugar rule is a whole rule, not an alternative, so it carries **no
+attributes** — `rule stmts = stmt* @scope` is a syntax error. Put the
+attribute on a labelled alternative that contains the list instead
+(`rule block = Block: "{" stmts "}" @scope`).
+
+### Rule attributes
+
+Attributes attach to a **labelled alternative**, after its symbols.
+
+| Attribute | Effect |
+| --- | --- |
+| `@def(label)` | The token at `label` defines a name |
+| `@ref(label)` / `@ref(label, call)` | The token at `label` references a name; kinds are `var` (default) and `call` |
+| `@scope` | This node opens a lexical scope (names inside are invisible outside) |
+| `@scope(unordered)` | A scope where forward references are legal (declaration languages) |
+| `@outline(label)` / `@outline(label, kind)` | Contribute a document symbol; kinds are `variable` (default), `constant`, `function`, `struct`, `module`, `class` |
+| `@precedence(token)` | Override this alternative's precedence (yacc's `%prec`) |
+
+Attribute names cannot be `.rg` reserved words, which is why the
+precedence override is spelled `@precedence` rather than `@prec`. Use it
+for the classic unary-minus case:
+
+```
+prec left "+" "-"
+prec left "*"
+
+rule expr =
+  | Sub: expr "-" expr
+  | Mul: expr "*" expr
+  | Neg: "-" expr @precedence("*")     // binds tighter than subtraction
+  | Lit: NUM
+```
+
+`@def`, `@ref`, and `@scope` are the entire configuration for
+go-to-definition, find-references, rename, and scope-aware completion.
+There is no separate symbol-table pass to write.
+
+`@scope(unordered)` on the **start rule** declares the whole file an
+unordered scope — a declaration language, where a top-level name is
+visible to references that appear before it. Without it, top-level names
+follow definition-before-use.
+
+---
+
+## The envelope
+
+The rules a grammar must satisfy. Each is checked, and each refusal
+carries a witness — a concrete input, not a category.
+
+| Rule | Requirement | Why it buys something |
+| --- | --- | --- |
+| **L1** | No token may match a line terminator | A line's lexical state is self-contained, so relexing restarts at any line |
+| **L2** | The mode stack is statically bounded | A line's entry state is a small cacheable value |
+| **L3** | The grammar is deterministic LR(1); conflicts are errors | Parses are unambiguous, and reuse is sound |
+| **L4** | Sequence rules are detected and auto-balanced | Edits in long lists cost O(log n), not O(n) |
+| **L5** | Parsing is pure — no side effects, no semantic feedback | The same input always yields the same tree, so subtrees can be reused |
+| **L6** | Modes are containment-checked | A damaged region has a bounded blast radius |
+| **L8** | Binding is data (`@def`/`@ref`/`@scope`), not code | Name resolution is derivable and memoizable |
+| **L9** | Signature and body are firewalled | Editing a function body cannot invalidate other files |
+
+L1 through L4 are what `rantlr check` reports on directly. L5, L6, L8,
+and L9 are structural: they are properties of the design that the
+surface has no way to express a violation of.

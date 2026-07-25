@@ -74,15 +74,26 @@ impl Server {
         }
     }
 
-    /// The language-definition file: `chartlang.rg` preferred,
-    /// `chartlang.toml` as the legacy fallback.
+    /// The language-definition file. `chartlang.rg` wins if present (the
+    /// demo and playground rely on it); otherwise ANY single `.rg` file
+    /// in the workspace root is the language — so a folder holding your
+    /// own `mylang.rg` is served without renaming anything. Several
+    /// root `.rg` files are ambiguous, so the lowest name wins and the
+    /// choice is deterministic rather than arbitrary.
     fn config_path(&self) -> Option<PathBuf> {
         let root = self.root.as_ref()?;
-        let rg = root.join("chartlang.rg");
-        if rg.exists() {
-            return Some(rg);
+        let named = root.join("chartlang.rg");
+        if named.exists() {
+            return Some(named);
         }
-        Some(root.join("chartlang.toml"))
+        let mut found: Vec<PathBuf> = std::fs::read_dir(root)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "rg") && p.is_file())
+            .collect();
+        found.sort();
+        found.into_iter().next().or_else(|| Some(root.join("chartlang.toml")))
     }
 
     fn pipe_of(&self, lang: DocLang) -> &Pipeline {

@@ -1,0 +1,30 @@
+# A sample {NAME} document. The grammar next to this file defines every
+# rule below; change either one and everything re-derives.
+
+let width  = 3;
+let height = width * 4;
+
+{
+  # A block is its own scope (`@scope` in the grammar), so `area` is
+  # invisible from outside — go-to-definition and rename both know it.
+  let area = width * height;
+  print area, "square units";
+}
+
+print width + height;
+
+# Things to try:
+#
+#   rantlr defs <grammar> <this file>
+#     Every reference resolves. Now delete `let width = 3;` and run it
+#     again: the references to `width` come back unresolved. That is a
+#     semantic answer, not a parse failure.
+#
+#   rantlr parse <grammar> <this file>
+#     Delete a `;` first. You still get a complete tree with the repair
+#     marked in place — parsing is total, so an editor never goes blank
+#     while you are mid-keystroke.
+#
+#   rantlr edit <grammar> <this file> --line 4 --text "let width = 30;"
+#     Reports how much of the tree survived the edit, and checks the
+#     incremental result against a full reparse.

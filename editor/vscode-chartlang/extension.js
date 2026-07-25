@@ -27,9 +27,11 @@ function activate(context) {
     { command, transport: TransportKind.stdio },
     {
       documentSelector: [{ language: "chartlang" }, { language: "rantlr-grammar" }],
-      // Let the server see language-definition saves quickly (it also polls).
+      // Let the server see language-definition saves quickly (it also
+      // polls). Any `.rg` in the workspace root can be the language
+      // definition, so watch them all rather than one fixed name.
       synchronize: {
-        fileEvents: vscode.workspace.createFileSystemWatcher("**/chartlang.{rg,toml}"),
+        fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{rg,toml}"),
       },
     }
   );

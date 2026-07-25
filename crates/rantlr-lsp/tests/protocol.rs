@@ -377,6 +377,38 @@ fn hot_reload_from_rg_grammar_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Bring your own language: the grammar file does NOT have to be called
+/// `chartlang.rg`. Any single `.rg` in the workspace root is the
+/// language definition, and it hot-reloads under its own name.
+#[test]
+fn serves_a_grammar_under_any_name() {
+    let dir = std::env::temp_dir().join(format!("rantlr-lsp-byo-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("mylang.rg");
+    std::fs::write(&cfg, CHARTLANG_RG).unwrap();
+
+    let mut s = Server::new();
+    s.root = Some(dir.clone());
+    init(&mut s);
+    open(&mut s, "let a = 1;\nasync work();\n");
+    let (_, before) = tokens_full(&mut s);
+
+    // Editing THAT file reloads the pipeline: `async` becomes a keyword.
+    let with_async =
+        CHARTLANG_RG.replace("keywords IDENT = fn let", "keywords IDENT = async fn let");
+    std::fs::write(&cfg, &with_async).unwrap();
+    filetime_touch(&cfg);
+    let out = s.check_reload();
+    assert!(
+        out.iter().any(|m| m["method"] == "workspace/semanticTokens/refresh"),
+        "a custom-named .rg must drive hot-reload"
+    );
+    let (_, after) = tokens_full(&mut s);
+    assert_ne!(before, after, "the custom-named grammar must be the live pipeline");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn definition_references_rename_across_open_files() {
     let mut s = Server::new();

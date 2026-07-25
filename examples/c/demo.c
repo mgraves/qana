@@ -11,12 +11,28 @@
 
 enum color { RED, GREEN = 5, BLUE };
 
+
+typedef unsigned long word_t;
+
 struct point {
     int x;
     int y;
     unsigned flags : 4;
+    word_t weight;
     struct point *next;
 };
+
+typedef struct point point_t;
+
+word_t global_words = 0;
+point_t *head_node;
+
+word_t twice(word_t w) {
+    word_t doubled = w + w;
+    return doubled;
+}
+
+int measure(word_t, point_t *stray);
 
 static int scale(int v, int factor);
 int apply(int (*op)(int x, int y), int a, int b);
@@ -38,6 +54,7 @@ int main(void) {
     struct point p;
     int total = 0;
     unsigned long big = 0xFFul;
+    word_t local_words = twice(3);
     double ratio = 1.5e2;
     char *msg = "hello, world";
     int i;

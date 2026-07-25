@@ -1099,9 +1099,49 @@ adjacency (space-sensitive, invisible over trivia).
 Gates: 143 tests — entry-state assertions, directive-edit locality,
 macro definition/navigation, and the residue regression.
 
+## C wall 2: typedef names, without the lexer hack
+
+The famous C ambiguity — `T * x;` needs to know whether T is a typedef
+name, which classic compilers solve by feeding the symbol table back
+into the lexer. That feedback is exactly what L5 forbids, and the
+campaign shows how much of C yields to pure grammar + semantics
+instead. The key: the TWO-IDENTIFIER SIGNAL (`T x` is never a valid C
+expression — no juxtaposition), and CONTEXT SPLITTING — file scope,
+parameters, and struct fields have no expression statements competing,
+so they take FULL typedef'd declarators:
+
+  typedef unsigned long word_t;
+  word_t global = 0;                file scope: full declarators
+  point_t *head_node;               ...pointers included
+  word_t twice(word_t w) { ... }    returns and named params
+  int measure(word_t, point_t *p);  abstract AND pointered params
+  struct s { word_t weight; };      fields
+  word_t local = twice(3);          block level, two-ident signal
+
+Every `word_t` head is a plain @ref — uses navigate to the typedef,
+and a typo'd type name is a "cannot find" diagnostic with no new
+machinery. Abstract parameters landed as a bonus via a shared-prefix
+trick (after `decl_specs ptrs`, an IDENT continues a declarator while
+`)` or `,` reduces the abstract form — disjoint lookaheads), which
+also made `(void)` a plain abstract param and retired its special
+case. 320 states, still zero conflicts.
+
+The pinned residue, gated as such: block-level `T *p;` parses CLEANLY
+as multiplication — no syntax error, wrong reading, surfacing
+semantically (`p` unresolved). That trap, plus casts, sizeof(type),
+and the comma operator, all await one refactor: the expression-tier
+split real C grammars use. Also found: C's struct tags are
+forward-declarable (`typedef struct point point_t;` before the
+definition) — per-NAMESPACE ordering is a real need the binding tier
+doesn't express yet.
+
+Gates: 147 tests — the typedef world end to end, head navigation,
+typo diagnosis, and the residue pinned by its exact semantic
+signature.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 143 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 147 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

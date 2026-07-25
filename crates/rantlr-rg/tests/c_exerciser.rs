@@ -117,3 +117,62 @@ fn deleting_a_block_comment_relexes_one_line() {
         outcome.damage.relexed_lines
     );
 }
+
+/// The typedef campaign: heads resolve WITHOUT lexer feedback, split
+/// by context — full declarators at file scope / params / fields, the
+/// two-identifier signal at block level. The residue is PINNED: a
+/// block-local `T *p;` still parses as (broken) multiplication.
+#[test]
+fn typedef_heads_resolve_without_lexer_feedback() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, C_RG);
+    let (lexer, tables) = certify(&out.def).unwrap();
+    let doc = "\
+typedef int word;\n\
+word global = 1;\n\
+word *gp;\n\
+word take(word w, word *p, word) { return w; }\n\
+struct s { word field; word *fptr; };\n\
+int main(void) {\n\
+    word local = take(global, gp, 2);\n\
+    word arr[3];\n\
+    return local + arr[0];\n\
+}\n";
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, doc).unwrap();
+    assert!(session.last_repairs.is_empty(), "typedef world parses clean: {:?}", session.last_repairs);
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_tree("d", session.tree().unwrap().clone());
+    assert!(db.unresolved("d").is_empty(), "{:?}", db.unresolved("d"));
+
+    // Every `word` head navigates to the typedef's declarator.
+    let def_at = doc.find("word").unwrap() + "typedef int ".len() - "typedef int ".len();
+    let _ = def_at;
+    let typedef_site = doc.find("word").unwrap() as u32;
+    for (i, _) in doc.match_indices("word").skip(1) {
+        let (duri, dspan) = db
+            .definition("d", i as u32)
+            .unwrap_or_else(|| panic!("head at {i} resolves"));
+        assert_eq!(duri, "d");
+        assert_eq!(dspan.0, typedef_site, "head at {i} lands on the typedef");
+    }
+
+    // An unknown type head is a "cannot find" diagnostic — the typo'd
+    // typedef case.
+    let bad = IncSession::new(&lexer, &out.def.sg, &tables, "wrod x;\n").unwrap();
+    let mut db2 = SemDb::new(out.def.binding.clone());
+    db2.set_tree("b", bad.tree().unwrap().clone());
+    let unres: Vec<String> = db2.unresolved("b").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(unres, ["wrod"], "typo'd type is diagnosed by name");
+
+    // PINNED residue: block-level `T *p;` parses CLEANLY — as
+    // multiplication (that is the trap: no parse error, wrong
+    // reading). The honest signature: zero repairs, `word` resolving
+    // to the typedef as a VALUE read, and `p` unresolved. Awaits the
+    // expression-tier split; if this stops holding, update the walls.
+    let residue = IncSession::new(&lexer, &out.def.sg, &tables, "typedef int word;\nint f(void) { word *p; return 0; }\n").unwrap();
+    assert!(residue.last_repairs.is_empty(), "the trap parses clean: {:?}", residue.last_repairs);
+    let mut db3 = SemDb::new(out.def.binding.clone());
+    db3.set_tree("r", residue.tree().unwrap().clone());
+    let unres: Vec<String> = db3.unresolved("r").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(unres, ["p"], "the misreading surfaces semantically, not syntactically");
+}

@@ -10,14 +10,16 @@
 //    specifiers are KEYWORDS (int, struct Foo, ...). The plan of record
 //    for typedef names is a covering grammar + semantic classification,
 //    never lexer feedback.
-//  * Remaining cuts, each recorded in the wall list: the typedef-name
-//    campaign (typedef heads, casts, sizeof(type), abstract
-//    declarators — one covering-grammar effort), labels/goto (the
-//    IDENT `:` shift needs default-shift semantics precedence cannot
-//    express safely), the comma operator (needs the expression-tier
-//    split real C grammars use), and function-like macro adjacency
-//    (`F(x)` vs `F (x)` is space-sensitive — invisible to a parser
-//    over trivia).
+//  * Typedef-name heads work WITHOUT lexer feedback, split by context:
+//    file scope / params / fields take full typedef'd declarators
+//    (pointers, abstracts); block level rides the two-identifier
+//    signal (`T x` is never an expression), so `T *p;` LOCALS are the
+//    pinned residue, along with casts and sizeof(type) — all three
+//    are R/R-entangled with expressions and await the
+//    expression-tier split (which would also unlock the comma
+//    operator). Labels/goto need default-shift semantics; function-
+//    like macro adjacency is space-sensitive and invisible over
+//    trivia.
 //
 // Dangling else is resolved the envelope way: EXPLICITLY. `else` gets a
 // precedence, and the else-less `if` is marked lower — the classic yacc
@@ -146,6 +148,13 @@ rule external_decl =
   | FunctionDef: decl_specs declarator compound_stmt
   | Declaration: decl_specs init_declarators ";"
   | BareDecl:    decl_specs ";"
+  // Typedef-name heads, the COVERING way — no lexer feedback, ever.
+  // File scope has no expression statements, so an IDENT-led item is
+  // unambiguously a typedef'd declaration: FULL declarators, pointers
+  // included. The head is a REFERENCE — uses of `word_t` navigate to
+  // its typedef, and an unknown type is a "cannot find" diagnostic.
+  | TdFunctionDef: head:IDENT declarator compound_stmt @ref(head)
+  | TdDeclaration: head:IDENT init_declarators ";" @ref(head)
   | PpItem:      pp_directive
 
 // ---- declaration specifiers (keywords only in v0) ----
@@ -209,6 +218,9 @@ rule field_decls = field_decl*
 rule field_decl =
   | FieldDecl: decl_specs init_declarators ";"
   | BitField:  decl_specs declarator ":" expr ";"
+  // Struct fields have no expression competitors either: full
+  // typedef'd fields, pointers included.
+  | TdField:   head:IDENT init_declarators ";" @ref(head)
 
 rule enum_spec =
   | EnumDef:  "enum" tag:IDENT enum_body @def(tag) @outline(tag, constant)
@@ -251,14 +263,35 @@ rule direct_declarator =
 
 rule params =
   | ParamsNone:
-  | ParamsVoid: "void"
   | ParamsList: param_list
 
 rule param_list = param+ % ","
 
+// Parameters have no expression competitors, so typedef'd params get
+// the FULL treatment — named, pointered, and abstract. The abstract
+// forms share the `ptrs` prefix with the named ones: after the
+// pointers, an IDENT or `(` continues a declarator, while `)` or `,`
+// reduces the abstract form — disjoint lookaheads, LR(1)-clean.
 rule param =
-  | Param:    decl_specs declarator
-  | VarArgs:  ELLIPSIS
+  | Param:       decl_specs declarator
+  | ParamAbs:    decl_specs ptrs
+  | TdParam:     head:IDENT declarator @ref(head)
+  | TdParamAbs:  head:IDENT ptrs @ref(head)
+  | VarArgs:     ELLIPSIS
+
+// Block-level typedef'd declarators: IDENT-led (no leading `*`, no
+// leading `(` — both would collide with expression statements). Local
+// prototypes and arrays still work: `word_t f(int);`, `word_t a[4];`.
+rule n_init_declarators = n_init_declarator+ % ","
+
+rule n_init_declarator =
+  | NInitDecl:     n_direct
+  | NInitDeclInit: n_direct "=" initializer
+
+rule n_direct =
+  | NDName:  name:IDENT @def(name)
+  | NDArray: n_direct "[" opt_expr "]"
+  | NDFunc:  n_direct "(" params ")"
 
 rule initializer =
   | InitExpr:   expr
@@ -275,6 +308,12 @@ rule block_items = block_item*
 
 rule block_item =
   | ItemDecl: decl_specs init_declarators ";"
+  // Block level DOES have expression statements, so typedef'd locals
+  // ride the two-identifier signal: `T x` cannot be an expression
+  // (C has no juxtaposition), so requiring an IDENT-led declarator
+  // splits deterministically. `T *p;` locals are the pinned residue —
+  // R/R-entangled with multiplication (see the wall list).
+  | TdLocal: head:IDENT n_init_declarators ";" @ref(head)
   | ItemStmt: stmt
 
 rule stmt =

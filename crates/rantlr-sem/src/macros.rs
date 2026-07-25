@@ -297,6 +297,11 @@ pub enum SegKind {
     /// or a member count. Synthesized: derived from the source, but
     /// not copied from it.
     Meta,
+    /// A name the expander RENAMED to keep a reference's meaning
+    /// (hygiene). `src` still points at the name as written, so a
+    /// reader can see what it was — but the lengths differ, which is
+    /// why renaming happens once, after all composition.
+    Rename,
 }
 
 impl SegKind {
@@ -304,6 +309,12 @@ impl SegKind {
     /// grammar's declarations, not from any document).
     pub fn synthesized(self) -> bool {
         matches!(self, SegKind::Sep | SegKind::Paren | SegKind::Meta)
+    }
+
+    /// Does this segment copy its source verbatim (equal lengths)?
+    /// Everything except synthesized bytes and hygienic renames.
+    pub fn copies(self) -> bool {
+        !self.synthesized() && self != SegKind::Rename
     }
 }
 
@@ -326,17 +337,29 @@ pub struct MacroDiag {
     /// Span in the ORIGINAL text of the pass that raised it.
     pub span: (u32, u32),
     pub msg: String,
+    /// A NOTE reports something the expander did on purpose (a
+    /// hygienic rename); an error reports something it refused to do.
+    pub note: bool,
+}
+
+impl MacroDiag {
+    pub fn error(span: (u32, u32), msg: String) -> MacroDiag {
+        MacroDiag { span, msg, note: false }
+    }
+    pub fn note(span: (u32, u32), msg: String) -> MacroDiag {
+        MacroDiag { span, msg, note: true }
+    }
 }
 
 /// The honest refusal: the shape needs parentheses, and the grammar
 /// declares no way to write them for this rule.
 fn no_grouping(span: (u32, u32), rule: &str) -> MacroDiag {
-    MacroDiag {
+    MacroDiag::error(
         span,
-        msg: format!(
+        format!(
             "expansion needs parentheses to preserve grouping, but rule `{rule}` declares no grouping production — spliced textually"
         ),
-    }
+    )
 }
 
 /// One expansion pass over a bound document.
@@ -880,10 +903,7 @@ pub fn expand_pass(
         });
         match members {
             Some(ms) => j.members = Some((ms, sep.clone())),
-            None => diags.push(MacroDiag {
-                span: j.span,
-                msg: "reflected name does not resolve to a declared type".into(),
-            }),
+            None => diags.push(MacroDiag::error(j.span, "reflected name does not resolve to a declared type".into())),
         }
     }
 
@@ -948,10 +968,7 @@ pub fn expand_pass(
         let Some(m) = m else {
             // Callee resolves, but not to a macro.
             if j.has_args || j.reflect.is_some() {
-                diags.push(MacroDiag {
-                    span: j.span,
-                    msg: "spliced name does not resolve to a macro".into(),
-                });
+                diags.push(MacroDiag::error(j.span, "spliced name does not resolve to a macro".into()));
             }
             push(&mut out, &mut segs, text, &None, j.span, SegKind::Verbatim);
             cursor = j.span.1;
@@ -972,15 +989,12 @@ pub fn expand_pass(
                     .iter()
                     .map(|f| Facet::NAMES[*f as usize])
                     .collect();
-                diags.push(MacroDiag {
-                    span: j.span,
-                    msg: format!(
+                diags.push(MacroDiag::error(j.span, format!(
                         "this reflection declares {} facet(s) ({}) — the macro has {} parameter(s)",
                         facets.len(),
                         names.join(", "),
                         m.params.len()
-                    ),
-                });
+                    )));
                 push(&mut out, &mut segs, text, &None, j.span, SegKind::Verbatim);
                 cursor = j.span.1;
                 continue;
@@ -1071,14 +1085,11 @@ pub fn expand_pass(
             continue;
         }
         if j.args.len() != m.params.len() {
-            diags.push(MacroDiag {
-                span: j.span,
-                msg: format!(
+            diags.push(MacroDiag::error(j.span, format!(
                     "macro takes {} argument(s), {} supplied — left unexpanded",
                     m.params.len(),
                     j.args.len()
-                ),
-            });
+                )));
             push(&mut out, &mut segs, text, &None, j.span, SegKind::Verbatim);
             cursor = j.span.1;
             continue;
@@ -1107,13 +1118,10 @@ pub fn expand_pass(
                 && !is_bare_name(text, trim_span(text, j.args[pi].span))
         }) {
             let span = trim_span(text, j.args[bad.1 .1].span);
-            diags.push(MacroDiag {
-                span: j.span,
-                msg: format!(
+            diags.push(MacroDiag::error(j.span, format!(
                     "`{}` cannot be substituted at a name position — a member name must be an identifier",
                     &text[span.0 as usize..span.1 as usize]
-                ),
-            });
+                )));
             push(&mut out, &mut segs, text, &None, j.span, SegKind::Verbatim);
             cursor = j.span.1;
             continue;
@@ -1289,7 +1297,7 @@ pub fn tiles(segs: &[Seg], len: u32) -> bool {
         if s.out.0 != at || s.out.1 < s.out.0 {
             return false;
         }
-        if !s.kind.synthesized() && (s.out.1 - s.out.0) != (s.src.1 - s.src.0) {
+        if s.kind.copies() && (s.out.1 - s.out.0) != (s.src.1 - s.src.0) {
             return false;
         }
         at = s.out.1;

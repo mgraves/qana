@@ -668,7 +668,10 @@ fn cmd_expand(args: &Args) {
     )
     .unwrap_or_else(|e| die(&e));
     for d in &out.diags {
-        eprintln!("{} {}..{}: {}", red("macro"), d.span.0, d.span.1, d.msg);
+        // A note reports what the expander DID (a hygienic rename);
+        // an error reports what it refused to do.
+        let tag = if d.note { green("note") } else { red("macro") };
+        eprintln!("{tag} {}..{}: {}", d.span.0, d.span.1, d.msg);
     }
     if out.repairs > 0 {
         eprintln!(

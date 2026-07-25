@@ -1427,11 +1427,32 @@ definitions.
   written it names the definition at byte 4, but after expansion
   it binds the definition at byte 76
 
-v1 REPORTS rather than renames (renaming needs the same information
-plus a way to mint names the grammar admits — the named successor).
-The gates pin both directions of capture AND the absence of false
-positives: the committed demo, blocks that shadow something else, and
-every existing example expand with a clean bill.
+And the REPAIR follows from the same rule: rename the binder that
+swallowed the reference. Alpha-converting a binding and its own
+references changes nothing else, so the captured reference goes back
+to meaning what it says — in both directions, and by the same
+mechanism:
+
+  let z = { let unit = 99; scaled!(2) };
+     ⇩
+  let z = { let unit_h1 = 99; 2 * unit };
+  note: renamed `unit` to `unit_h1` so `unit` keeps its meaning
+
+When the USER's local would swallow the body's free name, the user's
+local moves; when the BODY's local would swallow an argument, the
+body's local moves (Scheme's rule, derived rather than assumed). Each
+rename is reported as a NOTE — what the expander did, not what it
+refused — and provenance keeps the link, since a renamed name is its
+own segment still pointing at the name as written.
+
+Repair is attempted, never assumed: a round that fails to reduce the
+captures, or produces text that no longer parses, is abandoned and
+the captures are reported instead. That fallback is gated with a
+grammar whose identifiers are letters only — it cannot spell
+`unit_h1`, so it gets the diagnostic rather than something that
+doesn't lex. The gates also pin the absence of false positives and of
+gratuitous renames: the committed demo and a block that shadows
+something else come through untouched.
 
 ## Reflection facets, and what a name position will accept
 

@@ -493,53 +493,87 @@ fn let_rhs_prod(
     })
 }
 
-/// HYGIENE. One rule finds every capture: a reference that survives
-/// expansion must resolve to the same definition afterwards as it did
-/// where it was WRITTEN. The binding tier answers both halves and
-/// provenance connects them, so cpp's classic capture — a macro body's
-/// free name swallowed by a local at the use site — is reported
-/// instead of silently changing meaning.
+/// HYGIENE, repaired. One rule finds every capture — a reference that
+/// survives expansion must resolve to the same definition afterwards
+/// as where it was WRITTEN — and the repair follows from it: rename
+/// the binder that swallowed it. Alpha-converting a binding and its
+/// references changes nothing else, so the captured reference goes
+/// back to meaning what it says, in both directions of capture.
 #[test]
-fn hygiene_reports_capture() {
+fn hygiene_repairs_capture_by_renaming() {
     let (lexer, def, tables) = world();
     let ex = |doc: &str| expand_document(&lexer, &def, &tables, doc, &[], 8).unwrap();
 
-    // The body's `unit` names the top-level binding. Spliced into a
-    // block that declares its OWN `unit`, it would silently bind
-    // there instead.
+    // Direction 1 — the USER's local would swallow the body's free
+    // name, so the user's local is the one that moves.
     let doc = "let unit = 10;\nmacro scaled(v) => { v * unit }\nlet z = { let unit = 99; scaled!(2) };\n";
     let out = ex(doc);
-    let hyg: Vec<&str> = out.diags.iter().map(|d| d.msg.as_str()).filter(|m| m.starts_with("hygiene")).collect();
-    assert_eq!(hyg.len(), 1, "exactly the one capture: {:?}", out.diags);
-    assert!(hyg[0].contains("`unit`"), "{}", hyg[0]);
-    // …and it points at the reference in the BODY, where the author
-    // can see what got captured.
-    let d = out.diags.iter().find(|d| d.msg.starts_with("hygiene")).unwrap();
-    assert_eq!(d.span.0 as usize, doc.find("unit }").unwrap(), "at the body's `unit`");
-    // The expansion still happens (v1 reports, it does not rename).
-    assert!(out.text.contains("2 * unit"), "{}", out.text);
+    assert!(out.text.contains("let z = { let unit_h1 = 99; 2 * unit };"), "{}", out.text);
+    let notes: Vec<_> = out.diags.iter().filter(|d| d.note).collect();
+    assert_eq!(notes.len(), 1, "{:?}", out.diags);
+    assert!(notes[0].msg.contains("renamed `unit` to `unit_h1`"), "{}", notes[0].msg);
+    assert!(!out.diags.iter().any(|d| !d.note), "nothing left to report: {:?}", out.diags);
+    assert_eq!(notes[0].span.0 as usize, doc.rfind("unit = 99").unwrap(), "at the renamed binder");
 
-    // Capture in the other direction: an ARGUMENT's name swallowed by
-    // a binding inside the body.
-    let doc2 = "let n = 1;\nmacro shadow(x) => { { let n = 5; x } }\nlet z = shadow!(n);\n";
-    let out2 = ex(doc2);
-    assert!(
-        out2.diags.iter().any(|d| d.msg.starts_with("hygiene") && d.msg.contains("`n`")),
-        "the argument's `n` is captured by the body's local: {:?}",
-        out2.diags
+    // The repair is checked the way the capture was found: in the
+    // expansion, every name resolves where it should.
+    let s = IncSession::new(&lexer, &def.sg, &tables, &out.text).unwrap();
+    assert!(s.last_repairs.is_empty(), "{:?}", s.last_repairs);
+    let mut db = SemDb::new(def.binding.clone());
+    db.set_tree("o", s.tree().unwrap().clone());
+    assert!(db.unresolved("o").is_empty(), "{:?}", db.unresolved("o"));
+    let body_unit = out.text.rfind("unit };").unwrap();
+    let (_, dspan) = db.definition("o", body_unit as u32).expect("resolves");
+    assert_eq!(
+        dspan.0 as usize,
+        out.text.find("unit = 10").unwrap(),
+        "the body's `unit` names the TOP-LEVEL binding again"
     );
+    let local = out.text.find("unit_h1").unwrap();
+    let (_, lspan) = db.definition("o", local as u32).expect("resolves");
+    assert_eq!(lspan.0 as usize, local, "and the renamed local is its own definition");
 
-    // NO FALSE POSITIVES: the committed demo — nested macros, blocks,
-    // arguments, reflection-free — expands with a clean bill.
-    let clean = ex(DEMO);
+    // Provenance keeps the link: a renamed name is its own segment,
+    // still pointing at the name as the author wrote it.
+    let rseg = out
+        .segs
+        .iter()
+        .find(|g| g.out.0 <= local as u32 && (local as u32) < g.out.1)
+        .unwrap();
+    assert_eq!(rseg.kind, SegKind::Rename);
+    assert_eq!(rseg.src.0 as usize, doc.rfind("unit = 99").unwrap(), "{rseg:?}");
+    assert!(tiles(&out.segs, out.text.len() as u32));
+
+    // Direction 2 — the BODY's local would swallow the argument, so
+    // the body's local is the one that moves (Scheme's rule, derived).
+    let out2 = ex("let n = 1;\nmacro shadow(x) => { { let n = 5; x } }\nlet z = shadow!(n);\n");
+    assert!(out2.text.contains("let z = { let n_h1 = 5; n };"), "{}", out2.text);
+    assert!(out2.diags.iter().all(|d| d.note), "{:?}", out2.diags);
+
+    // NO FALSE POSITIVES, and no gratuitous renames: the committed
+    // demo and a block that shadows something else are untouched.
+    for clean in [DEMO, "let unit = 10;\nmacro scaled(v) => { v * unit }\nlet z = { let other = 99; scaled!(2) };\n"] {
+        let r = ex(clean);
+        assert!(r.diags.is_empty(), "{:?}", r.diags);
+        assert!(!r.text.contains("_h1"), "nothing renamed: {}", r.text);
+    }
+
+    // THE HONEST FALLBACK: repair needs a name the grammar admits. A
+    // language whose identifiers are letters only cannot spell
+    // `unit_h1`, so the expander reports the capture instead of
+    // emitting something that does not lex.
+    let letters = MAC_RG.replace("/[\\a_][\\w_]*/", "/[\\a]+/");
+    assert_ne!(letters, MAC_RG, "probe edit took");
+    let tc = RgToolchain::new();
+    let probe = compile_source(&tc, &letters);
+    let (plexer, ptables) = certify(&probe.def).expect("the probe grammar certifies");
+    let out3 = expand_document(&plexer, &probe.def, &ptables, doc, &[], 8).unwrap();
+    assert!(!out3.text.contains("_h"), "no unlexable rename: {}", out3.text);
     assert!(
-        !clean.diags.iter().any(|d| d.msg.starts_with("hygiene")),
-        "the demo is hygienic: {:?}",
-        clean.diags
+        out3.diags.iter().any(|d| !d.note && d.msg.contains("changes meaning when expanded")),
+        "reported instead: {:?}",
+        out3.diags
     );
-    // A block that does NOT shadow anything the body uses is fine too.
-    let ok = ex("let unit = 10;\nmacro scaled(v) => { v * unit }\nlet z = { let other = 99; scaled!(2) };\n");
-    assert!(!ok.diags.iter().any(|d| d.msg.starts_with("hygiene")), "{:?}", ok.diags);
 }
 
 /// REFLECTION FACETS and NAME POSITIONS. A reflection macro's

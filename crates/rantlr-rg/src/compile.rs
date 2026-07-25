@@ -1016,6 +1016,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
             let mut pending_type_ir: Vec<usize> = Vec::new();
             let mut pending_export: Option<(u32, u32)> = None;
             let mut pending_import: Option<usize> = None;
+            let mut pending_ns: Option<usize> = None;
             let mut pending_module: Option<usize> = None;
             let mut pending_qualify: Option<usize> = None;
 
@@ -1136,6 +1137,17 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             error(d, a.name_span, "duplicate @qualify".into());
                         }
                     }
+                    "ns" => {
+                        // `@ns(tag)` — this alternative's def and refs
+                        // live in a NAMED namespace. Named namespaces
+                        // resolve hoisted (order-free) in every scope:
+                        // per-namespace ordering as declared data.
+                        if a.args.len() != 1 || a.args[0].2 {
+                            error(d, a.name_span, "@ns takes one bare namespace name".into());
+                        } else if pending_ns.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @ns".into());
+                        }
+                    }
                     "precedence" => {
                         if a.args.len() != 1 {
                             error(d, a.name_span, "@precedence takes one token argument".into());
@@ -1161,7 +1173,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         d,
                         a.name_span,
                         format!(
-                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence, @type, @export, @import, @module, @qualify)"
+                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence, @type, @export, @import, @module, @qualify, @ns)"
                         ),
                     ),
                 }
@@ -1173,6 +1185,17 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                     binding.exports.push((nt, prod));
                 } else {
                     error(d, span, "@export requires @def on the same alternative".into());
+                }
+            }
+            // ---- per-namespace ordering: `@ns` ----
+            if let Some(ai) = pending_ns {
+                let a = &alt.attrs[ai];
+                let has_site = binding.defs.iter().any(|e| e.0 == nt && e.1 == prod)
+                    || binding.refs.iter().any(|r| r.0 == nt && r.1 == prod);
+                if has_site {
+                    binding.namespaces.push((nt, prod, a.args[0].0.clone()));
+                } else {
+                    error(d, a.name_span, "@ns requires @def or @ref on the same alternative".into());
                 }
             }
             if let Some(ai) = pending_import {

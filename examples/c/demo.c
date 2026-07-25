@@ -16,6 +16,11 @@ enum color { RED, GREEN = 5, BLUE };
 
 typedef unsigned long word_t;
 
+/* The tag is FORWARD-declarable (wall 4): this typedef references
+   `struct point` before the definition below — C's tag namespace is
+   order-free while values stay define-before-use. */
+typedef struct point point_t;
+
 struct point {
     int x;
     int y;
@@ -23,8 +28,6 @@ struct point {
     word_t weight;
     struct point *next;
 };
-
-typedef struct point point_t;
 
 word_t global_words = 0;
 point_t *head_node;

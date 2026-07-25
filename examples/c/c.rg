@@ -208,10 +208,15 @@ rule decl_spec =
   | SpecStruct:   struct_spec
   | SpecEnum:     enum_spec
 
+// Tags live in C's TAG namespace — declared with @ns(tag), which also
+// declares its ORDERING: named namespaces resolve hoisted (order-free)
+// in every scope, so `typedef struct point point_t;` may precede the
+// struct definition — per-NAMESPACE ordering, while values stay
+// define-before-use.
 rule struct_spec =
-  | StructDef:  su tag:IDENT su_body @def(tag) @outline(tag, struct)
+  | StructDef:  su tag:IDENT su_body @def(tag) @ns(tag) @outline(tag, struct)
   | StructAnon: su su_body
-  | StructRef:  su tag:IDENT @ref(tag)
+  | StructRef:  su tag:IDENT @ref(tag) @ns(tag)
 
 rule su =
   | SuStruct: "struct"
@@ -229,9 +234,9 @@ rule field_decl =
   | TdField:   head:IDENT init_declarators ";" @ref(head)
 
 rule enum_spec =
-  | EnumDef:  "enum" tag:IDENT enum_body @def(tag) @outline(tag, constant)
+  | EnumDef:  "enum" tag:IDENT enum_body @def(tag) @ns(tag) @outline(tag, constant)
   | EnumAnon: "enum" enum_body
-  | EnumRef:  "enum" tag:IDENT @ref(tag)
+  | EnumRef:  "enum" tag:IDENT @ref(tag) @ns(tag)
 
 rule enum_body = EnumBody: "{" enumerators "}"
 

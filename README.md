@@ -1184,6 +1184,37 @@ and `g() * y` parse fine — only the bare name surrendered. 443 states
 (was 320 — the split's price), zero conflicts, demo extended through
 every door.
 
+## C wall 4: per-namespace ordering — tags are forward-declarable, values are not
+
+The wall-2 finding, paid off as one annotation. C's struct tags live
+in their own namespace AND their own ordering: `typedef struct point
+point_t;` is legal before the struct's definition, while a value used
+before its declaration is an error. Ordering was a per-SCOPE property
+here; C shows it is really per-NAMESPACE.
+
+The declared form: `@ns(tag)` on the tag productions —
+
+  | StructDef: su tag:IDENT su_body @def(tag) @ns(tag)
+  | StructRef: su tag:IDENT @ref(tag) @ns(tag)
+
+and the engine derives the rest, generically: refs only bind
+same-namespace defs (a variable named `node` and `struct node`
+coexist, each navigating to its own definition), and NAMED namespaces
+resolve hoisted — order-free in every scope — while the default
+namespace keeps each scope's declared ordering. The demo now puts the
+`point_t` typedef ABOVE the struct it references, the forward tag ref
+navigates to the later definition, `references` stays inside the
+namespace, and the gates pin the boundary from both sides:
+use-before-def of a VALUE is still diagnosed, and a typo'd tag is
+still "cannot find" — in its namespace.
+
+Under the hood the namespace rides the existing machinery: fragment
+resolution keys by (namespace, name), the cross-item environment
+hoists named-namespace definitions whole-file in both ordering modes,
+and the incremental fingerprints fold the namespace so classification
+caches stay exact. Signatures and cross-file counts key the pair too,
+so tags export and import like any other name.
+
 ## Status
 
 Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 144 tests (`cargo test --workspace`); the full story runs:

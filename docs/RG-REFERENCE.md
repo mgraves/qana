@@ -263,6 +263,7 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@import(label)` | The `label` token names an import: it resolves against other files' EXPORTS only (see **The module tier**) |
 | `@module(body)` | The `@def` on this alternative introduces a NAMESPACE; the defs inside the `body` child are its members |
 | `@qualify(base, name)` | The `name` token resolves among the members of what `base` resolves to (`a::b` paths; nest via a recursive path rule) |
+| `@ns(name)` | This alternative's `@def`/`@ref` live in the NAMED namespace `name`: refs only bind same-namespace defs, and named namespaces resolve hoisted (order-free) in every scope — per-namespace ordering (C struct tags are forward-declarable while values stay define-before-use) |
 
 Attribute names cannot be `.rg` reserved words, which is why the
 precedence override is spelled `@precedence` rather than `@prec`. Use it

@@ -257,3 +257,62 @@ int f(void) {\n\
     );
     assert!(msg.contains("example input"), "and a counterexample trace: {msg}");
 }
+
+/// C wall 4: per-NAMESPACE ordering. Tags (`@ns(tag)`) are hoisted —
+/// forward-declarable in every scope — while values keep
+/// define-before-use. One annotation declares both the partition and
+/// the ordering; the engine derives the rest.
+#[test]
+fn struct_tags_are_forward_declarable() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, C_RG);
+    let (lexer, tables) = certify(&out.def).unwrap();
+
+    // The typedef REFERENCES the tag before its definition — and a
+    // value named like the tag coexists without collision.
+    let doc = "\
+typedef struct node node_t;\n\
+struct node { node_t *next; int val; };\n\
+int node = 4;\n\
+int len(node_t *n) { return node + n->val; }\n";
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, doc).unwrap();
+    assert!(session.last_repairs.is_empty(), "{:?}", session.last_repairs);
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_tree("d", session.tree().unwrap().clone());
+    assert!(db.unresolved("d").is_empty(), "forward tag resolves: {:?}", db.unresolved("d"));
+
+    // The FORWARD tag ref navigates to the later definition site.
+    let fwd_ref = doc.find("struct node").unwrap() + "struct ".len();
+    let (duri, dspan) = db.definition("d", fwd_ref as u32).expect("tag ref resolves");
+    assert_eq!(duri, "d");
+    let def_site = doc.find("struct node {").unwrap() + "struct ".len();
+    assert_eq!(dspan.0 as usize, def_site, "…to the struct DEFINITION");
+
+    // Namespace partition: the VALUE `node` at its use site navigates
+    // to the int variable, never to the tag.
+    let val_use = doc.rfind("node +").unwrap();
+    let (_, vspan) = db.definition("d", val_use as u32).expect("value resolves");
+    assert_eq!(vspan.0 as usize, doc.find("int node").unwrap() + "int ".len());
+
+    // References stay inside their namespace: the tag's references are
+    // exactly the two `struct node` sites, not the int or its use.
+    let (refs, _) = db.references("d", def_site as u32).expect("tag references");
+    assert_eq!(refs.len(), 1, "one tag REFERENCE (the forward one): {refs:?}");
+    assert_eq!(refs[0].1 .0 as usize, fwd_ref);
+
+    // Values did NOT become forward: use-before-def still diagnosed.
+    let ordered = "int f(void) { return later; }\nint later = 1;\n";
+    let s2 = IncSession::new(&lexer, &out.def.sg, &tables, ordered).unwrap();
+    let mut db2 = SemDb::new(out.def.binding.clone());
+    db2.set_tree("o", s2.tree().unwrap().clone());
+    let unres: Vec<String> = db2.unresolved("o").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(unres, ["later"], "value ordering is untouched by the tag namespace");
+
+    // And an unknown tag is still a diagnosis, in its own namespace.
+    let bad = "typedef struct node node_t;\n";
+    let s3 = IncSession::new(&lexer, &out.def.sg, &tables, bad).unwrap();
+    let mut db3 = SemDb::new(out.def.binding.clone());
+    db3.set_tree("b", s3.tree().unwrap().clone());
+    let unres: Vec<String> = db3.unresolved("b").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(unres, ["node"], "missing tag diagnosed");
+}

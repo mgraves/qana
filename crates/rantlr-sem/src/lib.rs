@@ -91,6 +91,15 @@ pub struct BindingConfig {
     /// (nt, prod, base child, name child) — the name token resolves
     /// among the members of what the base resolves to (`@qualify`).
     pub quals: Vec<(u16, u16, usize, usize)>,
+    /// (nt, prod, namespace) — this production's def AND refs live in a
+    /// NAMED namespace (`@ns`). Namespaces partition resolution: a ref
+    /// only ever binds a def in its own namespace, so `struct point`
+    /// (tag) and a variable `point` coexist. Named namespaces resolve
+    /// HOISTED — order-free within every scope they appear in — while
+    /// the default namespace keeps each scope's declared ordering.
+    /// That split is per-NAMESPACE ordering: C struct tags are
+    /// forward-declarable while its values stay define-before-use.
+    pub namespaces: Vec<(u16, u16, String)>,
 }
 
 impl BindingConfig {
@@ -139,8 +148,23 @@ pub fn compose_binding(
     for &(nt, prod, b, k) in &guest.quals {
         out.quals.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset, b, k));
     }
+    for (nt, prod, ns) in &guest.namespaces {
+        out.namespaces.push((
+            nt + map.guest_nt_offset,
+            prod + map.guest_prod_offset,
+            ns.clone(),
+        ));
+    }
     out.unordered = host.unordered;
     out
+}
+
+/// The cross-item key for a (namespace, name) pair. `\u{1}` cannot
+/// appear in an identifier, so qualified keys never collide with plain
+/// names — and the default namespace keys stay the bare name (every
+/// pre-namespace map keeps its meaning).
+fn tkey(ns: &str, name: &str) -> String {
+    if ns.is_empty() { name.to_string() } else { format!("{ns}\u{1}{name}") }
 }
 
 /// The demo grammar's annotations: `let` defines (child 1), `NameRef`
@@ -176,6 +200,9 @@ pub struct Def {
     pub top_level: bool,
     /// Declared `@export` (meaningful when the module tier is on).
     pub exported: bool,
+    /// Declared namespace (`@ns`); "" is the default namespace. Named
+    /// namespaces resolve hoisted (order-free) in every scope.
+    pub ns: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,6 +212,8 @@ pub struct Ref {
     pub scope: ScopeId,
     pub order: u32,
     pub kind: RefKind,
+    /// Declared namespace (`@ns`); refs only bind same-namespace defs.
+    pub ns: String,
 }
 
 /// Composed whole-file symbol view (absolute spans/orders) — a derived
@@ -299,13 +328,15 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
     }
     // Env-independent local resolution: candidates are fragment defs in
     // VISIBLE scopes (barriers stop the walk). Ordering is a per-scope
-    // property: unordered scopes resolve forward. Root-scope candidates
-    // defer to the environment only when the ROOT itself is unordered
-    // (a later item may still shadow); barrier scopes are fragment-
-    // complete, so their unordered resolution is final here.
-    let mut by_name: HashMap<&str, Vec<u32>> = HashMap::new();
+    // property: unordered scopes resolve forward — and NAMED namespaces
+    // resolve forward in EVERY scope (per-namespace ordering: hoisted).
+    // Root-scope candidates defer to the environment when the root is
+    // unordered OR the def is namespaced (a later ITEM may hold the
+    // namespace's def); barrier scopes are fragment-complete, so their
+    // resolution is final here.
+    let mut by_name: HashMap<(&str, &str), Vec<u32>> = HashMap::new();
     for (i, d) in f.defs.iter().enumerate() {
-        by_name.entry(d.name.as_str()).or_default().push(i as u32);
+        by_name.entry((d.ns.as_str(), d.name.as_str())).or_default().push(i as u32);
     }
     let depths: Vec<u32> = (0..f.scope_parents.len() as u32).map(|s| f.scope_depth(s)).collect();
     for r in &f.refs {
@@ -313,13 +344,13 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
         // Imports resolve against other files' exports ONLY; qualified
         // names resolve among their base's members at query time.
         if r.kind != RefKind::Import && r.kind != RefKind::Qualified {
-        if let Some(cands) = by_name.get(r.name.as_str()) {
+        if let Some(cands) = by_name.get(&(r.ns.as_str(), r.name.as_str())) {
             for &i in cands {
                 let d = &f.defs[i as usize];
-                if f.scope_unordered[0] && d.scope == 0 {
-                    continue; // unordered top-level: environment decides
+                if (f.scope_unordered[0] || !d.ns.is_empty()) && d.scope == 0 {
+                    continue; // top-level forward world: environment decides
                 }
-                if (f.scope_unordered[d.scope as usize] || d.order < r.order)
+                if (f.scope_unordered[d.scope as usize] || !d.ns.is_empty() || d.order < r.order)
                     && f.visible(d.scope, r.scope)
                 {
                     let key = (depths[d.scope as usize], d.order, i);
@@ -402,6 +433,13 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
                 scope = id;
             }
         }
+        // A production's declared namespace covers its def and refs.
+        let node_ns = cfg
+            .namespaces
+            .iter()
+            .find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
+            .map(|t| t.2.as_str())
+            .unwrap_or("");
         if let Some(&(_, _, k)) = cfg.defs.iter().find(|&&(nt, p, _)| nt == n.nt && p == n.prod) {
             if let Some((name, off)) = name_child(n, k) {
                 *order += 1;
@@ -412,6 +450,7 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
                     order: *order,
                     top_level: scope == 0,
                     exported: cfg.exports.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
+                    ns: node_ns.to_string(),
                 });
             }
         }
@@ -429,6 +468,7 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
                     scope,
                     order: *order,
                     kind,
+                    ns: node_ns.to_string(),
                 });
             }
         }
@@ -699,7 +739,7 @@ impl SemDb {
                     fragments_computed += 1;
                     for &di in &f.top_defs {
                         let d = &f.defs[di as usize];
-                        let c = e.top_counts.entry(d.name.clone()).or_insert((0, 0));
+                        let c = e.top_counts.entry(tkey(&d.ns, &d.name)).or_insert((0, 0));
                         c.0 += 1;
                         c.1 += d.exported as i64;
                         e.sig_dirty = true;
@@ -717,12 +757,13 @@ impl SemDb {
                 if let Some((_, f)) = e.frag_cache.remove(&slot.ptr) {
                     for &di in &f.top_defs {
                         let d = &f.defs[di as usize];
-                        if let Some(c) = e.top_counts.get_mut(&d.name) {
+                        let k = tkey(&d.ns, &d.name);
+                        if let Some(c) = e.top_counts.get_mut(&k) {
                             c.0 -= 1;
                             c.1 -= d.exported as i64;
                             e.sig_dirty = true;
                             if c.0 <= 0 {
-                                e.top_counts.remove(&d.name);
+                                e.top_counts.remove(&k);
                             }
                         }
                     }
@@ -806,28 +847,49 @@ impl SemDb {
 
         // Environment fingerprints: chained over preceding items'
         // top-level NAME sequences (ordered), or the whole file's
-        // (unordered — every item sees the same environment).
+        // (unordered — every item sees the same environment). NAMED
+        // namespaces are hoisted, so their defs contribute whole-file
+        // in BOTH modes: fold them into one hash mixed into every
+        // item's fingerprint.
         let unordered = self.cfg.unordered;
         let tier = self.cfg.module_tier();
         let e = &self.files[uri];
         let n_items = e.items.len();
+        let mut named_h = FNV_SEED;
+        for slot in &e.items {
+            for &di in &slot.frag.top_defs {
+                let d = &slot.frag.defs[di as usize];
+                if !d.ns.is_empty() {
+                    named_h = fnv(named_h, d.ns.as_bytes());
+                    named_h = fnv(named_h, b"\0");
+                    named_h = fnv(named_h, d.name.as_bytes());
+                    named_h = fnv(named_h, b"\0");
+                }
+            }
+        }
         let mut env_fps = Vec::with_capacity(n_items);
         if unordered {
-            let mut h = FNV_SEED;
+            let mut h = named_h;
             for slot in &e.items {
                 for &di in &slot.frag.top_defs {
-                    h = fnv(h, slot.frag.defs[di as usize].name.as_bytes());
-                    h = fnv(h, b"\0");
+                    let d = &slot.frag.defs[di as usize];
+                    if d.ns.is_empty() {
+                        h = fnv(h, d.name.as_bytes());
+                        h = fnv(h, b"\0");
+                    }
                 }
             }
             env_fps.resize(n_items, h);
         } else {
             let mut h = FNV_SEED;
             for slot in &e.items {
-                env_fps.push(h);
+                env_fps.push(fnv(h, &named_h.to_le_bytes()));
                 for &di in &slot.frag.top_defs {
-                    h = fnv(h, slot.frag.defs[di as usize].name.as_bytes());
-                    h = fnv(h, b"\0");
+                    let d = &slot.frag.defs[di as usize];
+                    if d.ns.is_empty() {
+                        h = fnv(h, d.name.as_bytes());
+                        h = fnv(h, b"\0");
+                    }
                 }
             }
         }
@@ -841,14 +903,17 @@ impl SemDb {
         // across revisions (moved over by the positional diff); a
         // two-u64 fingerprint compare validates each — no hashing, no
         // map lookups on the keystroke path.
-        let mut env: HashSet<&str> = HashSet::new();
+        let mut env: HashSet<(&str, &str)> = HashSet::new();
         let e = &self.files[uri];
         let mut computed: Vec<(usize, Arc<ItemRes>)> = Vec::new(); // (item idx, res)
         let mut new_resolves = 0u64;
-        if unordered {
-            for slot in &e.items {
-                for &di in &slot.frag.top_defs {
-                    env.insert(slot.frag.defs[di as usize].name.as_str());
+        // Hoisted contributions first: every named-namespace top def is
+        // visible to every item, whatever the root's ordering says.
+        for slot in &e.items {
+            for &di in &slot.frag.top_defs {
+                let d = &slot.frag.defs[di as usize];
+                if unordered || !d.ns.is_empty() {
+                    env.insert((d.ns.as_str(), d.name.as_str()));
                 }
             }
         }
@@ -870,7 +935,10 @@ impl SemDb {
                         LocalRes::Def(d) => Classified::Local(d),
                         LocalRes::Contained => Classified::Unresolved,
                         LocalRes::Escape => {
-                            if r.kind != RefKind::Import && env.contains(r.name.as_str()) {
+                            let rk = tkey(&r.ns, &r.name);
+                            if r.kind != RefKind::Import
+                                && env.contains(&(r.ns.as_str(), r.name.as_str()))
+                            {
                                 Classified::Top
                             } else if r.kind == RefKind::Import || !tier {
                                 // Cross-file: imports always may; plain
@@ -879,7 +947,7 @@ impl SemDb {
                                 let visible = other_uris.iter().find(|u| {
                                     self.files[u.as_str()]
                                         .top_counts
-                                        .get(r.name.as_str())
+                                        .get(rk.as_str())
                                         .is_some_and(|c| if tier { c.1 > 0 } else { c.0 > 0 })
                                 });
                                 match visible {
@@ -890,7 +958,7 @@ impl SemDb {
                                             && other_uris.iter().any(|u| {
                                                 self.files[u.as_str()]
                                                     .top_counts
-                                                    .get(r.name.as_str())
+                                                    .get(rk.as_str())
                                                     .is_some_and(|c| c.0 > 0)
                                             });
                                         if hidden {
@@ -918,7 +986,10 @@ impl SemDb {
             }
             if !unordered {
                 for &di in &slot.frag.top_defs {
-                    env.insert(slot.frag.defs[di as usize].name.as_str());
+                    let d = &slot.frag.defs[di as usize];
+                    if d.ns.is_empty() {
+                        env.insert(("", d.name.as_str()));
+                    }
                 }
             }
         }
@@ -943,33 +1014,33 @@ impl SemDb {
         let mut idx: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
         for (i, slot) in e.items.iter().enumerate() {
             for &di in &slot.frag.top_defs {
-                idx.entry(slot.frag.defs[di as usize].name.clone())
-                    .or_default()
-                    .push((i as u32, di));
+                let d = &slot.frag.defs[di as usize];
+                idx.entry(tkey(&d.ns, &d.name)).or_default().push((i as u32, di));
             }
         }
         e.top_index = Some(idx);
     }
 
-    /// Top-level def site for `name` visible to item `k` (ordered:
-    /// latest strictly-earlier item; unordered: latest anywhere).
-    fn top_site(&mut self, uri: &str, name: &str, k: u32) -> Option<(u32, u32)> {
+    /// Top-level def site for a (ns, name) visible to item `k`
+    /// (ordered: latest strictly-earlier item; unordered OR named
+    /// namespace: latest anywhere — per-namespace ordering).
+    fn top_site(&mut self, uri: &str, ns: &str, name: &str, k: u32) -> Option<(u32, u32)> {
         self.ensure_top_index(uri);
-        let sites = self.files[uri].top_index.as_ref().unwrap().get(name)?;
-        if self.cfg.unordered {
+        let sites = self.files[uri].top_index.as_ref().unwrap().get(&tkey(ns, name))?;
+        if self.cfg.unordered || !ns.is_empty() {
             sites.last().copied()
         } else {
             sites.iter().rev().find(|(i, _)| *i < k).copied()
         }
     }
 
-    /// A foreign file's export site for `name` (its own last binding;
-    /// module tier on ⇒ exported bindings only).
-    fn export_site(&mut self, uri: &str, name: &str) -> Option<(u32, u32)> {
+    /// A foreign file's export site for a (ns, name) (its own last
+    /// binding; module tier on ⇒ exported bindings only).
+    fn export_site(&mut self, uri: &str, ns: &str, name: &str) -> Option<(u32, u32)> {
         let tier = self.cfg.module_tier();
         self.ensure_top_index(uri);
         let e = &self.files[uri];
-        let sites = e.top_index.as_ref().unwrap().get(name)?;
+        let sites = e.top_index.as_ref().unwrap().get(&tkey(ns, name))?;
         sites
             .iter()
             .rev()
@@ -1017,16 +1088,17 @@ impl SemDb {
         }
         let ri = slot.frag.refs.iter().position(|r| r.span.0 <= rel && rel < r.span.1)?;
         let name = slot.frag.refs[ri].name.clone();
+        let ns = slot.frag.refs[ri].ns.clone();
         let (_, _, res) = slot.res.as_ref()?;
         match res.targets[ri].clone() {
             Classified::Qualified => self.resolve_qualified(uri, k, ri as u32).ok(),
             Classified::Local(d) => Some((uri.to_string(), self.abs_def_span(uri, k, d))),
             Classified::Top => {
-                let (i, d) = self.top_site(uri, &name, k)?;
+                let (i, d) = self.top_site(uri, &ns, &name, k)?;
                 Some((uri.to_string(), self.abs_def_span(uri, i, d)))
             }
             Classified::Foreign(fu) => {
-                let (i, d) = self.export_site(&fu, &name)?;
+                let (i, d) = self.export_site(&fu, &ns, &name)?;
                 Some((fu.clone(), self.abs_def_span(&fu, i, d)))
             }
             Classified::Unresolved => None,
@@ -1042,13 +1114,13 @@ impl SemDb {
     ) -> Option<(Vec<(String, (u32, u32))>, (String, (u32, u32)))> {
         let (def_uri, def_span) = self.definition(uri, offset)?;
         // Canonical def identity: (uri, item, def idx).
-        let (def_item, def_idx, def_name, def_is_top) = {
+        let (def_item, def_idx, def_name, def_is_top, def_ns) = {
             let k = self.item_at(&def_uri, def_span.0)?;
             let slot = &self.files[&def_uri].items[k as usize];
             let rel = def_span.0 - slot.base_off;
             let di = slot.frag.defs.iter().position(|d| d.span.0 == rel)?;
             let d = &slot.frag.defs[di];
-            (k, di as u32, d.name.clone(), d.top_level)
+            (k, di as u32, d.name.clone(), d.top_level, d.ns.clone())
         };
         let uris: Vec<String> = {
             let mut v: Vec<String> = self.files.keys().cloned().collect();
@@ -1065,13 +1137,18 @@ impl SemDb {
                     (slot.base_off, slot.frag.refs.len())
                 };
                 for ri in 0..n_refs {
-                    let (name, span, target) = {
+                    let (name, ns, span, target) = {
                         let slot = &self.files[u].items[k as usize];
                         let r = &slot.frag.refs[ri];
                         let res = &slot.res.as_ref().unwrap().2;
-                        (r.name.clone(), (base_off + r.span.0, base_off + r.span.1), res.targets[ri].clone())
+                        (
+                            r.name.clone(),
+                            r.ns.clone(),
+                            (base_off + r.span.0, base_off + r.span.1),
+                            res.targets[ri].clone(),
+                        )
                     };
-                    if name != def_name {
+                    if name != def_name || ns != def_ns {
                         continue;
                     }
                     let hit = match target {
@@ -1085,12 +1162,12 @@ impl SemDb {
                         Classified::Top => {
                             def_is_top
                                 && u == &def_uri
-                                && self.top_site(u, &name, k) == Some((def_item, def_idx))
+                                && self.top_site(u, &ns, &name, k) == Some((def_item, def_idx))
                         }
                         Classified::Foreign(fu) => {
                             def_is_top
                                 && fu == def_uri
-                                && self.export_site(&fu, &name) == Some((def_item, def_idx))
+                                && self.export_site(&fu, &ns, &name) == Some((def_item, def_idx))
                         }
                         Classified::Unresolved => false,
                     };
@@ -1381,6 +1458,7 @@ impl SemDb {
                     order: base_order + d.order,
                     top_level: d.top_level,
                     exported: d.exported,
+                    ns: d.ns.clone(),
                 });
             }
             for r in &slot.frag.refs {
@@ -1390,6 +1468,7 @@ impl SemDb {
                     scope: remap(r.scope),
                     order: base_order + r.order,
                     kind: r.kind,
+                    ns: r.ns.clone(),
                 });
             }
             base_order += (slot.frag.defs.len() + slot.frag.refs.len()) as u32;
@@ -1418,16 +1497,20 @@ impl SemDb {
         for k in 0..n_items as u32 {
             let n_refs = self.files[uri].items[k as usize].frag.refs.len();
             for ri in 0..n_refs {
-                let (name, target) = {
+                let (name, ns, target) = {
                     let slot = &self.files[uri].items[k as usize];
                     let res = &slot.res.as_ref().unwrap().2;
-                    (slot.frag.refs[ri].name.clone(), res.targets[ri].clone())
+                    (
+                        slot.frag.refs[ri].name.clone(),
+                        slot.frag.refs[ri].ns.clone(),
+                        res.targets[ri].clone(),
+                    )
                 };
                 let t = match target {
                     Classified::Local(d) => {
                         Target::Local { def: (bases[k as usize] + d) as usize }
                     }
-                    Classified::Top => match self.top_site(uri, &name, k) {
+                    Classified::Top => match self.top_site(uri, &ns, &name, k) {
                         Some((i, d)) => {
                             Target::Local { def: (bases[i as usize] + d) as usize }
                         }
@@ -1439,7 +1522,7 @@ impl SemDb {
                             .entry(fu.clone())
                             .or_insert_with(|| def_base(self, &fu))
                             .clone();
-                        match self.export_site(&fu, &name) {
+                        match self.export_site(&fu, &ns, &name) {
                             Some((i, d)) => Target::Foreign {
                                 uri: fu.clone(),
                                 def: (fb[i as usize] + d) as usize,

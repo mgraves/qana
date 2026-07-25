@@ -252,6 +252,7 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@scope(unordered)` | A scope where forward references are legal (declaration languages) |
 | `@outline(label)` / `@outline(label, kind)` | Contribute a document symbol; kinds are `variable` (default), `constant`, `function`, `struct`, `module`, `class` |
 | `@precedence(token)` | Override this alternative's precedence (yacc's `%prec`) |
+| `@type(…)` | Declare this alternative's typing rule (see **The type tier** below) |
 
 Attribute names cannot be `.rg` reserved words, which is why the
 precedence override is spelled `@precedence` rather than `@prec`. Use it
@@ -276,6 +277,45 @@ There is no separate symbol-table pass to write.
 unordered scope — a declaration language, where a top-level name is
 visible to references that appear before it. Without it, top-level names
 follow definition-before-use.
+
+---
+
+## The type tier
+
+The toolchain predefines no types. A grammar declares its own vocabulary
+and per-production typing rules with `@type`, and one generic engine
+derives type assignment and mismatch diagnostics from that data. A
+grammar with no `@type` annotations has no type tier.
+
+At most one `@type` per alternative. Forms:
+
+| Form | Meaning |
+| --- | --- |
+| `@type(Atom)` | Nodes of this alternative have the atomic type `Atom` |
+| `@type(of, label)` | The type of the child at `label` |
+| `@type(sig, p…, R)` | The alternative's **rule symbols** (in order) must have types `p…`; the node has type `R` |
+| `@type(def, label)` | The name defined here (requires `@def`) carries the type of the child at `label`; the node itself stays untyped |
+| `@type(ref)` | The type of whatever this alternative's `@ref` resolved to |
+
+Type atoms are **Capitalized** names, invented freely — `Num`, `Str`,
+`Temperature`. Lowercase names inside a `sig` are **type variables**,
+unified per node: `@type(sig, t, t, t)` accepts `Num + Num` and
+`Str + Str` but reports the exact operand of a mixed pair.
+
+Checked at grammar compile time, with spans: a `sig` whose parameter
+count differs from the alternative's rule-symbol count, an unknown
+label, a label naming a token where a rule is required, `@type(def, …)`
+without `@def`, `@type(ref)` without `@ref`, and lowercase bare atoms
+are all refused before any document is ever parsed.
+
+Semantics at check time: synthesis is bottom-up; types cross names via
+the binding tier's resolution (def→ref chains converge regardless of
+declaration order); **unknown never cascades** — unresolved names and
+parse-repaired regions type as nothing, and a diagnostic is emitted
+only where two known types disagree.
+
+v0 limits: no type constructors, no subtyping, single-file flow,
+list-shaped children untyped.
 
 ---
 

@@ -49,6 +49,8 @@ COMMANDS
                             derived document symbols
     defs <grammar.rg> <file>
                             derived binding: defs, refs, unresolved
+    types <grammar.rg> <file> [--all]
+                            the declared type tier: typed defs, errors
     edit <grammar.rg> <file> --line N --text \"...\"
                             reparse incrementally; report reuse and timing
     ts <grammar.rg> <outdir>
@@ -71,6 +73,7 @@ fn main() {
         "parse" => cmd_parse(&args),
         "outline" => cmd_outline(&args),
         "defs" => cmd_defs(&args),
+        "types" => cmd_types(&args),
         "edit" => cmd_edit(&args),
         "ts" => cmd_ts(&args),
         "ast" => cmd_ast(&args),
@@ -343,6 +346,18 @@ fn cmd_check(args: &Args) {
             def.binding.scopes.len()
         ),
     );
+    row(
+        "type tier",
+        &if def.types.rules.is_empty() {
+            format!("none declared  {}", dim("(@type)"))
+        } else {
+            format!(
+                "{} rules over {}",
+                def.types.rules.len(),
+                def.types.atoms.join(", ")
+            )
+        },
+    );
 }
 
 fn row(label: &str, value: &str) {
@@ -525,6 +540,73 @@ fn cmd_defs(args: &Args) {
         println!("{} every reference resolves", green("✓"));
     } else {
         println!("{} {n_unres} unresolved reference(s)", red("✗"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// types — the declared type tier
+// ---------------------------------------------------------------------------
+
+fn cmd_types(args: &Args) {
+    let lang = load(args.at(0, "grammar.rg"));
+    let doc_path = args.at(1, "file");
+    let text = read_file(doc_path);
+    let session = session_for(&lang, &text);
+    let s = Src::new(doc_path, &text);
+
+    if lang.def.types.rules.is_empty() {
+        println!(
+            "{}",
+            dim("this grammar declares no type tier — add @type(…) annotations to rules")
+        );
+        return;
+    }
+
+    let mut db = SemDb::new(lang.def.binding.clone());
+    db.set_types(lang.def.types.clone());
+    db.set_tree(doc_path, session.tree().expect("total").clone());
+    let report = db.types(doc_path);
+
+    println!("{} {}", bold("vocabulary"), report.atoms.join(", "));
+    println!();
+    println!("{}", bold("typed definitions"));
+    if report.def_types.is_empty() {
+        println!("  {}", dim("none"));
+    }
+    for &(span, t) in &report.def_types {
+        let (line, col) = s.line_col(span.0);
+        let name = &text[span.0 as usize..span.1 as usize];
+        println!(
+            "  {:<24} {:<10} {}",
+            green(name),
+            cyan(&report.atoms[t as usize]),
+            dim(&format!("{line}:{col}"))
+        );
+    }
+
+    if args.has("all") {
+        println!();
+        println!("{}", bold("typed nodes"));
+        for &((a, b), t) in &report.types {
+            let (line, col) = s.line_col(a);
+            println!(
+                "  {:<10} {:<10} {}",
+                cyan(&report.atoms[t as usize]),
+                dim(&format!("{line}:{col}")),
+                render::escape(text[a as usize..(b as usize).min(text.len())].trim_end())
+            );
+        }
+    }
+
+    println!();
+    if report.diags.is_empty() {
+        println!("{} no type errors ({} nodes typed)", green("✓"), report.types.len());
+    } else {
+        for d in &report.diags {
+            render::diagnostic(&s, 1, d.span, &d.msg);
+        }
+        println!("{} {} type error(s)", red("✗"), report.diags.len());
+        std::process::exit(1);
     }
 }
 

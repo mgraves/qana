@@ -223,6 +223,64 @@ your grammar, not in someone's document a year later.
 
 ---
 
+## The type tier: declared, not predefined
+
+rantlr ships **no types**. The starter grammar declares its own:
+
+```
+rule expr =
+  | AddExpr:   expr "+" expr @type(sig, Num, Num, Num)
+  | ParenExpr: "(" e:expr ")" @type(of, e)
+  | NumLit:    NUMBER @type(Num)
+  | StrLit:    STRING @type(Str)
+  | NameRef:   name:IDENT @ref(name) @type(ref)
+```
+
+`Num` and `Str` are this grammar's invented vocabulary — the toolchain
+has never heard of them. `@type(sig, …)` reads as a signature over the
+alternative's rule symbols; `@type(def, e)` (on the `let` rule) gives
+the defined name its initializer's type; `@type(ref)` flows it back
+through every use, riding the same resolution that powers
+go-to-definition. One generic engine derives the rest:
+
+```bash
+rantlr types mylang/mylang.rg mylang/example.my
+```
+
+```text
+vocabulary Num, Str
+
+typed definitions
+  width                    Num        4:5
+  height                   Num        5:5
+  area                     Num        10:7
+
+✓ no type errors (12 nodes typed)
+```
+
+Change `3` to `3 + "three"` and the mismatch is reported on the exact
+operand (`expected `Num`, found `Str``), in the terminal and as a live
+red squiggle in the editor. Unknown never cascades: an unresolved name
+or a parse-repaired region types as *nothing*, not as an error.
+
+Malformed declarations are refused at grammar compile time, spans and
+all — a signature whose arity doesn't match the alternative, a label
+that doesn't exist, `@type(ref)` without `@ref`. Same envelope
+philosophy, extended to the tier: bad declarations are caught in your
+grammar, not discovered in someone's document.
+
+Delete every `@type` annotation and the tier is exactly gone — empty
+vocabulary, zero rules, no type queries. Its power is precisely what
+the grammar declared.
+
+v0 limits, honestly: atoms and per-production signatures with local
+variables only (no constructors like `List<T>`, no subtyping); types
+flow within one file (cross-file references type as unknown); list-
+shaped children stay untyped; checking is file-granular per query
+rather than per-item memoized.
+
+---
+
 ## In an editor
 
 The VS Code extension is a thin client over `rantlr-lsp`. It serves two
@@ -319,10 +377,11 @@ the repeated element must be a rule rather than a bare token. Composition
 tested, but only through the Rust `compose()` API; there is no `island`
 declaration on the `.rg` surface yet.
 
-**Semantics.** The semantic layer does binding and scoping only: what
-names exist, where they are defined, what a reference points at. There
-is no type system, and no module or import system — top-level names form
-one namespace across files. Custom diagnostics and quick fixes are not
+**Semantics.** The semantic layer does binding, scoping, and the
+declared type tier described above — atoms, signatures, and name-flow,
+but no type constructors, no subtyping, and no cross-file type flow.
+There is no module or import system — top-level names form one
+namespace across files. Custom diagnostics and quick fixes are not
 authorable; error messages are terminal-level ("missing SEMI").
 
 **Editor surface.** Hover, formatting, code actions, inlay hints, and
@@ -347,6 +406,7 @@ memoized semantics, composition — are built and gated.
 | `rantlr parse <g.rg> <file> [--trivia] [--depth N]` | The lossless tree, losslessness check, and any repairs |
 | `rantlr outline <g.rg> <file>` | Derived document symbols |
 | `rantlr defs <g.rg> <file>` | Derived binding: definitions, references, resolution |
+| `rantlr types <g.rg> <file> [--all]` | The declared type tier: typed definitions and mismatches |
 | `rantlr edit <g.rg> <file> --line N --text "…"` | Incremental reparse: reuse, timing, and the batch differential |
 | `rantlr ts <g.rg> <outdir>` | Emit a tree-sitter grammar and highlight queries |
 | `rantlr ast <g.rg>` | Emit a typed Rust AST to stdout |

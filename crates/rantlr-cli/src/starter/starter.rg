@@ -64,7 +64,7 @@ rule program = Program: stmts
 rule stmts = stmt*
 
 rule stmt =
-  | LetStmt:   "let" name:IDENT "=" expr ";" @def(name) @outline(name)
+  | LetStmt:   "let" name:IDENT "=" e:expr ";" @def(name) @outline(name) @type(def, e)
   | PrintStmt: "print" args ";"
   | BlockStmt: block
 
@@ -75,12 +75,25 @@ rule args = expr+ % ","
 // invisible outside, and go-to-definition respects that.
 rule block = Block: "{" stmts "}" @scope
 
+// ---------------------------------------------------------------------
+// The type tier
+//
+// The toolchain ships NO types. `Num` and `Str` below are THIS
+// grammar's invented vocabulary; the rules are data; the checker is
+// generic. `@type(sig, Num, Num, Num)` reads like a function signature
+// over the alternative's rule symbols; `@type(def, e)` gives the
+// defined name the type of its initializer; `@type(ref)` flows it back
+// through every use, via the same resolution go-to-definition uses.
+// Try `let x = 1 + "one";` in the sample — the mismatch is reported on
+// the exact operand, and deleting these annotations deletes the tier.
+// ---------------------------------------------------------------------
+
 rule expr =
-  | AddExpr:   expr "+" expr
-  | SubExpr:   expr "-" expr
-  | MulExpr:   expr "*" expr
-  | DivExpr:   expr "/" expr
-  | ParenExpr: "(" expr ")"
-  | NumLit:    NUMBER
-  | StrLit:    STRING
-  | NameRef:   name:IDENT @ref(name)
+  | AddExpr:   expr "+" expr @type(sig, Num, Num, Num)
+  | SubExpr:   expr "-" expr @type(sig, Num, Num, Num)
+  | MulExpr:   expr "*" expr @type(sig, Num, Num, Num)
+  | DivExpr:   expr "/" expr @type(sig, Num, Num, Num)
+  | ParenExpr: "(" e:expr ")" @type(of, e)
+  | NumLit:    NUMBER @type(Num)
+  | StrLit:    STRING @type(Str)
+  | NameRef:   name:IDENT @ref(name) @type(ref)

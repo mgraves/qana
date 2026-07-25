@@ -55,7 +55,7 @@ rule file = File: stmts
 rule stmts = stmt*
 
 rule stmt =
-  | LetStmt: "let" name:IDENT "=" expr ";" @def(name) @outline(name)
+  | LetStmt: "let" name:IDENT "=" e:expr ";" @def(name) @outline(name) @type(def, e)
   | ExprStmt: expr ";"
   | BlockStmt: block
   | IfStmt: "if" "(" expr ")" block
@@ -64,15 +64,15 @@ rule stmt =
 rule block = Block: "{" stmts "}" @scope
 
 rule expr =
-  | AddExpr: expr "+" expr
-  | SubExpr: expr "-" expr
-  | MulExpr: expr "*" expr
-  | DivExpr: expr "/" expr
-  | NumLit: NUMBER
-  | StrLit: STRING
-  | NameRef: name:IDENT @ref(name)
+  | AddExpr: expr "+" expr @type(sig, Num, Num, Num)
+  | SubExpr: expr "-" expr @type(sig, Num, Num, Num)
+  | MulExpr: expr "*" expr @type(sig, Num, Num, Num)
+  | DivExpr: expr "/" expr @type(sig, Num, Num, Num)
+  | NumLit: NUMBER @type(Num)
+  | StrLit: STRING @type(Str)
+  | NameRef: name:IDENT @ref(name) @type(ref)
   | CallExpr: callee:IDENT "(" args ")" @ref(callee, call)
-  | ParenExpr: "(" expr ")"
+  | ParenExpr: "(" e:expr ")" @type(of, e)
   | ListExpr: "[" args "]"
 
 // `expr* % ","` — possibly-empty comma-separated list: desugars to the

@@ -153,6 +153,34 @@ fn incremental_edit_agrees_with_full_reparse() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The declared type tier through the shipped binary: the scaffold's
+/// grammar declares Num/Str, the sample types cleanly, and a mismatch
+/// is reported on the exact operand with exit 1.
+#[test]
+fn declared_type_tier_reports_defs_and_mismatches()  {
+    let dir = scratch("types");
+    let (g, doc) = scaffold(&dir);
+
+    let clean = run(&["types", &g, &doc]);
+    assert!(clean.status.success(), "clean sample: {}", stderr(&clean));
+    let out = stdout(&clean);
+    assert!(out.contains("Num"), "defs show the grammar's own vocabulary:\n{out}");
+    assert!(out.contains("no type errors"), "clean sample has none:\n{out}");
+
+    let src = std::fs::read_to_string(&doc).unwrap();
+    let broken = dir.join("broken.my");
+    std::fs::write(&broken, src.replacen("= 3;", "= 3 + \"three\";", 1)).unwrap();
+    let bad = run(&["types", &g, broken.to_str().unwrap()]);
+    assert_eq!(bad.status.code(), Some(1), "type errors exit 1");
+    let msg = stderr(&bad);
+    assert!(
+        msg.contains("expected `Num`, found `Str`"),
+        "names both types from the declared vocabulary:\n{msg}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The export paths named in the guide actually write files.
 #[test]
 fn tree_sitter_and_ast_exports_produce_output() {

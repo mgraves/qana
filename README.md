@@ -741,12 +741,55 @@ Docs: [docs/GUIDE.md](docs/GUIDE.md) and
 [docs/RG-REFERENCE.md](docs/RG-REFERENCE.md), every command in them run
 against a fresh scaffold before shipping.
 
+## The declared type tier (shipped): types as grammar-author data
+
+The client question behind this increment: language tools usually
+either predefine their semantic vocabulary (every language gets the
+same fixed "struct/function" ontology) or offer none. The design bet
+here is a third way, the same one binding already took — **the tier is
+not predefined, but the grammar definition has a means of building it.**
+The toolchain ships zero types. A grammar declares a vocabulary and
+per-production rules as annotations; the compiler lowers them to a
+`TypeConfig` VALUE (`rantlr-sem::types`); one generic engine derives
+type assignment and diagnostics for any language from that data. A
+grammar that declares nothing gets a tier of exactly nothing.
+
+The v0 declaration forms, riding the existing attribute syntax (no
+grammar-surface change — the self-hosting fixed point is untouched):
+`@type(Atom)` constants, `@type(of, label)` propagation, `@type(sig,
+p…, R)` signatures over the alternative's rule symbols with local type
+variables (unified per node: `sig, t, t, t` is polymorphic equality),
+`@type(def, label)` giving a defined name its initializer's type, and
+`@type(ref)` flowing types through the binding tier's own resolution.
+Malformed declarations are refused at grammar compile time with spans
+(arity vs the production, unknown labels, `def`/`ref` forms without
+their binding counterparts) — the envelope pattern extended to types.
+
+Checking is bottom-up synthesis with def→ref chains iterated to a fixed
+point, so declaration order never matters; **unknown never cascades**
+(unresolved names and repaired regions type as nothing rather than
+erroring). Surfaced everywhere the other tiers are: `rantlr types`
+(typed definitions, mismatches on the exact operand, exit 1), a type
+line in `rantlr check`, and live LSP diagnostics that heal on fix —
+including through grammar hot-reload. `compose_types` mirrors
+`compose_binding` for island composition (host ids preserved, guest
+offset, vocabularies merged by name).
+
+Gates: six e2e tests (vocabulary/flow/convergence, sig-variable
+unification with span-carrying mismatches, unknown-stays-silent,
+no-declarations-no-tier, malformed-declarations-refused-with-spans,
+and compose_types offset/merge), an LSP publish-and-heal test, and a
+CLI test through the shipped binary. v0 limits recorded in the guide: atoms + signatures only (no
+constructors, no subtyping), single-file flow, list children untyped,
+file-granular recompute (per-item memoization is the named refinement).
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 106 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 114 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
-AST + editor services + semantic binding + LSP, self-hosted: the grammar
+AST + editor services + semantic binding + a declared type tier + LSP,
+self-hosted: the grammar
 language is defined in itself, parsed by its own engine, and its files
 get the same editor intelligence as the languages it defines** — and it
 is now drivable from a command line and documented for someone who has

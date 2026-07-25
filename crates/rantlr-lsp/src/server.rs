@@ -59,7 +59,8 @@ impl Server {
         let pipeline = build_pipeline(&LangConfig::default()).expect("default config builds");
         let tc: &'static RgToolchain = Box::leak(Box::new(RgToolchain::new()));
         let rg_pipe = rg_service_pipeline(tc);
-        let sem = SemDb::new(pipeline.binding.clone());
+        let mut sem = SemDb::new(pipeline.binding.clone());
+        sem.set_types(pipeline.types.clone());
         let rg_sem = SemDb::new(rg_pipe.binding.clone());
         Server {
             pipeline,
@@ -439,14 +440,23 @@ impl Server {
         .collect();
         match lang {
             DocLang::Target => {
-                // Semantic layer: unresolved variable reads (warnings).
+                // Semantic layer: unresolved variable reads (warnings)
+                // and declared-type-tier mismatches (errors).
                 let unresolved = self.sem.unresolved(uri);
+                let type_diags = self.sem.types(uri).diags;
                 let doc = self.docs.get(uri).unwrap();
                 for (name, span) in unresolved {
                     diags.push(json!({
                         "range": range_json(doc, span),
                         "severity": 2,
                         "message": format!("cannot find `{name}`")
+                    }));
+                }
+                for d in type_diags {
+                    diags.push(json!({
+                        "range": range_json(doc, d.span),
+                        "severity": 1,
+                        "message": d.msg
                     }));
                 }
             }
@@ -527,8 +537,10 @@ impl Server {
             }
             Ok(pipeline) => {
                 self.pipeline = pipeline;
-                // New grammar ⇒ new binding config; trees repopulate below.
+                // New grammar ⇒ new binding + type configs; trees
+                // repopulate below.
                 self.sem = SemDb::new(self.pipeline.binding.clone());
+                self.sem.set_types(self.pipeline.types.clone());
                 let uris: Vec<(String, DocLang)> =
                     self.docs.iter().map(|(u, d)| (u.clone(), d.lang)).collect();
                 let mut out = Vec::new();

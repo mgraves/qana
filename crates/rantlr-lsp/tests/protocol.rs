@@ -377,6 +377,55 @@ fn hot_reload_from_rg_grammar_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The declared type tier over the wire: a `.rg` grammar's `@type`
+/// annotations become live diagnostics on target documents, and they
+/// heal when the document is fixed.
+#[test]
+fn declared_type_errors_publish_and_heal() {
+    let dir = std::env::temp_dir().join(format!("rantlr-lsp-types-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // CHARTLANG_RG carries the type tier (Num/Str + sig/def/ref rules).
+    std::fs::write(dir.join("chartlang.rg"), CHARTLANG_RG).unwrap();
+
+    let mut s = Server::new();
+    s.root = Some(dir.clone());
+    init(&mut s);
+    let out = open(&mut s, "let a = 1 + \"one\";\n");
+    let diag = out
+        .iter()
+        .filter(|m| m["method"] == "textDocument/publishDiagnostics")
+        .filter_map(|m| m.pointer("/params/diagnostics"))
+        .flat_map(|d| d.as_array().unwrap())
+        .find(|d| d["message"].as_str().unwrap_or("").contains("type mismatch"))
+        .cloned()
+        .expect("type mismatch published on open");
+    assert_eq!(diag["severity"], 1);
+    assert!(
+        diag["message"].as_str().unwrap().contains("`Num`")
+            && diag["message"].as_str().unwrap().contains("`Str`"),
+        "names both types: {}",
+        diag["message"]
+    );
+    // The span points at the string operand, not 0:0.
+    assert!(diag.pointer("/range/start/character").unwrap().as_u64().unwrap() > 8);
+
+    // Fix the document: the type diagnostics heal.
+    let out = change(
+        &mut s,
+        json!({"start": {"line": 0, "character": 12}, "end": {"line": 0, "character": 17}}),
+        "2",
+    );
+    let healed = out
+        .iter()
+        .filter(|m| m["method"] == "textDocument/publishDiagnostics")
+        .filter_map(|m| m.pointer("/params/diagnostics"))
+        .flat_map(|d| d.as_array().unwrap())
+        .all(|d| !d["message"].as_str().unwrap_or("").contains("type mismatch"));
+    assert!(healed, "fixing the operand clears the type error");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Bring your own language: the grammar file does NOT have to be called
 /// `chartlang.rg`. Any single `.rg` in the workspace root is the
 /// language definition, and it hot-reloads under its own name.

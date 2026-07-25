@@ -68,6 +68,8 @@ pub struct EmbeddedLang {
     pub styles: rantlr_services::Styles,
     pub outline: rantlr_services::OutlineConfig,
     pub binding: rantlr_sem::BindingConfig,
+    /// The declared type tier (empty when the grammar declares none).
+    pub types: rantlr_sem::TypeConfig,
 }
 
 impl EmbeddedLang {
@@ -95,6 +97,7 @@ impl EmbeddedLang {
             styles: out.def.styles,
             outline: out.def.outline,
             binding: out.def.binding,
+            types: out.def.types,
         })
     }
 

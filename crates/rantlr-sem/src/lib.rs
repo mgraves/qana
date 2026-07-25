@@ -34,6 +34,9 @@ use rantlr_grammar::{GreenChild, GreenNode, SynGrammar};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod types;
+pub use types::{compose_types, TypeConfig, TypeDiag, TypeId, TypeReport, TypeRule, TyTerm};
+
 // ---------------------------------------------------------------------------
 // Binding configuration (the @def/@ref/@scope annotations, as data)
 // ---------------------------------------------------------------------------
@@ -442,6 +445,8 @@ struct FileEntry {
 
 pub struct SemDb {
     cfg: BindingConfig,
+    /// The declared type tier, when the grammar declared one.
+    type_cfg: Option<types::TypeConfig>,
     revision: u64,
     files: HashMap<String, FileEntry>,
     pub stats: SemStats,
@@ -459,7 +464,13 @@ const FNV_SEED: u64 = 0xcbf29ce484222325;
 
 impl SemDb {
     pub fn new(cfg: BindingConfig) -> Self {
-        SemDb { cfg, revision: 0, files: HashMap::new(), stats: SemStats::default() }
+        SemDb {
+            cfg,
+            type_cfg: None,
+            revision: 0,
+            files: HashMap::new(),
+            stats: SemStats::default(),
+        }
     }
 
     /// Input: a file's current tree (from the incremental session).

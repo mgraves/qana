@@ -113,6 +113,9 @@ pub struct Pipeline {
     pub styles: Styles,
     pub outline_cfg: OutlineConfig,
     pub binding: BindingConfig,
+    /// The declared type tier (empty for languages that declare none —
+    /// the legacy toml config and the `.rg` surface itself).
+    pub types: rantlr_sem::TypeConfig,
 }
 
 pub fn build_pipeline(cfg: &LangConfig) -> Result<Pipeline, String> {
@@ -152,6 +155,7 @@ pub fn build_pipeline(cfg: &LangConfig) -> Result<Pipeline, String> {
         styles,
         outline_cfg,
         binding,
+        types: rantlr_sem::TypeConfig::default(),
     })
 }
 
@@ -173,6 +177,7 @@ pub fn build_pipeline_rg(tc: &RgToolchain, text: &str) -> Result<Pipeline, Vec<R
         styles: out.def.styles,
         outline_cfg: out.def.outline,
         binding: out.def.binding,
+        types: out.def.types,
     })
 }
 
@@ -202,5 +207,6 @@ pub fn rg_service_pipeline(tc: &'static RgToolchain) -> Pipeline {
         styles: rg_styles(&tc.ids),
         outline_cfg: rg_outline_config(&tc.sg),
         binding: rg_binding_config(&tc.sg),
+        types: rantlr_sem::TypeConfig::default(),
     }
 }

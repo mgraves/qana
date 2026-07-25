@@ -13,7 +13,7 @@ use rantlr_grammar::model::{BracketKind, LexGrammar, TokenDef, TokenId};
 use rantlr_grammar::pat::Pat;
 use rantlr_grammar::syn::{Assoc, Sym, SynGrammar};
 use rantlr_grammar::{build_lr, CompiledLexer, GreenChild, GreenNode, GreenToken, LrTables, Vocab};
-use rantlr_sem::{BindingConfig, RefKind};
+use rantlr_sem::{BindingConfig, RefKind, TyTerm, TypeConfig, TypeRule};
 use rantlr_services::{OutlineConfig, OutlineEntry, Styles, LEGEND};
 use std::collections::HashMap;
 
@@ -35,6 +35,9 @@ pub struct LangDef {
     pub lex: LexGrammar,
     pub sg: SynGrammar,
     pub binding: BindingConfig,
+    /// The declared type tier (`@type` annotations, as data). Empty
+    /// when the grammar declares none — and then so is the tier.
+    pub types: TypeConfig,
     pub styles: Styles,
     pub outline: OutlineConfig,
     /// Token id → span of its declaring name (keywords: the item span).
@@ -843,6 +846,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
     }
 
     let mut binding = BindingConfig::default();
+    let mut type_cfg = TypeConfig::default();
     let mut outline = OutlineConfig::default();
     let mut prod_spans: Vec<(u32, u32)> = Vec::new();
     let mut labels_seen: HashMap<String, ()> = HashMap::new();
@@ -966,7 +970,12 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
             let prod = sg.prod_named(nt, &alt.label, rhs) as u16;
             prod_spans.push(alt.label_span);
 
-            for a in &alt.attrs {
+            // `@type` is resolved AFTER the other attributes: its `def`
+            // and `ref` forms read the binding entries `@def`/`@ref`
+            // create, and attribute order must not matter.
+            let mut pending_type_ir: Vec<usize> = Vec::new();
+
+            for (ai, a) in alt.attrs.iter().enumerate() {
                 let pos_of = |d: &mut Vec<RgDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
                     match positions.get(arg.0.as_str()) {
                         Some(&k) => Some(k),
@@ -1054,6 +1063,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                     // Spelled in full: `prec` is a reserved word of the
                     // surface, so `@prec` lexes as a keyword and can
                     // never reach an attribute name.
+                    "type" => pending_type_ir.push(ai),
                     "precedence" => {
                         if a.args.len() != 1 {
                             error(d, a.name_span, "@precedence takes one token argument".into());
@@ -1079,9 +1089,153 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         d,
                         a.name_span,
                         format!(
-                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence)"
+                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence, @type)"
                         ),
                     ),
+                }
+            }
+
+            // ---- the declared type tier: `@type(…)` forms ----
+            let mut type_declared = false;
+            for ai in pending_type_ir {
+                let a = &alt.attrs[ai];
+                if std::mem::replace(&mut type_declared, true) {
+                    error(d, a.name_span, "at most one @type per alternative".into());
+                    continue;
+                }
+                // A term of the vocabulary: Capitalized = atom (interned
+                // into the grammar's own vocabulary), lowercase = local
+                // type variable (sig only). Strings/numbers are neither.
+                let term = |cfg: &mut TypeConfig,
+                            d: &mut Vec<RgDiag>,
+                            vars: &mut Vec<String>,
+                            arg: &(String, (u32, u32), bool)|
+                 -> Option<TyTerm> {
+                    let (text, span, is_string) = arg;
+                    let first = text.chars().next().unwrap_or('0');
+                    if *is_string || !first.is_ascii_alphabetic() {
+                        error(d, *span, "type terms are names: `Atom` or a lowercase variable".into());
+                        return None;
+                    }
+                    if first.is_ascii_uppercase() {
+                        return Some(TyTerm::Atom(cfg.intern(text)));
+                    }
+                    let v = match vars.iter().position(|v| v == text) {
+                        Some(i) => i,
+                        None => {
+                            vars.push(text.clone());
+                            vars.len() - 1
+                        }
+                    };
+                    if v >= 26 {
+                        error(d, *span, "too many type variables in one signature".into());
+                        return None;
+                    }
+                    Some(TyTerm::Var(v as u8))
+                };
+                // Label → symbol position, and the position must hold a
+                // RULE (types attach to nodes; tokens are untyped).
+                let rule_pos = |d: &mut Vec<RgDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
+                    let k = match positions.get(arg.0.as_str()) {
+                        Some(&k) => k,
+                        None => {
+                            error(d, arg.1, format!("no symbol labeled `{}` in this alternative", arg.0));
+                            return None;
+                        }
+                    };
+                    match sg.prods[prod as usize].rhs.get(k) {
+                        Some(Sym::N(_)) => Some(k),
+                        _ => {
+                            error(d, arg.1, format!("`{}` labels a token — @type sources must be rule symbols", arg.0));
+                            None
+                        }
+                    }
+                };
+                let head = a.args.first().map(|x| x.0.as_str()).unwrap_or("");
+                let rule: Option<TypeRule> = match (head, a.args.len()) {
+                    (_, 0) => {
+                        error(d, a.name_span, "@type needs arguments: an Atom, `ref`, `of, label`, `def, label`, or `sig, …`".into());
+                        None
+                    }
+                    ("ref", 1) => match binding.refs.iter().find(|r| r.0 == nt && r.1 == prod) {
+                        Some(&(_, _, k, _)) => Some(TypeRule::FromRef { ref_child: k }),
+                        None => {
+                            error(d, a.name_span, "@type(ref) requires @ref on the same alternative".into());
+                            None
+                        }
+                    },
+                    ("of", 2) => rule_pos(d, &a.args[1]).map(TypeRule::OfChild),
+                    ("def", 2) => {
+                        let src = rule_pos(d, &a.args[1]);
+                        let def = binding.defs.iter().find(|e| e.0 == nt && e.1 == prod);
+                        match (src, def) {
+                            (Some(src), Some(&(_, _, def_child))) => {
+                                Some(TypeRule::DefFrom { src, def_child })
+                            }
+                            (Some(_), None) => {
+                                error(d, a.name_span, "@type(def, …) requires @def on the same alternative".into());
+                                None
+                            }
+                            _ => None,
+                        }
+                    }
+                    ("sig", n) if n >= 2 => {
+                        let mut vars: Vec<String> = Vec::new();
+                        let params: Vec<TyTerm> = a.args[1..n - 1]
+                            .iter()
+                            .filter_map(|arg| term(&mut type_cfg, d, &mut vars, arg))
+                            .collect();
+                        let result = term(&mut type_cfg, d, &mut vars, &a.args[n - 1]);
+                        let n_rules = sg.prods[prod as usize]
+                            .rhs
+                            .iter()
+                            .filter(|s| matches!(s, Sym::N(_)))
+                            .count();
+                        if params.len() != n - 2 || result.is_none() {
+                            None // term() already reported
+                        } else if params.len() != n_rules {
+                            error(
+                                d,
+                                a.name_span,
+                                format!(
+                                    "@type(sig, …) has {} parameter(s) but the alternative has {} rule symbol(s)",
+                                    params.len(),
+                                    n_rules
+                                ),
+                            );
+                            None
+                        } else {
+                            Some(TypeRule::Sig { params, result: result.unwrap() })
+                        }
+                    }
+                    (_, 1) => {
+                        let arg = &a.args[0];
+                        let first = arg.0.chars().next().unwrap_or('0');
+                        if arg.2 || !first.is_ascii_uppercase() {
+                            error(
+                                d,
+                                arg.1,
+                                format!(
+                                    "`{}` is not a type atom — atoms are Capitalized names (lowercase names are sig variables)",
+                                    arg.0
+                                ),
+                            );
+                            None
+                        } else {
+                            Some(TypeRule::Const(type_cfg.intern(&arg.0)))
+                        }
+                    }
+                    (other, _) => {
+                        error(
+                            d,
+                            a.name_span,
+                            format!("unknown @type form `{other}` (expected an Atom, `ref`, `of`, `def`, or `sig`)"),
+                        );
+                        None
+                    }
+                };
+                if let Some(r) = rule {
+                    type_cfg.rules.push((nt, prod, r));
                 }
             }
         }
@@ -1130,7 +1284,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
     }
 
     (
-        LangDef { lex, sg, binding, styles, outline, token_spans, prod_spans },
+        LangDef { lex, sg, binding, types: type_cfg, styles, outline, token_spans, prod_spans },
         diags,
     )
 }

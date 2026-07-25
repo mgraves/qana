@@ -28,3 +28,8 @@ print width + height;
 #   rantlr edit <grammar> <this file> --line 4 --text "let width = 30;"
 #     Reports how much of the tree survived the edit, and checks the
 #     incremental result against a full reparse.
+#
+#   rantlr types <grammar> <this file>
+#     The declared type tier: every `let` shows its inferred type (Num
+#     here — the grammar's own vocabulary, not the tool's). Change 3 to
+#     3 + "three" and the mismatch is reported on the exact operand.

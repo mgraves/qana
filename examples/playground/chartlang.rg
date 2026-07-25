@@ -15,6 +15,9 @@
 //   * Delete the `prec` lines — the envelope REFUSES the now-ambiguous
 //     expression grammar, pointing at a production with a concrete
 //     counterexample input. Undo, and the language comes back.
+//   * Type `let x = 1 + "one";` in demo.cl — the DECLARED type tier
+//     (the @type annotations below) reports the mismatch on the exact
+//     operand, live. `Num`/`Str` are this grammar's own vocabulary.
 
 language Demo
 max_stack 8
@@ -67,7 +70,7 @@ rule file = File: stmts
 rule stmts = stmt*
 
 rule stmt =
-  | LetStmt: "let" name:IDENT "=" expr ";" @def(name) @outline(name)
+  | LetStmt: "let" name:IDENT "=" e:expr ";" @def(name) @outline(name) @type(def, e)
   | ExprStmt: expr ";"
   | BlockStmt: block
   | IfStmt: "if" "(" expr ")" block
@@ -76,15 +79,15 @@ rule stmt =
 rule block = Block: "{" stmts "}" @scope
 
 rule expr =
-  | AddExpr: expr "+" expr
-  | SubExpr: expr "-" expr
-  | MulExpr: expr "*" expr
-  | DivExpr: expr "/" expr
-  | NumLit: NUMBER
-  | StrLit: STRING
-  | NameRef: name:IDENT @ref(name)
+  | AddExpr: expr "+" expr @type(sig, Num, Num, Num)
+  | SubExpr: expr "-" expr @type(sig, Num, Num, Num)
+  | MulExpr: expr "*" expr @type(sig, Num, Num, Num)
+  | DivExpr: expr "/" expr @type(sig, Num, Num, Num)
+  | NumLit: NUMBER @type(Num)
+  | StrLit: STRING @type(Str)
+  | NameRef: name:IDENT @ref(name) @type(ref)
   | CallExpr: callee:IDENT "(" args ")" @ref(callee, call)
-  | ParenExpr: "(" expr ")"
+  | ParenExpr: "(" e:expr ")" @type(of, e)
   | ListExpr: "[" args "]"
 
 rule args = expr* % ","

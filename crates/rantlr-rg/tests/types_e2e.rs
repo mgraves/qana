@@ -421,7 +421,7 @@ fn arrows_assemble_and_applications_check() {
     assert_eq!(defs[4], ("x".to_string(), "Num".to_string()), "call produces the return type");
     assert_eq!(defs[5], ("s".to_string(), "Str".to_string()));
     assert!(r.diags.is_empty(), "clean: {:?}", r.diags);
-    assert!(r.arrows_at <= r.atoms.len() && r.atoms[r.arrows_at..].iter().all(|a| a.starts_with("fn(")));
+    assert!(r.atoms.iter().any(|a| a.starts_with("fn(")), "arrows live in the global vocabulary");
 }
 
 /// Arity, per-argument mismatches (on the exact argument), non-callable
@@ -642,15 +642,22 @@ fn edit_line(
 /// The differential that anchors everything: a memoized report must be
 /// IDENTICAL to one computed by a fresh SemDb over the same tree.
 fn assert_fresh_equal(db: &mut SemDb, cfg: &rantlr_rg::compile::LangDef, uri: &str, tree: &std::sync::Arc<rantlr_grammar::GreenNode>) {
+    // Global TypeIds are history-dependent (stable for the session);
+    // MEANINGS are not. Compare display-canonically.
+    let canon = |r: &rantlr_sem::TypeReport| {
+        let name = |t: rantlr_sem::TypeId| r.atoms.get(t as usize).cloned().unwrap_or_default();
+        (
+            r.types.iter().map(|&(s, t)| (s, name(t))).collect::<Vec<_>>(),
+            r.def_types.iter().map(|&(s, t)| (s, name(t))).collect::<Vec<_>>(),
+            r.diags.clone(),
+        )
+    };
     let memo = db.types(uri);
     let mut fresh = SemDb::new(cfg.binding.clone());
     fresh.set_types(cfg.types.clone());
     fresh.set_tree(uri, tree.clone());
     let clean = fresh.types(uri);
-    assert_eq!(memo.types, clean.types, "memoized ≡ fresh: node types");
-    assert_eq!(memo.def_types, clean.def_types, "memoized ≡ fresh: def types");
-    assert_eq!(memo.diags, clean.diags, "memoized ≡ fresh: diagnostics");
-    assert_eq!(memo.atoms, clean.atoms, "memoized ≡ fresh: vocabulary");
+    assert_eq!(canon(&memo), canon(&clean), "memoized ≡ fresh (canonical)");
 }
 
 /// A BODY edit (def types unchanged) re-walks only the edited item, in
@@ -708,11 +715,10 @@ fn memoization_body_edits_walk_one_item_signature_edits_ripple() {
 }
 
 /// Cross-file: a reference resolving into another file carries that
-/// file's converged type when it is a grammar atom; document types stay
-/// unknown (their ids are file-local); edits to the dependency are seen
-/// on the next query; cycles terminate.
+/// file's converged type; edits to the dependency are seen on the next
+/// query; mutual references terminate.
 #[test]
-fn cross_file_atom_types_flow_doc_types_stay_local() {
+fn cross_file_values_flow_staleness_and_cycles() {
     let tc = RgToolchain::new();
     let out = compile_source(&tc, APP_LANG);
     let (lexer, tables) = certify(&out.def).unwrap();
@@ -747,10 +753,12 @@ fn cross_file_atom_types_flow_doc_types_stay_local() {
     let _ = db.types("e");
 }
 
-/// Foreign DOCUMENT types are file-local ids and must not leak: the
-/// using file stays silent rather than guessing.
+/// GLOBAL vocabulary: a struct declared in one file IS a type in
+/// another — values flow with their doc type, annotations denote the
+/// foreign type, member access reads the foreign member table, and
+/// mismatches name it.
 #[test]
-fn foreign_document_types_stay_unknown() {
+fn foreign_document_types_flow_globally() {
     let tc = RgToolchain::new();
     let out = compile_source(&tc, MEM_LANG);
     let (lexer, tables) = certify(&out.def).unwrap();
@@ -759,15 +767,54 @@ fn foreign_document_types_stay_unknown() {
 
     let a = IncSession::new(&lexer, &out.def.sg, &tables, "struct P { x: Num }\nlet p: P = new P;\n").unwrap();
     db.set_tree("a", a.tree().unwrap().clone());
-    let b_doc = "let q: Num = p;\n";
+    let b_doc = "let q: Num = p;\nlet r: P = p;\nlet m: Num = p.x;\nlet bad: Num = p.z;\n";
     let b = IncSession::new(&lexer, &out.def.sg, &tables, b_doc).unwrap();
     db.set_tree("b", b.tree().unwrap().clone());
     let r = db.types("b");
+    let defs = def_types(&r, b_doc);
+    assert_eq!(defs.iter().find(|(n, _)| n == "r").unwrap().1, "P", "foreign type name denotes in annotations");
+    assert_eq!(defs.iter().find(|(n, _)| n == "m").unwrap().1, "Num", "foreign member access types");
+    let msgs: Vec<&str> = r.diags.iter().map(|d| d.msg.as_str()).collect();
+    assert!(msgs.iter().any(|m| m.contains("expected `Num`, found `P`")), "foreign doc type in mismatches: {msgs:?}");
+    assert!(msgs.iter().any(|m| m.contains("no member `z` on `P`")), "foreign member table consulted: {msgs:?}");
+    assert_eq!(r.diags.len(), 2, "{msgs:?}");
+
+    // Staleness: retype the field in A; B's member flow flips.
+    let a2 = IncSession::new(&lexer, &out.def.sg, &tables, "struct P { x: P }\nlet p: P = new P;\n").unwrap();
+    db.set_tree("a", a2.tree().unwrap().clone());
+    let r = db.types("b");
     assert!(
-        r.diags.is_empty(),
-        "a foreign doc-typed value is unknown, never a guessed mismatch: {:?}",
+        r.diags.iter().any(|d| d.msg.contains("expected `Num`, found `P`")
+            && r.diags.iter().filter(|d2| d2.msg.contains("expected `Num`, found `P`")).count() == 2),
+        "p.x now yields P, so `let m: Num = p.x` mismatches too: {:?}",
         r.diags
     );
+}
+
+/// Foreign FUNCTIONS: arrows are global, so a fn defined in one file is
+/// callable from another with full arity/argument checking — directly
+/// and through a first-class binding.
+#[test]
+fn foreign_functions_flow_with_checking() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, APP_LANG);
+    let (lexer, tables) = certify(&out.def).unwrap();
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_types(out.def.types.clone());
+
+    let a = IncSession::new(&lexer, &out.def.sg, &tables,
+        "fn add(a: Num, b: Num) -> Num { return a + b; }\n").unwrap();
+    db.set_tree("a", a.tree().unwrap().clone());
+    let b_doc = "let x = add(1, 2);\nlet g = add;\nlet y = g(3, 4);\nlet bad = add(1);\nlet worse = g(1, \"s\");\n";
+    let b = IncSession::new(&lexer, &out.def.sg, &tables, b_doc).unwrap();
+    db.set_tree("b", b.tree().unwrap().clone());
+    let r = db.types("b");
     let defs = def_types(&r, b_doc);
-    assert_eq!(defs.iter().find(|(n, _)| n == "q").unwrap().1, "Num", "annotation still wins");
+    assert_eq!(defs.iter().find(|(n, _)| n == "x").unwrap().1, "Num", "foreign call produces the return");
+    assert_eq!(defs.iter().find(|(n, _)| n == "g").unwrap().1, "fn(Num, Num) -> Num", "foreign arrow flows first-class");
+    assert_eq!(defs.iter().find(|(n, _)| n == "y").unwrap().1, "Num");
+    let msgs: Vec<&str> = r.diags.iter().map(|d| d.msg.as_str()).collect();
+    assert!(msgs.iter().any(|m| m.contains("expected 2 argument(s), found 1")), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m.contains("expected `Num`, found `Str`")), "{msgs:?}");
+    assert_eq!(r.diags.len(), 2, "{msgs:?}");
 }

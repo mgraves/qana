@@ -320,18 +320,26 @@ error: type `Num` has no members
 
 Type checking is memoized per item: an edit that keeps a definition's
 type (a body edit — the keystroke case) re-walks only the edited item;
-an edit that changes one ripples through the file. Types also flow
-ACROSS files for grammar-atom values — a `let` in one file typed `Num`
-type-checks its uses in another, and editing the definition updates
-the dependent file's diagnostics on its next query. Foreign document
-types and function types stay unknown for now (their ids are
-file-local until a global vocabulary exists).
+an edit that changes one ripples through the file. And the vocabulary
+is GLOBAL: a struct or function declared in one file is a first-class
+type in every other. Values flow with their types, annotations denote
+foreign structs, member access reads the declaring file's tables, and
+calls into another file check arity and arguments:
+
+```text
+a.lang:  struct P { x: Num }     fn add(a: Num, b: Num) -> Num { … }
+b.lang:  let r: P = p;           ✓ foreign type in an annotation
+         let m: Num = p.x;       ✓ foreign member access
+         let bad = add(1);       error: expected 2 argument(s), found 1
+```
+
+Editing the declaring file updates every dependent's diagnostics on
+its next query.
 
 Current limits, honestly: atoms, document types, signatures, arrows,
 and members — no constructors like `List<T>`, no subtyping; membership
 is span-based (defs inside the body child, including nested ones);
-cross-file flow covers grammar-atom values only; list-shaped children
-stay untyped.
+list-shaped children stay untyped.
 
 ---
 

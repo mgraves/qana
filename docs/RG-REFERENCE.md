@@ -348,8 +348,14 @@ makes access silent (the member exists) rather than a false
 within the body child count, including nested ones — scope-precise
 membership arrives with methods.
 
-Current limits: no type constructors, no subtyping, single-file flow,
-list-shaped children untyped, span-based membership.
+**The vocabulary is global.** Document types and arrows live in one
+TypeId space per language instance, so types declared in one file flow
+to every other — values, annotations, members, and calls alike. A
+document type's cross-file identity is (file, name, occurrence);
+within-file shadowing keeps distinct types.
+
+Current limits: no type constructors, no subtyping, list-shaped
+children untyped, span-based membership.
 
 ---
 

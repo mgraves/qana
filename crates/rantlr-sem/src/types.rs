@@ -140,13 +140,50 @@ pub struct TypeReport {
     /// The RUN vocabulary: the grammar's atoms followed by the types
     /// this document introduced (`deftype`), in document order.
     pub atoms: Vec<String>,
-    /// How many leading entries of `atoms` are grammar-declared; the
-    /// rest are document-level.
+    /// How many leading entries of `atoms` are grammar-declared. The
+    /// rest of the table is the GLOBAL vocabulary: document types and
+    /// arrows from every file in the SemDb, interned once and stable
+    /// for the session (ids are history-dependent; display via `atoms`
+    /// is the canonical meaning).
     pub grammar_atoms: usize,
-    /// Index where arrow-type entries begin: `atoms[grammar_atoms..
-    /// arrows_at]` are the document's named types, and everything from
-    /// `arrows_at` on is an interned `fn(…) -> …` display entry.
-    pub arrows_at: usize,
+    /// The types THIS document introduces, in declaration order.
+    pub local_doc_types: Vec<TypeId>,
+    /// (absolute def-name start → introduced type) for this document —
+    /// how other files' `named` annotations find a foreign type.
+    pub deftypes: Vec<(u32, TypeId)>,
+}
+
+/// The SemDb-wide type vocabulary: one TypeId space for every file, so
+/// a struct or function type declared in one file MEANS the same thing
+/// in another. Document types intern by (uri, name, occurrence) — the
+/// pragmatic global identity: within-file shadowing keeps distinct ids
+/// (occurrences), and ids survive edits that keep the declaration.
+#[derive(Default)]
+pub(crate) struct GlobalVocab {
+    pub(crate) names: Vec<String>,
+    pub(crate) grammar_atoms: usize,
+    doc_intern: HashMap<(String, String, u32), TypeId>,
+    /// TypeId → declaring file (member-table ownership).
+    doc_owner: HashMap<TypeId, String>,
+    arrows: HashMap<TypeId, (Vec<TypeId>, TypeId)>,
+    arrow_intern: HashMap<(Vec<TypeId>, TypeId), TypeId>,
+}
+
+impl GlobalVocab {
+    fn intern_doc(&mut self, uri: &str, name: &str, occ: u32) -> TypeId {
+        let key = (uri.to_string(), name.to_string(), occ);
+        if let Some(&t) = self.doc_intern.get(&key) {
+            return t;
+        }
+        self.names.push(name.to_string());
+        let t = (self.names.len() - 1) as TypeId;
+        self.doc_intern.insert(key, t);
+        self.doc_owner.insert(t, uri.to_string());
+        t
+    }
+    fn owner(&self, t: TypeId) -> Option<&str> {
+        self.doc_owner.get(&t).map(|s| s.as_str())
+    }
 }
 
 impl TypeReport {
@@ -176,10 +213,13 @@ struct Walker<'a> {
     /// abs ref-name start → abs def-name start (same file).
     ref_res: &'a HashMap<u32, u32>,
     /// abs ref-name start → the FOREIGN def's type, pre-resolved from
-    /// the dependency file's converged report. Grammar-atom types only
-    /// (atom ids are file-independent); doc types and arrows stay
-    /// unknown until a global vocabulary exists.
+    /// the dependency file's converged report. Global TypeIds, so doc
+    /// types and arrows flow as freely as atoms.
     foreign_ref_types: &'a HashMap<u32, TypeId>,
+    /// abs ref-name start → what a FOREIGN name denotes in type
+    /// position: Some(type) when the target is a deftype, None when it
+    /// resolved to a non-type def (diagnosed like the local case).
+    foreign_named: &'a HashMap<u32, Option<TypeId>>,
     /// abs def-name start → type (from the previous pass).
     def_types: &'a HashMap<u32, TypeId>,
     /// abs def-name start → the document-level type that def INTRODUCES.
@@ -401,8 +441,8 @@ impl<'a> Walker<'a> {
                 }
             }
             TypeRule::Named { ref_child } => {
-                match pos_spans.get(*ref_child).and_then(|s| self.ref_res.get(&s.0)) {
-                    None => None, // unresolved: the binding tier reports it
+                let start = pos_spans.get(*ref_child).map(|s| s.0);
+                match start.and_then(|s| self.ref_res.get(&s)) {
                     Some(d) => match self.deftype_ids.get(d) {
                         Some(&t) => Some(t),
                         None => {
@@ -412,6 +452,19 @@ impl<'a> Walker<'a> {
                             });
                             None
                         }
+                    },
+                    // Foreign resolution: the dependency's report says
+                    // whether the target introduces a type.
+                    None => match start.and_then(|s| self.foreign_named.get(&s)) {
+                        Some(Some(t)) => Some(*t),
+                        Some(None) => {
+                            self.diags.push(TypeDiag {
+                                span: pos_spans[*ref_child],
+                                msg: "this name does not denote a type".into(),
+                            });
+                            None
+                        }
+                        None => None, // unresolved: the binding tier reports it
                     },
                 }
             }
@@ -442,11 +495,12 @@ impl<'a> Walker<'a> {
                 }
             }
             TypeRule::Apply { ref_child, args_child: _ } => {
-                let callee = pos_spans
-                    .get(*ref_child)
-                    .and_then(|s| self.ref_res.get(&s.0))
+                let start = pos_spans.get(*ref_child).map(|s| s.0);
+                let callee = start
+                    .and_then(|s| self.ref_res.get(&s))
                     .and_then(|d| self.def_types.get(d))
-                    .copied();
+                    .copied()
+                    .or_else(|| start.and_then(|s| self.foreign_ref_types.get(&s)).copied());
                 match callee {
                     None => None, // untyped or unresolved callee: silent
                     Some(t) => match self.arrows.get(&t).cloned() {
@@ -598,8 +652,21 @@ fn collect_deftypes(
 impl SemDb {
     /// Install the declared type tier. An absent or empty config keeps
     /// every type query at "nothing" — the tier's power is exactly what
-    /// the grammar declared.
+    /// the grammar declared. The grammar's atoms seed the GLOBAL
+    /// vocabulary; installing a different config resets it (and every
+    /// derived cache) — TypeIds are only meaningful within one config.
     pub fn set_types(&mut self, cfg: TypeConfig) {
+        let atoms_changed = self.gvocab.grammar_atoms != cfg.atoms.len()
+            || self.gvocab.names[..self.gvocab.grammar_atoms] != cfg.atoms[..];
+        if atoms_changed {
+            self.gvocab = GlobalVocab {
+                names: cfg.atoms.clone(),
+                grammar_atoms: cfg.atoms.len(),
+                ..GlobalVocab::default()
+            };
+            self.type_caches.clear();
+            self.global_members.clear();
+        }
         self.type_cfg = if cfg.rules.is_empty() { None } else { Some(cfg) };
     }
 
@@ -671,9 +738,10 @@ impl SemDb {
         }
         // Foreign types come from each dependency's OWN report (its
         // memoization makes this cheap when the dependency is
-        // unchanged). Atom-only: those ids mean the same thing in every
-        // file of this SemDb.
+        // unchanged). Global ids: values, document types, and function
+        // types all flow.
         let mut foreign_ref_types: HashMap<u32, TypeId> = HashMap::new();
+        let mut foreign_named: HashMap<u32, Option<TypeId>> = HashMap::new();
         {
             let mut dep_uris: Vec<String> =
                 foreign_targets.iter().map(|(_, u, _)| u.clone()).collect();
@@ -689,39 +757,75 @@ impl SemDb {
                     if let Some(&(_, t)) =
                         r.def_types.iter().find(|((s, _), _)| s == dstart)
                     {
-                        if (t as usize) < r.grammar_atoms {
-                            foreign_ref_types.insert(*ref_start, t);
-                        }
+                        foreign_ref_types.insert(*ref_start, t);
                     }
+                    foreign_named.insert(
+                        *ref_start,
+                        r.deftypes.iter().find(|(s, _)| s == dstart).map(|&(_, t)| t),
+                    );
                 }
             }
         }
-        // Position-independent snapshot of the foreign inputs — part of
-        // the cache-validity comparison (a dependency changing a value
-        // must ripple here).
-        let foreign_snapshot: Vec<(u32, TypeId)> = {
-            let mut v: Vec<(u32, TypeId)> = foreign_ref_types
-                .iter()
-                .map(|(&s, &t)| {
-                    // ref start relative to its item
-                    let rel = item_meta
-                        .iter()
-                        .rev()
-                        .find(|(_, b, _)| *b <= s)
-                        .map(|(_, b, _)| s - b)
-                        .unwrap_or(s);
-                    (rel, t)
-                })
+        // The foreign member environment: every file's member tables
+        // except this one's own contributions.
+        let foreign_members: HashMap<(TypeId, String), Option<TypeId>> = self
+            .global_members
+            .iter()
+            .filter(|((t, _), _)| self.gvocab.owner(*t) != Some(uri))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        // Position-independent snapshot of ALL foreign inputs — the
+        // cache-validity comparison (a dependency changing any value a
+        // replay depends on must ripple here). Members close
+        // transitively: a chain like `p.i.y` depends on Inner's table
+        // even though only P appears in the ref values.
+        let foreign_snapshot: FSnap = {
+            let rel_of = |s: u32| {
+                item_meta
+                    .iter()
+                    .rev()
+                    .find(|(_, b, _)| *b <= s)
+                    .map(|(_, b, _)| s - b)
+                    .unwrap_or(s)
+            };
+            let mut refs: Vec<(u32, TypeId)> =
+                foreign_ref_types.iter().map(|(&s, &t)| (rel_of(s), t)).collect();
+            refs.sort_unstable();
+            let mut named: Vec<(u32, Option<TypeId>)> =
+                foreign_named.iter().map(|(&s, &t)| (rel_of(s), t)).collect();
+            named.sort_unstable();
+            let mut tids: std::collections::HashSet<TypeId> = foreign_ref_types
+                .values()
+                .copied()
+                .chain(foreign_named.values().filter_map(|t| *t))
                 .collect();
-            v.sort_unstable();
-            v
+            loop {
+                let more: Vec<TypeId> = foreign_members
+                    .iter()
+                    .filter(|((t, _), _)| tids.contains(t))
+                    .filter_map(|(_, v)| *v)
+                    .filter(|t| !tids.contains(t))
+                    .collect();
+                if more.is_empty() {
+                    break;
+                }
+                tids.extend(more);
+            }
+            let mut members: Vec<(TypeId, String, Option<TypeId>)> = foreign_members
+                .iter()
+                .filter(|((t, _), _)| tids.contains(t))
+                .map(|((t, n), v)| (*t, n.clone(), *v))
+                .collect();
+            members.sort();
+            FSnap { refs, named, members }
         };
 
         let rules: HashMap<(u16, u16), &TypeRule> =
             cfg.rules.iter().map(|(nt, prod, r)| ((*nt, *prod), r)).collect();
 
-        // ---- vocabulary generation (doc types, in document order) ----
+        // ---- document types, interned into the GLOBAL vocabulary ----
         let mut cache = self.type_caches.remove(uri).unwrap_or_default();
+        let mut gv = std::mem::take(&mut self.gvocab);
         let mut gen_current: Vec<(usize, u32, String)> = Vec::new();
         for (idx, (node, base, ptr)) in item_meta.iter().enumerate() {
             if let Some(it) = cache.per_item.get(ptr) {
@@ -736,29 +840,36 @@ impl SemDb {
                 }
             }
         }
-        let vocab_reusable = cache.deftype_gen == gen_current && !cache.vocab.is_empty();
-        let (mut vocab, mut arrows, mut arrow_intern, warm_members) = if vocab_reusable {
-            (
-                cache.vocab.clone(),
-                cache.arrows.clone(),
-                cache.arrow_intern.clone(),
-                cache.member_types.clone(),
-            )
-        } else {
-            // Doc TypeIds change meaning: every cached output is stale.
+        // Cached outputs stay valid only while the file's type
+        // introductions are unchanged (same names, same order — the
+        // interned ids are then identical). The global vocabulary
+        // itself always persists.
+        let vocab_reusable = cache.primed && cache.deftype_gen == gen_current;
+        if !vocab_reusable {
             cache.per_item.clear();
-            let mut v = cfg.atoms.clone();
-            for (_, _, name) in &gen_current {
-                v.push(name.clone());
-            }
-            (v, HashMap::new(), HashMap::new(), HashMap::new())
-        };
-        let arrows_at = cfg.atoms.len() + gen_current.len();
-        let mut deftype_ids: HashMap<u32, TypeId> = HashMap::new();
-        for (k, (idx, rel, _)) in gen_current.iter().enumerate() {
-            let base = item_meta[*idx].1;
-            deftype_ids.insert(base + rel, (cfg.atoms.len() + k) as TypeId);
         }
+        let warm_members = cache.member_types.clone();
+        let mut deftype_ids: HashMap<u32, TypeId> = HashMap::new();
+        let mut local_doc_types: Vec<TypeId> = Vec::new();
+        {
+            let mut occ: HashMap<&str, u32> = HashMap::new();
+            for (idx, rel, name) in &gen_current {
+                let n = occ.entry(name.as_str()).or_insert(0);
+                let t = gv.intern_doc(uri, name, *n);
+                *n += 1;
+                let base = item_meta[*idx].1;
+                deftype_ids.insert(base + rel, t);
+                local_doc_types.push(t);
+            }
+        }
+        let GlobalVocab {
+            names: mut vocab,
+            grammar_atoms,
+            doc_intern,
+            doc_owner,
+            arrows: mut g_arrows,
+            arrow_intern: mut g_arrow_intern,
+        } = gv;
 
         // ---- warm start: cached converged values at CURRENT offsets.
         // The replaced item (same index, dead ptr) seeds its old values
@@ -794,6 +905,7 @@ impl SemDb {
                 arrow_intern,
                 ref_res: &ref_res,
                 foreign_ref_types: &foreign_ref_types,
+                foreign_named: &foreign_named,
                 def_types,
                 deftype_ids: &deftype_ids,
                 all_defs: &all_defs,
@@ -839,6 +951,16 @@ impl SemDb {
             }
         };
 
+        // Members visible to a walk: every other file's tables plus
+        // this file's evolving local table.
+        let merge_members = |local: &HashMap<(TypeId, String), Option<TypeId>>| {
+            let mut m = foreign_members.clone();
+            for (k, v) in local {
+                m.insert(k.clone(), *v);
+            }
+            m
+        };
+
         // ---- fast path: walk only FRESH items against the warm env;
         // if their def sequences and member contributions match what
         // the cache converged to, every cached item replays. ----
@@ -846,16 +968,17 @@ impl SemDb {
         let mut fast_ok = vocab_reusable || cache.per_item.is_empty();
         let mut fresh_walked = 0u64;
         if vocab_reusable {
+            let warm_merged = merge_members(&warm_members);
             for (idx, (node, base, ptr)) in item_meta.iter().enumerate() {
                 if cache.per_item.contains_key(ptr) {
                     continue;
                 }
                 let out = walk_item(
                     &mut vocab,
-                    &mut arrows,
-                    &mut arrow_intern,
+                    &mut g_arrows,
+                    &mut g_arrow_intern,
                     &warm_defs,
-                    &warm_members,
+                    &warm_merged,
                     node,
                     *base,
                 );
@@ -899,31 +1022,25 @@ impl SemDb {
             }
             (outs, warm_members)
         } else {
-            // Ripple (or cold): full fixpoint from the warm seed.
-            // Arrow ids are rebuilt from scratch — persistent intern
-            // tables would otherwise accumulate stale entries and drift
-            // from what a fresh computation assigns (the differential
-            // gate caught exactly this). Purging arrow ids from the
-            // warm seeds keeps the trajectory identical to a cold run.
+            // Ripple (or cold): full fixpoint from the warm seed. The
+            // global vocabulary persists — ids are stable for the
+            // session, and equivalence with a fresh computation is
+            // display-canonical, not id-numeric.
             cache.per_item.clear();
-            vocab.truncate(arrows_at);
-            arrows.clear();
-            arrow_intern.clear();
             let mut def_types = warm_defs;
             let mut member_types = warm_members;
-            def_types.retain(|_, t| (*t as usize) < arrows_at);
-            member_types.retain(|_, v| v.map_or(true, |t| (t as usize) < arrows_at));
             let mut result: Vec<Option<ItemOut>> = vec![None; item_meta.len()];
             for _ in 0..8 {
                 self.stats.type_passes += 1;
+                let merged = merge_members(&member_types);
                 let mut pass_outs: Vec<Option<ItemOut>> = Vec::with_capacity(item_meta.len());
                 for (node, base, _) in &item_meta {
                     pass_outs.push(Some(walk_item(
                         &mut vocab,
-                        &mut arrows,
-                        &mut arrow_intern,
+                        &mut g_arrows,
+                        &mut g_arrow_intern,
                         &def_types,
-                        &member_types,
+                        &merged,
                         node,
                         *base,
                     )));
@@ -951,21 +1068,40 @@ impl SemDb {
             (result, member_types)
         };
 
-        // ---- store the cache and assemble the absolute report ----
+        // ---- store: cache, global vocabulary, global members ----
+        cache.primed = true;
         cache.deftype_gen = gen_current;
-        cache.vocab = vocab.clone();
-        cache.arrows = arrows;
-        cache.arrow_intern = arrow_intern;
-        cache.member_types = member_final;
+        cache.member_types = member_final.clone();
         cache.foreign_snapshot = foreign_snapshot;
         cache.items_order = item_meta.iter().map(|(_, _, p)| *p).collect();
+        self.gvocab = GlobalVocab {
+            names: vocab,
+            grammar_atoms,
+            doc_intern,
+            doc_owner,
+            arrows: g_arrows,
+            arrow_intern: g_arrow_intern,
+        };
+        // This file's member contributions replace its previous ones.
+        self.global_members
+            .retain(|(t, _), _| self.gvocab.owner(*t) != Some(uri));
+        for (k, v) in member_final {
+            self.global_members.insert(k, v);
+        }
+
         let mut report = TypeReport {
             types: Vec::new(),
             def_types: Vec::new(),
             diags: Vec::new(),
-            atoms: vocab,
-            grammar_atoms: cfg.atoms.len(),
-            arrows_at,
+            atoms: self.gvocab.names.clone(),
+            grammar_atoms: self.gvocab.grammar_atoms,
+            local_doc_types,
+            deftypes: {
+                let mut v: Vec<(u32, TypeId)> =
+                    deftype_ids.iter().map(|(&s, &t)| (s, t)).collect();
+                v.sort_unstable();
+                v
+            },
         };
         for (out, (_, base, ptr)) in final_outs.into_iter().zip(&item_meta) {
             let Some(out) = out else { continue };
@@ -990,21 +1126,29 @@ impl SemDb {
     }
 }
 
+/// Foreign inputs a file's cached outputs depend on — item-relative and
+/// value-based, so a dependency changing anything a replay used forces
+/// the honest ripple.
+#[derive(Default, PartialEq)]
+pub(crate) struct FSnap {
+    refs: Vec<(u32, TypeId)>,
+    named: Vec<(u32, Option<TypeId>)>,
+    members: Vec<(TypeId, String, Option<TypeId>)>,
+}
+
 /// Per-file memoization of the type pass: the converged environment and
 /// every item's outputs, spans relative to the item so position shifts
 /// never invalidate.
 #[derive(Default)]
 pub(crate) struct TypeCache {
-    /// (item index, rel site, name) of every deftype — doc TypeIds are
-    /// positions in this list, so ANY change resets the vocabulary.
+    /// Set once the cache holds a converged result.
+    primed: bool,
+    /// (item index, rel site, name) of every deftype — cached outputs
+    /// are valid only while this is unchanged (the interned ids are
+    /// then identical); the global vocabulary itself always persists.
     deftype_gen: Vec<(usize, u32, String)>,
-    vocab: Vec<String>,
-    arrows: HashMap<TypeId, (Vec<TypeId>, TypeId)>,
-    arrow_intern: HashMap<(Vec<TypeId>, TypeId), TypeId>,
     member_types: HashMap<(TypeId, String), Option<TypeId>>,
-    /// Foreign inputs (item-relative ref start, type) — a dependency
-    /// changing a value must ripple here.
-    foreign_snapshot: Vec<(u32, TypeId)>,
+    foreign_snapshot: FSnap,
     /// Item subtree pointers at cache time, in order — how a replaced
     /// item finds its predecessor for the body/signature comparison.
     items_order: Vec<usize>,

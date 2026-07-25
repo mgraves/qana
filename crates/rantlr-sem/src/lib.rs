@@ -456,6 +456,15 @@ pub struct SemDb {
     /// Per-file memoization of the type pass (converged results +
     /// per-item outputs keyed by subtree identity).
     type_caches: HashMap<String, types::TypeCache>,
+    /// The GLOBAL type vocabulary: one TypeId space per SemDb, so
+    /// document types and function types mean the same thing in every
+    /// file. Ids are interned once and stable for the session.
+    gvocab: types::GlobalVocab,
+    /// (owner type, member name) → member type, across ALL files —
+    /// what makes `p.x` work when `p`'s struct lives elsewhere.
+    /// Entries are owned by the type's declaring file and replaced
+    /// whenever that file re-derives.
+    global_members: HashMap<(types::TypeId, String), Option<types::TypeId>>,
     /// Re-entrancy guard for cross-file type queries (a dependency
     /// cycle resolves with whatever is already known, never hangs).
     type_visiting: HashSet<String>,
@@ -480,6 +489,8 @@ impl SemDb {
             cfg,
             type_cfg: None,
             type_caches: HashMap::new(),
+            gvocab: types::GlobalVocab::default(),
+            global_members: HashMap::new(),
             type_visiting: HashSet::new(),
             revision: 0,
             files: HashMap::new(),

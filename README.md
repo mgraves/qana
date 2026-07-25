@@ -903,9 +903,45 @@ p8bench, 2001 items: cold 6.3 ms (4002 walks, 2 passes); body edit
 query 1.4 ms (0 walks — the assembly/resolution floor, the named next
 refinement). Gates: 129 tests.
 
+## Global type vocabulary (shipped): types are first-class across files
+
+The infrastructure increment's honest boundary — foreign document
+types and arrows stay unknown — is gone. TypeIds move from per-run to
+PER-SEMDB: one vocabulary for every file, interned once, stable for
+the session. Atoms keep their fixed prefix; document types intern by
+(file, name, occurrence) — so within-file shadowing keeps distinct
+types and ids survive edits that keep the declaration; arrows intern
+structurally and are shared. Member tables go global too, keyed by the
+owning type and replaced whenever the declaring file re-derives.
+
+What that unlocks, all gated: a struct declared in file A is a type in
+file B — values carry it, `let r: P = p` denotes it in annotations
+(the binding tier already resolved the name; the report's deftype
+table now answers "which type"), `p.x` reads A's member table, and
+mismatches name it. Functions flow whole: direct cross-file calls and
+first-class bindings both check arity and arguments against the
+foreign arrow. Editing A flips B's diagnostics on its next query —
+fast-path validity now snapshots the TRANSITIVE foreign closure (a
+`p.i.y` chain depends on Inner's table even though only P appears in
+the ref values).
+
+The differential gate changed meaning deliberately: global ids are
+history-dependent (a session that saw more types assigns different
+numbers than a fresh one), so memoized ≡ fresh is now DISPLAY-
+canonical — same spans, same type names, same diagnostics — which is
+the semantics users can observe. The ripple-path arrow rebuild from
+the previous increment is gone entirely; persistence is now the design
+rather than the bug. Memoization counters kept their exact shape:
+body edit 2 walks / 1 pass on the 2001-item bench.
+
+Gates: 130 tests — foreign struct flow (annotation, member, mismatch,
+staleness flip when the field retypes), foreign functions (direct +
+first-class, arity + argument errors), cycles terminate, nominal
+shadowing preserved, and the canonical differential on every path.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 129 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 130 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

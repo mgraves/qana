@@ -1164,13 +1164,51 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             None
                         }
                     },
-                    ("deftype", 1) => match binding.defs.iter().find(|e| e.0 == nt && e.1 == prod) {
-                        Some(&(_, _, k)) => Some(TypeRule::DefType { def_child: k }),
-                        None => {
-                            error(d, a.name_span, "@type(deftype) requires @def on the same alternative".into());
-                            None
+                    ("deftype", n @ (1 | 2)) => {
+                        let body = if n == 2 { rule_pos(d, &a.args[1]).map(Some) } else { Some(None) };
+                        match (binding.defs.iter().find(|e| e.0 == nt && e.1 == prod), body) {
+                            (Some(&(_, _, k)), Some(body_child)) => {
+                                Some(TypeRule::DefType { def_child: k, body_child })
+                            }
+                            (None, _) => {
+                                error(d, a.name_span, "@type(deftype) requires @def on the same alternative".into());
+                                None
+                            }
+                            _ => None,
                         }
-                    },
+                    }
+                    ("member", 3) => {
+                        let base = rule_pos(d, &a.args[1]);
+                        // The member NAME must label a TOKEN (the field
+                        // name), unlike every other form's rule sources.
+                        let name = match positions.get(a.args[2].0.as_str()) {
+                            None => {
+                                error(
+                                    d,
+                                    a.args[2].1,
+                                    format!("no symbol labeled `{}` in this alternative", a.args[2].0),
+                                );
+                                None
+                            }
+                            Some(&k) => match sg.prods[prod as usize].rhs.get(k) {
+                                Some(Sym::T(_)) => Some(k),
+                                _ => {
+                                    error(
+                                        d,
+                                        a.args[2].1,
+                                        format!("`{}` labels a rule — the member name must be a token", a.args[2].0),
+                                    );
+                                    None
+                                }
+                            },
+                        };
+                        match (base, name) {
+                            (Some(base_child), Some(name_child)) => {
+                                Some(TypeRule::Member { base_child, name_child })
+                            }
+                            _ => None,
+                        }
+                    }
                     ("named", 1) => match binding.refs.iter().find(|r| r.0 == nt && r.1 == prod) {
                         Some(&(_, _, k, _)) => Some(TypeRule::Named { ref_child: k }),
                         None => {
@@ -1269,7 +1307,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             d,
                             a.name_span,
                             format!(
-                                "unknown @type form `{other}` (expected an Atom, `ref`, `named`, `deftype`, `of`, `def`, `sig`, `fn`, `apply`, or `returns`)"
+                                "unknown @type form `{other}` (expected an Atom, `ref`, `named`, `deftype`, `member`, `of`, `def`, `sig`, `fn`, `apply`, or `returns`)"
                             ),
                         );
                         None

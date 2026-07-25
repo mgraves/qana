@@ -846,9 +846,33 @@ Gates: 123 tests — arrow assembly + zero-param arrows, all four
 application failure modes with exact spans, first-class function flow,
 recursion convergence, and static cross-checks for the new forms.
 
+## Type tier v3 (shipped): members
+
+The last Structlang silence. `@type(deftype, body)` extends v1's type
+introduction with a member set: the typed defs inside the body child
+ARE the members — fields are ordinary definitions, reusing @def and
+@type(def, …) unchanged. `@type(member, base, name)` types field
+access by looking the name token up in the base type's member set.
+Member tables ride the same fixpoint as def types (stability now
+checks both), so use-before-declaration works and struct-typed fields
+chain — `l.a.x` resolves Line → Point → Num, one fixpoint level per
+hop. Missing members diagnose on the name token ("no member `z` on
+`Point`"), memberless base types likewise ("type `Num` has no
+members"), and a member whose own type is unknown makes access silent
+rather than falsely "missing" — member entries are Option-typed
+precisely so existence and typedness stay separate facts.
+
+Membership is span-based in v3: all def sites within the body child
+count, nested ones included (fields-only structs are exact;
+scope-precise membership arrives with methods). Gates: 126 tests —
+chained access declared below its use, all failure modes with the
+diagnostic on the name token, unknown-field-type silence, and static
+cross-checks (the member name must label a token, deftype's body label
+must exist).
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 123 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 126 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

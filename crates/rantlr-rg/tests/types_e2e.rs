@@ -480,3 +480,135 @@ fn v2_forms_are_statically_checked() {
     let out = compile_source(&tc, &src);
     assert!(out.diags.iter().any(|d| d.msg.contains("no symbol labeled `name`")), "{:?}", out.diags);
 }
+
+const MEM_LANG: &str = r#"
+language Mem
+
+token WS     = /\s+/ @trivia
+token NUMBER = /\d+/ @style(number)
+token IDENT  = /[\a_][\w_]*/ @specialize @style(variable)
+token LBRACE = "{" @style(bracket)
+token RBRACE = "}" @style(bracket)
+token COLON  = ":" @style(punctuation)
+token COMMA  = "," @style(punctuation)
+token DOT    = "." @style(punctuation)
+token EQ     = "=" @style(operator)
+token SEMI   = ";" @style(punctuation)
+
+keywords IDENT = struct let new opaque Num
+
+pair LBRACE RBRACE
+
+prec left "."
+
+start file
+
+rule file = File: stmts @scope(unordered)
+
+rule stmts = stmt*
+
+rule stmt =
+  | StructDecl: "struct" name:IDENT b:body @def(name) @type(deftype, b)
+  | OpaqueDecl: "opaque" name:IDENT ";" @def(name) @type(deftype)
+  | LetStmt:    "let" name:IDENT ti:typed_init ";" @def(name) @type(def, ti)
+
+rule body = Body: "{" fields "}" @scope
+
+rule fields = field* % ","
+
+rule field = Field: name:IDENT ":" t:ty @def(name) @type(def, t)
+
+rule typed_init = TypedInit: ":" t:ty "=" e:expr @type(sig, t, t, t)
+
+rule ty =
+  | TyNum:  "Num" @type(Num)
+  | TyName: name:IDENT @ref(name) @type(named)
+
+rule expr =
+  | MemberExpr: b:expr "." m:IDENT @type(member, b, m)
+  | NewExpr:    "new" name:IDENT @ref(name) @type(named)
+  | NumLit:     NUMBER @type(Num)
+  | NameRef:    name:IDENT @ref(name) @type(ref)
+"#;
+
+fn mem_tier(doc: &str) -> (rantlr_sem::TypeReport, String) {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, MEM_LANG);
+    assert!(out.diags.is_empty(), "mem grammar compiles: {:?}", out.diags);
+    let (lexer, tables) = certify(&out.def).expect("in envelope");
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, doc).unwrap();
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_types(out.def.types.clone());
+    db.set_tree("d", session.tree().unwrap().clone());
+    (db.types("d"), doc.to_string())
+}
+
+/// Members are the typed defs inside a deftype's body: access types,
+/// struct-typed fields CHAIN (`l.a.x` — one fixpoint level per hop),
+/// and use-before-declaration converges like everything else.
+#[test]
+fn member_access_types_and_chains() {
+    let (r, doc) = mem_tier(
+        "let deep: Num = l.a.x;\nstruct Point { x: Num }\nstruct Line { a: Point }\nlet l: Line = new Line;\n",
+    );
+    let defs = def_types(&r, &doc);
+    assert_eq!(defs[0], ("deep".to_string(), "Num".to_string()), "chained member access, declared BELOW its use");
+    assert_eq!(defs[1], ("x".to_string(), "Num".to_string()));
+    assert_eq!(defs[2], ("a".to_string(), "Point".to_string()), "struct-typed field");
+    assert!(r.diags.is_empty(), "clean: {:?}", r.diags);
+}
+
+/// Missing members, memberless types, opaque types, and member-fed
+/// mismatches all diagnose; a field whose OWN type is unknown makes
+/// access silent (the member exists — no false "no member").
+#[test]
+fn member_failure_modes_and_unknown_fields_stay_silent() {
+    let (r, doc) = mem_tier(
+        "struct P { x: Num }\nopaque O;\nlet p: P = new P;\nlet o: O = new O;\nlet m: Num = p.z;\nlet n: Num = 5;\nlet q: Num = n.x;\nlet s: O = p.x;\nlet u: Num = o.any;\n",
+    );
+    let msgs: Vec<&str> = r.diags.iter().map(|d| d.msg.as_str()).collect();
+    assert!(msgs.iter().any(|m| m.contains("no member `z` on `P`")), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m.contains("type `Num` has no members")), "{msgs:?}");
+    assert!(
+        msgs.iter().any(|m| m.contains("type `O` has no members")),
+        "opaque deftype has no member set: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("expected `O`, found `Num`")),
+        "member type feeds the unification: {msgs:?}"
+    );
+    assert_eq!(r.diags.len(), 4, "{msgs:?}");
+    let z = doc.find("p.z").unwrap() as u32 + 2;
+    let zd = r.diags.iter().find(|d| d.msg.contains("`z`")).unwrap();
+    assert!(zd.span.0 <= z && z < zd.span.1, "diag on the name token: {:?}", zd.span);
+
+    // A field annotated with an unresolvable type: the member EXISTS,
+    // its type is unknown — access stays silent on both counts.
+    let (r2, _) = mem_tier("struct P { x: ghost }\nlet p: P = new P;\nlet v: Num = p.x;\n");
+    assert!(
+        r2.diags.is_empty(),
+        "unknown field type must not become 'no member' or a mismatch: {:?}",
+        r2.diags
+    );
+}
+
+/// Static checks: the member name must label a TOKEN, the base a rule,
+/// and deftype's optional body label must exist.
+#[test]
+fn member_forms_are_statically_checked() {
+    let tc = RgToolchain::new();
+    let src = MEM_LANG.replace("@type(member, b, m)", "@type(member, m, b)");
+    let out = compile_source(&tc, &src);
+    assert!(
+        out.diags.iter().any(|d| d.msg.contains("labels a token") || d.msg.contains("must be a token")),
+        "swapped base/name refused: {:?}",
+        out.diags
+    );
+    let src = MEM_LANG.replace("@type(deftype, b)", "@type(deftype, nolabel)");
+    let out = compile_source(&tc, &src);
+    assert!(
+        out.diags.iter().any(|d| d.msg.contains("no symbol labeled `nolabel`")),
+        "{:?}",
+        out.diags
+    );
+}

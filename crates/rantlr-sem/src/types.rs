@@ -53,13 +53,23 @@ pub enum TypeRule {
     /// `@type(ref)` — the type of whatever definition this production's
     /// `@ref` child resolved to (via the binding tier).
     FromRef { ref_child: usize },
-    /// `@type(deftype)` — this production's `@def` child INTRODUCES a
-    /// document-level type named by that child's text. The vocabulary
-    /// opens: grammar atoms + whatever the DOCUMENT declares. Identity
-    /// is the def SITE, not the name — two `struct T`s in different
-    /// scopes are different types, and which `T` an annotation denotes
-    /// is decided by the binding tier's ordinary scoped resolution.
-    DefType { def_child: usize },
+    /// `@type(deftype)` / `@type(deftype, body)` — this production's
+    /// `@def` child INTRODUCES a document-level type named by that
+    /// child's text. The vocabulary opens: grammar atoms + whatever the
+    /// DOCUMENT declares. Identity is the def SITE, not the name — two
+    /// `struct T`s in different scopes are different types, and which
+    /// `T` an annotation denotes is decided by the binding tier's
+    /// ordinary scoped resolution. With a `body` child, the defs inside
+    /// it are the type's MEMBERS (fields are ordinary typed defs);
+    /// without one the type is opaque.
+    DefType { def_child: usize, body_child: Option<usize> },
+    /// `@type(member, base, name)` — the `name` token is looked up in
+    /// the member set of `base`'s type: the node has the member's type,
+    /// a missing member on a member-carrying type is diagnosed
+    /// ("no member `z` on `Point`"), and a base type with no members at
+    /// all ("type `Num` has no members") likewise. An unknown base or a
+    /// member whose own type is unknown stays silent.
+    Member { base_child: usize, name_child: usize },
     /// `@type(named)` — the type DENOTED by the definition this
     /// production's `@ref` child resolves to (which must be a
     /// `deftype` site — resolving to a non-type def is diagnosed).
@@ -172,6 +182,13 @@ struct Walker<'a> {
     /// EVERY def site in the file (sorted) — arity source for arrows,
     /// independent of whether a def's type is known yet.
     all_defs: &'a [u32],
+    /// abs def-name start → the def's name text (member table keys).
+    def_names: &'a HashMap<u32, String>,
+    /// (owner type, member name) → member's type from the PREVIOUS
+    /// pass (None = the member exists but its type is not yet known).
+    members: &'a HashMap<(TypeId, String), Option<TypeId>>,
+    /// The member sets recorded THIS pass, at `deftype` body nodes.
+    out_members: HashMap<(TypeId, String), Option<TypeId>>,
     /// (abs span) → computed type of every node walked THIS pass —
     /// how `apply` reads its argument items without re-walking.
     span_types: HashMap<(u32, u32), Option<TypeId>>,
@@ -263,6 +280,12 @@ impl<'a> Walker<'a> {
             Some(TypeRule::Apply { args_child, .. }) => Some(*args_child),
             _ => None,
         };
+        // `member` needs the NAME token's text (lookup key + diagnostic).
+        let mut member_name: Option<&'n str> = None;
+        let name_child = match rule_now {
+            Some(TypeRule::Member { name_child, .. }) => Some(*name_child),
+            _ => None,
+        };
         let mut off = base;
         for c in &n.children {
             let w = c.width();
@@ -286,6 +309,9 @@ impl<'a> Walker<'a> {
                     self.node(m, off);
                 }
                 GreenChild::Token(t) if !t.trivia && !t.is_missing() => {
+                    if name_child == Some(pos_types.len()) {
+                        member_name = Some(&t.text);
+                    }
                     pos_types.push(None);
                     pos_spans.push((off, off + w));
                 }
@@ -311,7 +337,61 @@ impl<'a> Walker<'a> {
                 .copied(),
             // The introduction itself was recorded in the pre-pass; the
             // declaring node is not an expression and stays untyped.
-            TypeRule::DefType { .. } => None,
+            // With a body child, the def sites inside it become the
+            // type's MEMBER SET — name from the binding tier, type from
+            // this pass's def records (None = exists, not yet known).
+            TypeRule::DefType { def_child, body_child } => {
+                if let (Some(&tid), Some(k)) = (
+                    pos_spans.get(*def_child).and_then(|s| self.deftype_ids.get(&s.0)),
+                    *body_child,
+                ) {
+                    if let Some((lo, hi)) = pos_spans.get(k).copied() {
+                        let sites = &self.all_defs[self.all_defs.partition_point(|&d| d < lo)
+                            ..self.all_defs.partition_point(|&d| d < hi)];
+                        for site in sites {
+                            if let Some(name) = self.def_names.get(site) {
+                                let mt = self.out_defs.get(site).map(|&(_, t)| t);
+                                self.out_members.insert((tid, name.clone()), mt);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            TypeRule::Member { base_child, name_child: _ } => {
+                let base_ty = pos_types.get(*base_child).copied().flatten();
+                match (base_ty, member_name) {
+                    (Some(t), Some(name)) => {
+                        match self.members.get(&(t, name.to_string())) {
+                            Some(Some(mt)) => Some(*mt),
+                            Some(None) => None, // member exists, type unknown
+                            None => {
+                                // Does this type carry ANY member set?
+                                let owner = self
+                                    .vocab
+                                    .get(t as usize)
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("?");
+                                let has_members =
+                                    self.members.keys().any(|(o, _)| *o == t);
+                                let nspan = name_child
+                                    .and_then(|k| pos_spans.get(k).copied())
+                                    .unwrap_or(span);
+                                self.diags.push(TypeDiag {
+                                    span: nspan,
+                                    msg: if has_members {
+                                        format!("no member `{name}` on `{owner}`")
+                                    } else {
+                                        format!("type `{owner}` has no members")
+                                    },
+                                });
+                                None
+                            }
+                        }
+                    }
+                    _ => None, // unknown base or repaired name: silent
+                }
+            }
             TypeRule::Named { ref_child } => {
                 match pos_spans.get(*ref_child).and_then(|s| self.ref_res.get(&s.0)) {
                     None => None, // unresolved: the binding tier reports it
@@ -484,7 +564,7 @@ fn collect_deftypes(
     let mut pos = 0usize;
     let mut off = base;
     let target = match rules.get(&(n.nt, n.prod)) {
-        Some(TypeRule::DefType { def_child }) if !n.has_err => Some(*def_child),
+        Some(TypeRule::DefType { def_child, .. }) if !n.has_err => Some(*def_child),
         _ => None,
     };
     for c in &n.children {
@@ -571,16 +651,21 @@ impl SemDb {
 
         // Every def SITE in the file, sorted — the arity source for
         // arrow assembly (a param whose type is still unknown must keep
-        // the arrow unknown, not shorten it).
-        let all_defs: Vec<u32> = {
+        // the arrow unknown, not shorten it) — plus each site's NAME
+        // text (member-table keys), both from the binding fragments.
+        let (all_defs, def_names): (Vec<u32>, HashMap<u32, String>) = {
             let e = &self.files[uri];
-            let mut v: Vec<u32> = e
-                .items
-                .iter()
-                .flat_map(|s| s.frag.defs.iter().map(move |d| s.base_off + d.span.0))
-                .collect();
+            let mut v: Vec<u32> = Vec::new();
+            let mut names: HashMap<u32, String> = HashMap::new();
+            for s in &e.items {
+                for d in &s.frag.defs {
+                    let start = s.base_off + d.span.0;
+                    v.push(start);
+                    names.insert(start, d.name.clone());
+                }
+            }
             v.sort_unstable();
-            v
+            (v, names)
         };
         // The document-types boundary in the run vocabulary: arrow
         // types intern strictly after this point.
@@ -588,12 +673,15 @@ impl SemDb {
         let mut arrows: HashMap<TypeId, (Vec<TypeId>, TypeId)> = HashMap::new();
         let mut arrow_intern: HashMap<(Vec<TypeId>, TypeId), TypeId> = HashMap::new();
 
-        // Iterate def-typing to a fixed point (bounded; each pass can
-        // only add or update def types along resolution edges).
+        // Iterate def-typing AND member tables to a fixed point
+        // (bounded; each pass can only add or update entries along
+        // resolution edges — chains like `l.p.x` deepen one level per
+        // pass).
         let mut def_types: HashMap<u32, TypeId> = HashMap::new();
+        let mut member_types: HashMap<(TypeId, String), Option<TypeId>> = HashMap::new();
         let mut last = None;
         for _ in 0..8 {
-            let (out_types, out_defs, diags) = {
+            let (out_types, out_defs, out_members, diags) = {
                 let mut w = Walker {
                     rules: rules.clone(),
                     vocab: &mut vocab,
@@ -603,6 +691,9 @@ impl SemDb {
                     def_types: &def_types,
                     deftype_ids: &deftype_ids,
                     all_defs: &all_defs,
+                    def_names: &def_names,
+                    members: &member_types,
+                    out_members: HashMap::new(),
                     span_types: HashMap::new(),
                     ret_stack: Vec::new(),
                     out_types: Vec::new(),
@@ -612,12 +703,13 @@ impl SemDb {
                 for (node, base) in &items {
                     w.node(node, *base);
                 }
-                (w.out_types, w.out_defs, w.diags)
+                (w.out_types, w.out_defs, w.out_members, w.diags)
             };
             let new_defs: HashMap<u32, TypeId> =
                 out_defs.iter().map(|(k, (_, t))| (*k, *t)).collect();
-            let stable = new_defs == def_types;
+            let stable = new_defs == def_types && out_members == member_types;
             def_types = new_defs;
+            member_types = out_members;
             let mut defs: Vec<((u32, u32), TypeId)> = out_defs.into_values().collect();
             defs.sort_unstable_by_key(|(s, _)| s.0);
             let mut types = out_types;

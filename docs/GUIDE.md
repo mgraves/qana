@@ -307,11 +307,22 @@ Arrows are ordinary carried types, so `let g = add;` makes `g`
 callable, and recursive calls check against the function's own
 signature.
 
-Current limits, honestly: atoms, document types, signatures, and
-arrows — no constructors like `List<T>`, no subtyping, no member/field
-lookup yet (`p.x` is invisible; the next planned form); types flow
-within one file; list-shaped children stay untyped; checking is
-file-granular per query rather than per-item memoized.
+And structs have members: `@type(deftype, b)` makes the typed defs
+inside the body the type's member set, and `@type(member, b, m)` gives
+field access its type — chained through struct-typed fields:
+
+```text
+let deep: Num = l.a.x;          ✓ (Line → Point → Num)
+
+error: no member `z` on `Point`
+error: type `Num` has no members
+```
+
+Current limits, honestly: atoms, document types, signatures, arrows,
+and members — no constructors like `List<T>`, no subtyping; membership
+is span-based (defs inside the body child, including nested ones);
+types flow within one file; list-shaped children stay untyped;
+checking is file-granular per query rather than per-item memoized.
 
 ---
 

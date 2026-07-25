@@ -1,11 +1,12 @@
 // Structlang — structs, functions, and DOCUMENT-LEVEL types.
 //
-// `@type(deftype)` on StructDecl means each `struct` declaration in a
-// DOCUMENT introduces a new type, named by its name and identified by
-// its declaration site (two `struct T`s in different scopes are
-// different types — scoping and shadowing come from the binding tier).
-// `@type(named)` on TyName/NewExpr makes annotations and `new T`
-// denote those types. The toolchain still ships zero types.
+// `@type(deftype, b)` on StructDecl means each `struct` declaration
+// in a DOCUMENT introduces a new type (identity = declaration site;
+// scoping and shadowing come from the binding tier), and the typed
+// defs inside its body are the type's MEMBERS — fields are ordinary
+// definitions. `@type(named)` makes annotations and `new T` denote the
+// type; `@type(member, b, m)` makes `p.x` look `x` up in `p`'s type.
+// The toolchain still ships zero types.
 
 language Structlang
 
@@ -45,7 +46,7 @@ rule file = File: decls @scope(unordered)
 rule decls = decl*
 
 rule decl =
-  | StructDecl: "struct" name:IDENT struct_body @def(name) @outline(name, struct) @type(deftype)
+  | StructDecl: "struct" name:IDENT b:struct_body @def(name) @outline(name, struct) @type(deftype, b)
   | FnDecl:     "fn" name:IDENT t:fn_tail @def(name) @outline(name, function) @type(def, t)
   | LetDecl:    "let" name:IDENT ti:typed_init ";" @def(name) @outline(name) @type(def, ti)
 
@@ -91,7 +92,7 @@ rule stmt =
 
 rule expr =
   | AddExpr:   expr "+" expr @type(sig, Num, Num, Num)
-  | FieldExpr: expr "." IDENT
+  | FieldExpr: b:expr "." m:IDENT @type(member, b, m)
   | CallExpr:  callee:IDENT "(" a:args ")" @ref(callee, call) @type(apply, a)
   | NewExpr:   "new" name:IDENT @ref(name) @type(named)
   | NumLit:    NUMBER @type(Num)

@@ -20,3 +20,5 @@ let origin: Point = new Point;
 let tag: Label = new Label;
 let width: Num = scale(2) + 3;
 let copy: Point = origin;
+let ox: Num = origin.x;
+let lbl: Str = tag.text;

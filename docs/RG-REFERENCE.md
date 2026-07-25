@@ -296,11 +296,12 @@ At most one `@type` per alternative. Forms:
 | `@type(sig, p…, R)` | The alternative's **rule symbols** (in order) must have types `p…`; the node has type `R` |
 | `@type(def, label)` | The name defined here (requires `@def`) carries the type of the child at `label`; the node itself stays untyped |
 | `@type(ref)` | The type the resolved definition CARRIES (a value's type) |
-| `@type(deftype)` | The name defined here (requires `@def`) INTRODUCES a document-level type |
+| `@type(deftype)` / `@type(deftype, body)` | The name defined here (requires `@def`) INTRODUCES a document-level type; with `body`, the typed defs inside that child are the type's MEMBERS (without it the type is opaque) |
 | `@type(named)` | The type the resolved definition IS (requires `@ref`; the target must be a `deftype` — a resolved non-type name is diagnosed) |
 | `@type(fn, params, rt)` | This node has an ARROW type: the typed defs inside `params` (in order) → the type of `rt`. Hand it to the declaration's name with `@type(def, …)` |
 | `@type(apply, args)` | Call checking (requires `@ref`): the callee's arrow is checked against `args`'s items — arity and each argument — and the node has the return type. A non-arrow callee is diagnosed as not callable |
 | `@type(returns, e)` | `e` is checked against the nearest enclosing `fn` node's declared return type |
+| `@type(member, base, name)` | The `name` TOKEN is looked up in `base`'s type's member set; the node has the member's type. Missing members ("no member `z` on `Point`") and memberless base types ("type `Num` has no members") are diagnosed |
 
 Type atoms are **Capitalized** names, invented freely — `Num`, `Str`,
 `Temperature`. Lowercase names inside a `sig` are **type variables**,
@@ -338,9 +339,17 @@ and recursion converges through the same fixpoint that handles forward
 references. The `rt` child must precede the body in the production
 (it supplies the expectation `returns` checks against).
 
+**Members.** With `@type(deftype, body)`, fields are nothing special:
+any typed def inside the body child is a member, so struct-typed
+fields chain (`l.a.x`) and member types feed signatures and
+annotations like any other type. A member whose own type is unknown
+makes access silent (the member exists) rather than a false
+"no member". Membership is span-based in this version: all defs
+within the body child count, including nested ones — scope-precise
+membership arrives with methods.
+
 Current limits: no type constructors, no subtyping, single-file flow,
-list-shaped children untyped, and no member/field lookup yet
-(`p.x` is invisible — the next planned form).
+list-shaped children untyped, span-based membership.
 
 ---
 

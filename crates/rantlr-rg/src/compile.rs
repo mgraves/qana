@@ -502,6 +502,8 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
         .collect();
     let mode_refs: Vec<&str> = mode_names.iter().map(|s| s.as_str()).collect();
     let mut lex = LexGrammar::new(&lang_name, &mode_refs);
+    // Per-mode `eol` agreement across pushes (`@push(M, eol)`).
+    let mut mode_eol: HashMap<u16, (bool, (u32, u32))> = HashMap::new();
     if let Some((n, _)) = ir.max_stack {
         lex.max_stack = Some(n);
     }
@@ -583,10 +585,34 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                 "specialize" => def.specialize = true,
                 "pop" => def.action = rantlr_grammar::model::Action::Pop,
                 "push" => {
-                    if arity(d, 1) {
+                    if a.args.is_empty() || a.args.len() > 2 {
+                        error(d, a.name_span, "@push takes a mode and optionally `eol`".into());
+                    } else {
                         let (m, ms, _) = &a.args[0];
+                        let eol = match a.args.get(1) {
+                            None => false,
+                            Some((w, _, _)) if w == "eol" => true,
+                            Some((w, ws, _)) => {
+                                error(d, *ws, format!("unknown @push option `{w}` (only `eol`)"));
+                                false
+                            }
+                        };
                         match mode_names.iter().position(|n| n == m) {
-                            Some(i) => def.action = rantlr_grammar::model::Action::Push(i as u16),
+                            Some(i) => {
+                                def.action = rantlr_grammar::model::Action::Push(i as u16);
+                                // Line-boundedness is a property of the
+                                // MODE: every push must agree.
+                                match mode_eol.get(&(i as u16)) {
+                                    Some(&(prev, _)) if prev != eol => error(
+                                        d,
+                                        *ms,
+                                        format!("mode `{m}` is pushed both with and without `eol`"),
+                                    ),
+                                    _ => {
+                                        mode_eol.insert(i as u16, (eol, *ms));
+                                    }
+                                }
+                            }
                             None => error(d, *ms, format!("unknown mode `{m}`")),
                         }
                     }
@@ -612,11 +638,14 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
         }
         token_ids.insert(t.name.clone(), id);
         token_spans.push(t.name_span);
-        // Trivia tokens never appear in productions, so they must not
-        // claim literal spellings — a block-comment-mode `/\*/` must
-        // not shadow the operator `"*"` (found by the C exerciser).
+        // Only DEFAULT-mode, non-trivia tokens claim literal spellings
+        // in rules. A mode-local literal (`"if"` in a preprocessor
+        // mode, `/\*/` in a comment mode) silently shadowing the base
+        // language's token of the same spelling compiled IfStmt against
+        // a token the base mode can never produce — both cases found by
+        // the C exerciser. Mode-local tokens are referenced BY NAME.
         let is_trivia = t.attrs.iter().any(|a| a.name == "trivia");
-        if let (Pat::Lit(s), false) = (&pat, is_trivia) {
+        if let (Pat::Lit(s), false, 0) = (&pat, is_trivia, t.mode) {
             lit_text.entry(s.clone()).or_insert(id);
         }
     }
@@ -726,6 +755,11 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
     }
 
     // ---- rules ----
+    for (&m, &(eol, _)) in &mode_eol {
+        if eol {
+            lex.eol_pop[m as usize] = true;
+        }
+    }
     let vocab = Vocab::of(&lex);
     let mut sg = SynGrammar::new(&format!("{lang_name}Syn"), vocab.names.clone());
     let mut nt_ids: HashMap<String, u16> = HashMap::new();
@@ -1614,7 +1648,7 @@ pub fn certify(def: &LangDef) -> Result<(CompiledLexer, LrTables), Vec<RgDiag>> 
 pub fn dump_lex(g: &LexGrammar) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    writeln!(out, "language {} modes {:?} max_stack {:?}", g.name, g.mode_names, g.max_stack)
+    writeln!(out, "language {} modes {:?} max_stack {:?} eol {:?}", g.name, g.mode_names, g.max_stack, g.eol_pop)
         .unwrap();
     for (i, t) in g.tokens.iter().enumerate() {
         writeln!(

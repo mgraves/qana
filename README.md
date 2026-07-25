@@ -1060,9 +1060,48 @@ block-comment `*` was shadowing the operator `"*"`).
 Gates: 140 tests, including the C drift gate (certifies under 1000
 states, demo lossless + zero repairs + full resolution).
 
+## C walls, first demolition: line-bounded modes and a preprocessor that BINDS
+
+The engine feature: `@push(MODE, eol)` declares a LINE-BOUNDED mode —
+it pops automatically at end of line, so it can never appear in a
+line's entry state (the L2 space shrinks) and an edit inside it can
+never damage a neighboring line (gated: editing a `#define` relexes
+exactly one line). Implementing it surfaced that the MStack residue
+bug diagnosed earlier this session had never landed: pop() now clears
+its slot, so semantically equal states compare equal — and the classic
+symptom is gated too (deleting a block comment above 200 lines
+reconverges in ≤2 lines instead of relexing the file).
+
+On top of it, C's preprocessor became STRUCTURED, BINDING syntax: a
+PP mode with its own token set, directives as productions — and
+`#define LIMIT 100` really defines LIMIT. Code references resolve to
+it (name-based binding doesn't care that the def token is PP_NAME and
+the use is IDENT), `#ifdef LIMIT` is a reference, macros appear in the
+outline, and go-to-definition lands on the directive. Expansion
+remains the meta tier's job. Plus the safe grammar bulk: switch/case/
+default (case's `:` is context-distinct from `?:` — no conflict),
+bitfields, and designated initializers.
+
+Two compiler defects found by the C grammar in one session: trivia
+tokens claiming literal spellings (previous increment), and now
+MODE-LOCAL tokens doing the same — `token PP_IF = "if"` silently
+captured the literal `"if"`, compiling IfStmt against a token the
+DEFAULT mode can never produce (unbraced if/else died grammar-wide).
+Rules now resolve literals to DEFAULT-mode non-trivia tokens only;
+mode-local tokens are referenced by name.
+
+Remaining C walls, updated: the typedef-name campaign (typedef heads +
+casts + sizeof(type) + abstract declarators — one covering-grammar
+effort, next), labels/goto (needs default-shift semantics), the comma
+operator (needs the expression-tier split), and function-like macro
+adjacency (space-sensitive, invisible over trivia).
+
+Gates: 143 tests — entry-state assertions, directive-edit locality,
+macro definition/navigation, and the residue regression.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 140 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 143 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

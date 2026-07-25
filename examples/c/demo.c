@@ -3,15 +3,18 @@
    enums, nested declarators, and the full expression grammar. */
 
 #include <stdio.h>
-#define UNUSED_SENTINEL 1
+#define LIMIT 100
+#define UNUSED_FLAG 1
 
-enum { LIMIT = 100 };
+#ifdef LIMIT
+#endif
 
 enum color { RED, GREEN = 5, BLUE };
 
 struct point {
     int x;
     int y;
+    unsigned flags : 4;
     struct point *next;
 };
 
@@ -39,8 +42,13 @@ int main(void) {
     char *msg = "hello, world";
     int i;
 
+    struct point q = { .x = 1, .y = 2 };
     p.x = 3;
     p.y = 4;
+    switch (p.x) {
+        case 1: total = q.x; break;
+        default: total = q.y; break;
+    }
     p.next = &p;
 
     for (i = 0; i < 10; ++i) {

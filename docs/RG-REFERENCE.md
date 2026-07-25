@@ -89,6 +89,7 @@ constructs are expressed with modes, not multi-line tokens.
 | `@specialize` | Matched text is looked up in the keyword table and re-tagged |
 | `@style(class)` | Highlight class (see below) |
 | `@push(MODE)` | Enter `MODE` after this token |
+| `@push(MODE, eol)` | Enter a LINE-BOUNDED mode: it pops automatically at end of line, never reaches another line's entry state, and edits inside it stay line-local (preprocessor directives are the canonical use). Every push of a mode must agree on `eol` |
 | `@pop` | Leave the current mode after this token |
 
 ### Style classes
@@ -108,6 +109,11 @@ generic identifier.
 Keywords are **owned** by the token they specialize. That is what keeps
 composed languages separate: a host language's keyword remains an
 ordinary identifier inside a guest island.
+
+Literal spellings in RULES resolve to DEFAULT-mode, non-trivia tokens
+only — a mode-local `"if"` (in a preprocessor mode, say) never shadows
+the base language's keyword. Reference mode-local tokens BY NAME in
+productions.
 
 Bare words and quoted strings are both accepted; quote a word when it
 collides with a `.rg` keyword (`language`, `max_stack`, `keywords`,

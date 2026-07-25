@@ -43,6 +43,13 @@ impl MStack {
     fn pop(&mut self) {
         if self.len > 0 {
             self.len -= 1;
+            // Clear the vacated slot: `MStack` derives PartialEq over
+            // the WHOLE array, so residue above `len` would make two
+            // semantically identical states compare unequal — breaking
+            // the relex reconvergence test and turning (for example)
+            // "delete a block comment" or any EOL-popped directive line
+            // into a full-file relex.
+            self.stack[self.len as usize] = 0;
         }
     }
     /// Build a state from a mode sequence (bottom to top) — test helper.
@@ -87,6 +94,7 @@ pub struct CompiledLexer {
     actions: Vec<Action>,
     trivia: Vec<bool>,
     specialize: Vec<bool>,
+    eol_pop: Vec<bool>,
     keywords: HashMap<(TokenId, String), TokenId>,
     stack_bound: u8,
     unknown: TokenId,
@@ -109,6 +117,7 @@ impl CompiledLexer {
             actions: g.tokens.iter().map(|t| t.action).collect(),
             trivia: g.tokens.iter().map(|t| t.trivia).collect(),
             specialize: g.tokens.iter().map(|t| t.specialize).collect(),
+            eol_pop: g.eol_pop.clone(),
             // Specialization is PER-OWNER: a keyword only re-tags the
             // token it was declared for (composed languages keep their
             // keyword spaces separate).
@@ -172,6 +181,12 @@ impl CompiledLexer {
             n,
             "lossless invariant: tokens must cover the line exactly"
         );
+        // Line-bounded modes (`@push(M, eol)`) end with the line: pop
+        // them from the top so the EXIT state never carries them —
+        // directive edits stay line-local by construction.
+        while state.depth() > 0 && self.eol_pop[state.current_mode() as usize] {
+            state.pop();
+        }
         (out, state)
     }
 

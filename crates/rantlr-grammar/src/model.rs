@@ -102,6 +102,13 @@ pub struct LexGrammar {
     /// Maximum mode-stack depth. Required (and L2-checked) when the mode
     /// push graph is cyclic; must be ≤ [`crate::lexer::MAX_STACK`].
     pub max_stack: Option<u8>,
+    /// Per-mode LINE-BOUNDED flag (`@push(MODE, eol)`): the mode pops
+    /// automatically at end of line, so it can never appear in a line's
+    /// ENTRY state — the L2 space shrinks, and edits inside such a mode
+    /// (preprocessor directives, say) can never damage neighboring
+    /// lines. At EOL, flagged modes pop from the top of the stack until
+    /// an unflagged one (or the base) is exposed.
+    pub eol_pop: Vec<bool>,
 }
 
 impl LexGrammar {
@@ -112,6 +119,7 @@ impl LexGrammar {
             tokens: Vec::new(),
             keywords: Vec::new(),
             max_stack: None,
+            eol_pop: vec![false; mode_names.len()],
         }
     }
 

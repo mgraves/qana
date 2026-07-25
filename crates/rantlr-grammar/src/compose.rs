@@ -90,6 +90,7 @@ pub fn compose(
         .collect();
     let mode_refs: Vec<&str> = mode_names.iter().map(|s| s.as_str()).collect();
     let mut lex = LexGrammar::new(&format!("{}+{}", host_lex.name, guest_lex.name), &mode_refs);
+    lex.eol_pop = host_lex.eol_pop.iter().chain(guest_lex.eol_pop.iter()).copied().collect();
     // Product bound: the island entry adds one level on top of whatever
     // both languages need; L2 re-verifies against the engine cap.
     lex.max_stack = Some(

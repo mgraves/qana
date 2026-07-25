@@ -10,9 +10,14 @@
 //    specifiers are KEYWORDS (int, struct Foo, ...). The plan of record
 //    for typedef names is a covering grammar + semantic classification,
 //    never lexer feedback.
-//  * Casts, sizeof(type), abstract declarators, labels/goto, switch,
-//    bitfields, designated initializers, and the comma operator are v0
-//    cuts — each recorded in the wall list in the README section.
+//  * Remaining cuts, each recorded in the wall list: the typedef-name
+//    campaign (typedef heads, casts, sizeof(type), abstract
+//    declarators — one covering-grammar effort), labels/goto (the
+//    IDENT `:` shift needs default-shift semantics precedence cannot
+//    express safely), the comma operator (needs the expression-tier
+//    split real C grammars use), and function-like macro adjacency
+//    (`F(x)` vs `F (x)` is space-sensitive — invisible to a parser
+//    over trivia).
 //
 // Dangling else is resolved the envelope way: EXPLICITLY. `else` gets a
 // precedence, and the else-less `if` is marked lower — the classic yacc
@@ -23,7 +28,7 @@ language C
 token WS           = /\s+/ @trivia
 token LINE_COMMENT = /\/\/.*/ @trivia @style(comment)
 token BLOCK_OPEN   = "/*" @trivia @push(BLK) @style(comment)
-token PP_LINE      = /#.*/ @style(regexp)
+token HASH         = "#" @push(PP, eol) @style(regexp)
 token STRING       = /"(\\.|[^"\\])*"/ @style(string)
 token CHAR         = /'(\\.|[^'\\])+'/ @style(string)
 token NUMBER       = /((0[xX][0-9a-fA-F]+)|(\d+(\.\d*)?([eE]([+-])?\d+)?))[uUlLfF]*/ @style(number)
@@ -33,6 +38,30 @@ mode BLK {
   token B_CLOSE   = "*/" @trivia @pop @style(comment)
   token B_CONTENT = /[^*]+/ @trivia @style(comment)
   token B_STAR    = /\*/ @trivia @style(comment)
+}
+
+// The preprocessor as a LINE-BOUNDED mode: `#` enters, end-of-line
+// leaves (the mode never reaches another line's entry state, so an
+// edit inside a directive can never damage its neighbors). Directives
+// are STRUCTURED syntax — `#define NAME body` really defines NAME, and
+// uses of it in code resolve — while expansion remains the meta tier's
+// job, never the parser's.
+mode PP {
+  token PP_WS      = /[ \t]+/ @trivia
+  token PP_INCLUDE = "include" @style(keyword)
+  token PP_DEFINE  = "define" @style(keyword)
+  token PP_UNDEF   = "undef" @style(keyword)
+  token PP_IFDEF   = "ifdef" @style(keyword)
+  token PP_IFNDEF  = "ifndef" @style(keyword)
+  token PP_IF      = "if" @style(keyword)
+  token PP_ELIF    = "elif" @style(keyword)
+  token PP_ELSE    = "else" @style(keyword)
+  token PP_ENDIF   = "endif" @style(keyword)
+  token PP_HEADER  = /<[^>]+>/ @style(string)
+  token PP_STRING  = /"(\\.|[^"\\])*"/ @style(string)
+  token PP_NAME    = /[\a_][\w_]*/ @style(variable)
+  token PP_NUM     = /\d[\w.]*/ @style(number)
+  token PP_ANY     = /./ @style(regexp)
 }
 
 token ELLIPSIS = "..." @style(punctuation)
@@ -117,9 +146,30 @@ rule external_decl =
   | FunctionDef: decl_specs declarator compound_stmt
   | Declaration: decl_specs init_declarators ";"
   | BareDecl:    decl_specs ";"
-  | PpDirective: PP_LINE
+  | PpItem:      pp_directive
 
 // ---- declaration specifiers (keywords only in v0) ----
+
+rule pp_directive =
+  | PpInclude:    "#" PP_INCLUDE PP_HEADER
+  | PpIncludeStr: "#" PP_INCLUDE PP_STRING
+  | PpDefine:     "#" PP_DEFINE name:PP_NAME pp_tokens @def(name) @outline(name, constant)
+  | PpUndef:      "#" PP_UNDEF name:PP_NAME @ref(name)
+  | PpIfdef:      "#" PP_IFDEF name:PP_NAME @ref(name)
+  | PpIfndef:     "#" PP_IFNDEF name:PP_NAME @ref(name)
+  | PpIf:         "#" PP_IF pp_tokens
+  | PpElif:       "#" PP_ELIF pp_tokens
+  | PpElse:       "#" PP_ELSE
+  | PpEndif:      "#" PP_ENDIF
+
+rule pp_tokens = pp_tok*
+
+rule pp_tok =
+  | PpTokName: PP_NAME
+  | PpTokNum:  PP_NUM
+  | PpTokStr:  PP_STRING
+  | PpTokHdr:  PP_HEADER
+  | PpTokAny:  PP_ANY
 
 rule decl_specs = decl_spec+
 
@@ -156,7 +206,9 @@ rule su_body = SuBody: "{" field_decls "}" @scope
 
 rule field_decls = field_decl*
 
-rule field_decl = FieldDecl: decl_specs init_declarators ";"
+rule field_decl =
+  | FieldDecl: decl_specs init_declarators ";"
+  | BitField:  decl_specs declarator ":" expr ";"
 
 rule enum_spec =
   | EnumDef:  "enum" tag:IDENT enum_body @def(tag) @outline(tag, constant)
@@ -209,8 +261,9 @@ rule param =
   | VarArgs:  ELLIPSIS
 
 rule initializer =
-  | InitExpr: expr
-  | InitList: "{" init_items "}"
+  | InitExpr:   expr
+  | InitList:   "{" init_items "}"
+  | Designated: "." IDENT "=" initializer
 
 rule init_items = initializer+ % ","
 
@@ -236,7 +289,10 @@ rule stmt =
   | ReturnStmt:  "return" opt_expr ";"
   | BreakStmt:   "break" ";"
   | ContinueStmt: "continue" ";"
-  | PpStmt:      PP_LINE
+  | SwitchStmt:  "switch" "(" expr ")" stmt
+  | CaseStmt:    "case" expr ":" stmt
+  | DefaultStmt: "default" ":" stmt
+  | PpStmt:      pp_directive
 
 rule opt_expr = expr?
 

@@ -369,6 +369,20 @@ contract — editing a private definition re-resolves nothing anywhere
 else (gated by counter). A grammar that declares neither form keeps
 the open world.
 
+Namespaces and paths are two more annotations: `@module(b)` makes a
+def introduce a namespace (its members = the defs in the body child),
+and `@qualify(base, name)` resolves `a::b` paths — nested segments,
+import chasing (`use math;` then `math::pi`), and re-export chains
+(`pub use`) included:
+
+```text
+mod math { pub let pi = 3; }        # lib.ml
+let area = math::pi + width;        # app.ml — resolves, types, navigates
+
+error: no member `nothere` in this module
+error: `tau_hidden` exists in the module but is not exported
+```
+
 ---
 
 ## In an editor

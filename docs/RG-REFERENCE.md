@@ -255,6 +255,8 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@type(…)` | Declare this alternative's typing rule (see **The type tier** below) |
 | `@export` | This alternative's `@def` is visible to other files (see **The module tier**) |
 | `@import(label)` | The `label` token names an import: it resolves against other files' EXPORTS only (see **The module tier**) |
+| `@module(body)` | The `@def` on this alternative introduces a NAMESPACE; the defs inside the `body` child are its members |
+| `@qualify(base, name)` | The `name` token resolves among the members of what `base` resolves to (`a::b` paths; nest via a recursive path rule) |
 
 Attribute names cannot be `.rg` reserved words, which is why the
 precedence override is spelled `@precedence` rather than `@prec`. Use it
@@ -385,8 +387,25 @@ Declaring either form activates STRICT semantics, Rust-flavored:
 A grammar declaring neither form keeps the open world: every top-level
 name is ambiently visible to every file.
 
-Not yet built: named module scopes within a file, qualified paths
-(`a::b::c`), re-exports, and visibility levels — the named next steps.
+**Namespaces and paths.** `@module(body)` is the binding-level twin of
+`@type(deftype, body)`: the def introduces a namespace whose members
+are the defs inside the body child (give the body its own `@scope` so
+members stay out of the enclosing namespace). `@qualify(base, name)`
+resolves `name` among the members of whatever `base` resolves to;
+nested paths (`a::b::c`) come from a left-recursive path rule with
+`@qualify` on the segment. Path bases chase through imports —
+`use math;` then `math::pi` lands in the exporting file — and through
+re-export chains (`pub use` is just `@export` on an import; it needs
+no new form). Same-file paths see all members; crossing a file
+requires the member exported. Path errors are precise: "no member",
+"is not a module", and "exists in the module but is not exported".
+`@type(ref, label)` selects which reference feeds a type on
+multi-reference productions (a path's base and name).
+
+Not yet built: visibility LEVELS (`pub(crate)`-style) — deferred until
+a unit hierarchy (directories/packages) exists for them to scope over;
+today's units are flat files. Completion after `::` and rename through
+paths are named refinements.
 
 ---
 

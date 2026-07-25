@@ -54,6 +54,11 @@ pub enum RefKind {
     /// imports are diagnosed; imports of existing-but-private names are
     /// diagnosed separately ("not exported").
     Import,
+    /// A QUALIFIED position (`@qualify`): the name resolves among the
+    /// MEMBERS of whatever its base resolves to — member access on
+    /// namespaces, the binding-level twin of the type tier's member
+    /// form. Resolved eagerly at query time, not in the env fold.
+    Qualified,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -79,6 +84,13 @@ pub struct BindingConfig {
     /// only exported names are importable. A grammar that declares
     /// neither keeps the open world (every top-level name ambient).
     pub exports: Vec<(u16, u16)>,
+    /// (nt, prod, body child) — the def INTRODUCES a namespace whose
+    /// members are the definitions inside the body child (`@module`,
+    /// the binding twin of `@type(deftype, body)`).
+    pub modules: Vec<(u16, u16, usize)>,
+    /// (nt, prod, base child, name child) — the name token resolves
+    /// among the members of what the base resolves to (`@qualify`).
+    pub quals: Vec<(u16, u16, usize, usize)>,
 }
 
 impl BindingConfig {
@@ -120,6 +132,12 @@ pub fn compose_binding(
     }
     for &(nt, prod) in &guest.exports {
         out.exports.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset));
+    }
+    for &(nt, prod, body) in &guest.modules {
+        out.modules.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset, body));
+    }
+    for &(nt, prod, b, k) in &guest.quals {
+        out.quals.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset, b, k));
     }
     out.unordered = host.unordered;
     out
@@ -207,6 +225,11 @@ struct Fragment {
     /// item's contribution to the environment (and the signature).
     top_defs: Vec<u32>,
     local: Vec<LocalRes>,
+    /// (def index, body span rel) — defs that introduce a NAMESPACE
+    /// whose members are the defs inside the span (`@module`).
+    modules: Vec<(u32, (u32, u32))>,
+    /// (base child span rel, index into `refs` of the Qualified name).
+    quals: Vec<((u32, u32), u32)>,
 }
 
 impl Fragment {
@@ -264,6 +287,8 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
         scope_barrier: vec![false],
         top_defs: Vec::new(),
         local: Vec::new(),
+        modules: Vec::new(),
+        quals: Vec::new(),
     };
     let mut order = 0u32;
     walk(item, 0, 0, cfg, &mut f, &mut order);
@@ -285,8 +310,9 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
     let depths: Vec<u32> = (0..f.scope_parents.len() as u32).map(|s| f.scope_depth(s)).collect();
     for r in &f.refs {
         let mut best: Option<(u32, u32, u32)> = None; // (depth, order, idx)
-        // Imports resolve against other files' exports ONLY.
-        if r.kind != RefKind::Import {
+        // Imports resolve against other files' exports ONLY; qualified
+        // names resolve among their base's members at query time.
+        if r.kind != RefKind::Import && r.kind != RefKind::Qualified {
         if let Some(cands) = by_name.get(r.name.as_str()) {
             for &i in cands {
                 let d = &f.defs[i as usize];
@@ -311,6 +337,27 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
         });
     }
     return f;
+
+    /// Span of the k-th SYMBOL child (token or rule), item-relative.
+    fn child_span(n: &GreenNode, base: u32, k: usize) -> Option<(u32, u32)> {
+        let mut off = 0u32;
+        let mut idx = 0usize;
+        for c in &n.children {
+            let w = c.width();
+            let is_symbol = match c {
+                GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+                GreenChild::Node(m) => m.nt != ERROR_NT,
+            };
+            if is_symbol {
+                if idx == k {
+                    return Some((base + off, base + off + w));
+                }
+                idx += 1;
+            }
+            off += w;
+        }
+        None
+    }
 
     fn name_child(n: &GreenNode, k: usize) -> Option<(String, u32)> {
         let mut off = 0u32;
@@ -368,9 +415,12 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
                 });
             }
         }
-        if let Some(&(_, _, k, kind)) =
-            cfg.refs.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
-        {
+        // A production may carry SEVERAL references (a qualified path
+        // has a base @ref and a @qualify name), so collect all entries.
+        for &(nt2, p2, k, kind) in cfg.refs.iter() {
+            if nt2 != n.nt || p2 != n.prod {
+                continue;
+            }
             if let Some((name, off)) = name_child(n, k) {
                 *order += 1;
                 f.refs.push(Ref {
@@ -380,6 +430,29 @@ fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
                     order: *order,
                     kind,
                 });
+            }
+        }
+        if let Some(&(_, _, body)) =
+            cfg.modules.iter().find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
+        {
+            if let (false, Some(span)) = (f.defs.is_empty(), child_span(n, base, body)) {
+                // The def this production just pushed introduces the
+                // namespace; members are the defs inside `span`.
+                f.modules.push(((f.defs.len() - 1) as u32, span));
+            }
+        }
+        if let Some(&(_, _, base_child, _)) =
+            cfg.quals.iter().find(|&&(nt2, p2, _, _)| nt2 == n.nt && p2 == n.prod)
+        {
+            if let Some(bspan) = child_span(n, base, base_child) {
+                // The Qualified ref for this node was pushed just above.
+                if let Some(ri) = f
+                    .refs
+                    .iter()
+                    .rposition(|r| r.kind == RefKind::Qualified && r.span.0 >= base && r.span.0 < base + n.width)
+                {
+                    f.quals.push((bspan, ri as u32));
+                }
             }
         }
         let mut off = base;
@@ -407,6 +480,9 @@ enum Classified {
     Top,
     /// Exported by this other file.
     Foreign(String),
+    /// A qualified name (`@qualify`): resolved eagerly at query time
+    /// against its base's member set, never in the env fold.
+    Qualified,
     Unresolved,
 }
 
@@ -787,7 +863,10 @@ impl SemDb {
                 let mut unresolved = Vec::new();
                 let mut private = Vec::new();
                 for (ri, r) in slot.frag.refs.iter().enumerate() {
-                    let t = match slot.frag.local[ri] {
+                    let t = if r.kind == RefKind::Qualified {
+                        Classified::Qualified
+                    } else {
+                    match slot.frag.local[ri] {
                         LocalRes::Def(d) => Classified::Local(d),
                         LocalRes::Contained => Classified::Unresolved,
                         LocalRes::Escape => {
@@ -824,6 +903,7 @@ impl SemDb {
                                 Classified::Unresolved
                             }
                         }
+                    }
                     };
                     if matches!(r.kind, RefKind::Var | RefKind::Import)
                         && t == Classified::Unresolved
@@ -939,6 +1019,7 @@ impl SemDb {
         let name = slot.frag.refs[ri].name.clone();
         let (_, _, res) = slot.res.as_ref()?;
         match res.targets[ri].clone() {
+            Classified::Qualified => self.resolve_qualified(uri, k, ri as u32).ok(),
             Classified::Local(d) => Some((uri.to_string(), self.abs_def_span(uri, k, d))),
             Classified::Top => {
                 let (i, d) = self.top_site(uri, &name, k)?;
@@ -994,6 +1075,12 @@ impl SemDb {
                         continue;
                     }
                     let hit = match target {
+                        Classified::Qualified => {
+                            self.resolve_qualified(u, k, ri as u32).ok().is_some_and(|(qu, span)| {
+                                qu == def_uri
+                                    && span == self.abs_def_span(&def_uri, def_item, def_idx)
+                            })
+                        }
                         Classified::Local(d) => u == &def_uri && k == def_item && d == def_idx,
                         Classified::Top => {
                             def_is_top
@@ -1050,6 +1137,167 @@ impl SemDb {
                     r.name.clone(),
                     (slot.base_off + r.span.0, slot.base_off + r.span.1),
                 ));
+            }
+        }
+        out
+    }
+
+    /// Resolve one qualified reference: the base's target (chased
+    /// through imports by `definition`'s import-wins rule, so
+    /// `use math; math::pi` lands in the exporting file for free) must
+    /// be a `@module` def; the name then resolves among the defs inside
+    /// its body span. Same-file access sees all members; CROSSING a
+    /// file requires the member to be `@export`ed.
+    fn resolve_qualified(
+        &mut self,
+        uri: &str,
+        item: u32,
+        ri: u32,
+    ) -> Result<(String, (u32, u32)), String> {
+        let (name, name_span, base_span) = {
+            let slot = &self.files[uri].items[item as usize];
+            let r = &slot.frag.refs[ri as usize];
+            let q = slot
+                .frag
+                .quals
+                .iter()
+                .find(|(_, qri)| *qri == ri)
+                .ok_or_else(|| "malformed qualified reference".to_string())?;
+            (
+                r.name.clone(),
+                (slot.base_off + r.span.0, slot.base_off + r.span.1),
+                (slot.base_off + q.0 .0, slot.base_off + q.0 .1),
+            )
+        };
+        let _ = name_span;
+        // The base's resolution = the resolution of the LAST reference
+        // inside the base child (leftward recursion for nested paths).
+        let base_ref_start = {
+            let slot = &self.files[uri].items[item as usize];
+            slot.frag
+                .refs
+                .iter()
+                .filter(|r| {
+                    let s = slot.base_off + r.span.0;
+                    s >= base_span.0 && s < base_span.1
+                })
+                .map(|r| slot.base_off + r.span.0)
+                .max()
+                .ok_or_else(|| "path base carries no reference".to_string())?
+        };
+        let (mut turi, mut tspan) = self
+            .definition(uri, base_ref_start)
+            .ok_or_else(|| "path base does not resolve".to_string())?;
+        // The base may land on an IMPORT binding (`use math;` then
+        // `math::pi`): chase through it — definition() at the import
+        // token jumps to the foreign export (bounded, re-export chains
+        // included).
+        for _ in 0..8 {
+            self.ensure_resolved(&turi);
+            let is_import_binding = {
+                let e = &self.files[&turi];
+                e.items
+                    .partition_point(|s| s.base_off <= tspan.0)
+                    .checked_sub(1)
+                    .map(|k| {
+                        let slot = &e.items[k];
+                        let rel = tspan.0 - slot.base_off;
+                        slot.frag
+                            .refs
+                            .iter()
+                            .any(|r| r.kind == RefKind::Import && r.span.0 == rel)
+                    })
+                    .unwrap_or(false)
+            };
+            if !is_import_binding {
+                break;
+            }
+            match self.definition(&turi, tspan.0) {
+                Some((nu, ns)) if (nu.as_str(), ns) != (turi.as_str(), tspan) => {
+                    turi = nu;
+                    tspan = ns;
+                }
+                _ => break,
+            }
+        }
+        // Locate the target def and its module body.
+        self.ensure_resolved(&turi);
+        let (body_abs, titem) = {
+            let e = &self.files[&turi];
+            let k = e
+                .items
+                .partition_point(|s| s.base_off <= tspan.0)
+                .checked_sub(1)
+                .ok_or_else(|| "target out of range".to_string())?;
+            let slot = &e.items[k];
+            let rel = tspan.0 - slot.base_off;
+            let di = slot
+                .frag
+                .defs
+                .iter()
+                .position(|d| d.span.0 == rel)
+                .ok_or_else(|| "target is not a definition".to_string())?;
+            let m = slot
+                .frag
+                .modules
+                .iter()
+                .find(|(mdi, _)| *mdi == di as u32)
+                .ok_or_else(|| format!("`{}` is not a module", &self.files[&turi].items[k].frag.defs[di].name))?;
+            ((slot.base_off + m.1 .0, slot.base_off + m.1 .1), k)
+        };
+        // Members: defs of the target item inside the body span.
+        let crossing = turi != uri;
+        let e = &self.files[&turi];
+        let slot = &e.items[titem];
+        let mut found_private = false;
+        let mut hit: Option<(u32, u32)> = None;
+        for d in &slot.frag.defs {
+            let s = slot.base_off + d.span.0;
+            if s >= body_abs.0 && s < body_abs.1 && d.name == name {
+                if crossing && !d.exported {
+                    found_private = true;
+                } else {
+                    hit = Some((s, slot.base_off + d.span.1));
+                }
+            }
+        }
+        match (hit, found_private) {
+            (Some(span), _) => Ok((turi, span)),
+            (None, true) => Err(format!("`{name}` exists in the module but is not exported")),
+            (None, false) => Err(format!("no member `{name}` in this module")),
+        }
+    }
+
+    /// Path errors for the module tier: qualified names whose base is
+    /// not a module, whose member is missing, or whose member is
+    /// private across a file boundary. Message + span, query-time.
+    pub fn qualified_errors(&mut self, uri: &str) -> Vec<(String, (u32, u32))> {
+        self.ensure_resolved(uri);
+        let quals: Vec<(u32, u32, (u32, u32))> = {
+            let e = &self.files[uri];
+            e.items
+                .iter()
+                .enumerate()
+                .flat_map(|(k, slot)| {
+                    slot.frag.quals.iter().map(move |&(_, ri)| {
+                        let r = &slot.frag.refs[ri as usize];
+                        (
+                            k as u32,
+                            ri,
+                            (slot.base_off + r.span.0, slot.base_off + r.span.1),
+                        )
+                    })
+                })
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (k, ri, span) in quals {
+            if let Err(msg) = self.resolve_qualified(uri, k, ri) {
+                // An unresolved BASE is already the base ref's own
+                // diagnostic; do not double-report.
+                if msg != "path base does not resolve" {
+                    out.push((msg, span));
+                }
             }
         }
         out
@@ -1199,6 +1447,41 @@ impl SemDb {
                             None => Target::Unresolved,
                         }
                     }
+                    Classified::Qualified => match self.resolve_qualified(uri, k, ri as u32) {
+                        Ok((qu, span)) => {
+                            let same = qu == uri;
+                            let fb = if same {
+                                bases.clone()
+                            } else {
+                                self.ensure_resolved(&qu);
+                                foreign_bases
+                                    .entry(qu.clone())
+                                    .or_insert_with(|| def_base(self, &qu))
+                                    .clone()
+                            };
+                            // span → (item, def idx) in the target file.
+                            let e = &self.files[&qu];
+                            let ti = e.items.partition_point(|s| s.base_off <= span.0) - 1;
+                            let slot = &e.items[ti];
+                            match slot
+                                .frag
+                                .defs
+                                .iter()
+                                .position(|d| slot.base_off + d.span.0 == span.0)
+                            {
+                                Some(di) => {
+                                    let def = (fb[ti] + di as u32) as usize;
+                                    if same {
+                                        Target::Local { def }
+                                    } else {
+                                        Target::Foreign { uri: qu, def }
+                                    }
+                                }
+                                None => Target::Unresolved,
+                            }
+                        }
+                        Err(_) => Target::Unresolved,
+                    },
                     Classified::Unresolved => Target::Unresolved,
                 };
                 out.push(t);

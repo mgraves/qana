@@ -5,3 +5,6 @@ use scale;
 use base as start;
 
 let width = scale(start) + 2;
+
+use math;
+let area = math::pi + width;

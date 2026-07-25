@@ -978,9 +978,43 @@ semantics (private/typo/ambient distinctions), the signature firewall
 counter, open-world compatibility, static cross-checks, and the LSP
 wire.
 
+## Modules v1 (shipped): namespaces, qualified paths, re-exports
+
+Two forms complete the module tier's working core. `@module(body)` is
+the binding-level twin of `@type(deftype, body)`: the def introduces a
+NAMESPACE whose members are the defs inside the body child.
+`@qualify(base, name)` resolves a name among the members of what its
+base resolves to — `a::b` paths, with nested segments coming from an
+ordinary left-recursive path rule (the engine recurses leftward
+through the base's own reference).
+
+The machinery already built keeps paying: path bases CHASE through
+imports — `use math;` then `math::pi` lands in the exporting file
+because definition() at an import binding already jumps through — and
+re-exports needed NO new form at all: `pub use x;` is just @export on
+an import, and the export surface, navigation, and type flow all chain
+(gated three files deep). Same-file paths see all members; crossing a
+file requires the member exported, with three precise diagnostics:
+"no member", "is not a module", "exists in the module but is not
+exported".
+
+Engine: productions may now carry SEVERAL references (a path's base
+@ref plus its @qualify name — the one-ref-per-production limit is
+lifted), RefKind::Qualified skips both local scopes and the env fold
+(resolved eagerly at query time via leftward recursion), and
+@type(ref, label) selects which reference feeds a type on
+multi-reference productions. Visibility LEVELS are deferred with a
+reason rather than faked: pub(crate)-style scoping needs a unit
+hierarchy (directories/packages), and today's units are flat files.
+
+Gates: 139 tests — the grown example (mod + paths in modlang,
+drift-gated), same-file vs crossing visibility, all three path
+diagnostics, nested `outer::inner::deep`, re-export chains with type
+flow, and the LSP wire.
+
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 136 tests; the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 139 tests; the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + a declared type tier + LSP,

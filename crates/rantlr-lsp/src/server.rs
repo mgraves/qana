@@ -444,6 +444,7 @@ impl Server {
                 // and declared-type-tier mismatches (errors).
                 let unresolved = self.sem.unresolved(uri);
                 let not_exported = self.sem.not_exported(uri);
+                let qualified = self.sem.qualified_errors(uri);
                 let type_diags = self.sem.types(uri).diags;
                 let doc = self.docs.get(uri).unwrap();
                 for (name, span) in unresolved {
@@ -458,6 +459,13 @@ impl Server {
                         "range": range_json(doc, span),
                         "severity": 1,
                         "message": format!("`{name}` exists but is not exported by its file")
+                    }));
+                }
+                for (msg, span) in qualified {
+                    diags.push(json!({
+                        "range": range_json(doc, span),
+                        "severity": 1,
+                        "message": msg
                     }));
                 }
                 for d in type_diags {

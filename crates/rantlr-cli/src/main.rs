@@ -594,6 +594,13 @@ fn cmd_defs(args: &Args) {
             );
         }
     }
+    let qual_errs = db.qualified_errors(doc_path);
+    if !qual_errs.is_empty() {
+        println!();
+        for (msg, span) in &qual_errs {
+            render::diagnostic(&s, 1, *span, msg);
+        }
+    }
 
     let n_unres = unresolved.len();
     println!();
@@ -603,7 +610,7 @@ fn cmd_defs(args: &Args) {
         (0, h) => println!("{} {h} access error(s)", red("✗")),
         (u, h) => println!("{} {u} unresolved reference(s), {h} access error(s)", red("✗")),
     }
-    if !hidden.is_empty() {
+    if !hidden.is_empty() || !qual_errs.is_empty() {
         std::process::exit(1);
     }
 }

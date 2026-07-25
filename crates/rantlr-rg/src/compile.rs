@@ -978,6 +978,8 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
             let mut pending_type_ir: Vec<usize> = Vec::new();
             let mut pending_export: Option<(u32, u32)> = None;
             let mut pending_import: Option<usize> = None;
+            let mut pending_module: Option<usize> = None;
+            let mut pending_qualify: Option<usize> = None;
 
             for (ai, a) in alt.attrs.iter().enumerate() {
                 let pos_of = |d: &mut Vec<RgDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
@@ -1082,6 +1084,20 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             error(d, a.name_span, "duplicate @import".into());
                         }
                     }
+                    "module" => {
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@module takes one body label argument".into());
+                        } else if pending_module.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @module".into());
+                        }
+                    }
+                    "qualify" => {
+                        if a.args.len() != 2 {
+                            error(d, a.name_span, "@qualify takes base and name labels".into());
+                        } else if pending_qualify.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @qualify".into());
+                        }
+                    }
                     "precedence" => {
                         if a.args.len() != 1 {
                             error(d, a.name_span, "@precedence takes one token argument".into());
@@ -1107,7 +1123,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         d,
                         a.name_span,
                         format!(
-                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence, @type, @export, @import)"
+                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence, @type, @export, @import, @module, @qualify)"
                         ),
                     ),
                 }
@@ -1148,6 +1164,60 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             format!("`{}` labels a rule — the imported name must be a token", arg.0),
                         ),
                     },
+                }
+            }
+
+            if let Some(ai) = pending_module {
+                let a = &alt.attrs[ai];
+                match (rule_pos_of(d, &positions, &sg, prod, &a.args[0]), binding.defs.iter().any(|e| e.0 == nt && e.1 == prod)) {
+                    (Some(body), true) => binding.modules.push((nt, prod, body)),
+                    (_, false) => {
+                        error(d, a.name_span, "@module requires @def on the same alternative".into())
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(ai) = pending_qualify {
+                let a = &alt.attrs[ai];
+                let base = match positions.get(a.args[0].0.as_str()) {
+                    Some(&k) => Some(k),
+                    None => {
+                        error(
+                            d,
+                            a.args[0].1,
+                            format!("no symbol labeled `{}` in this alternative", a.args[0].0),
+                        );
+                        None
+                    }
+                };
+                let name = match positions.get(a.args[1].0.as_str()) {
+                    None => {
+                        error(
+                            d,
+                            a.args[1].1,
+                            format!("no symbol labeled `{}` in this alternative", a.args[1].0),
+                        );
+                        None
+                    }
+                    Some(&k) => match sg.prods[prod as usize].rhs.get(k) {
+                        Some(Sym::T(_)) => Some(k),
+                        _ => {
+                            error(
+                                d,
+                                a.args[1].1,
+                                format!("`{}` labels a rule — the qualified name must be a token", a.args[1].0),
+                            );
+                            None
+                        }
+                    },
+                };
+                if let (Some(base_child), Some(name_child)) = (base, name) {
+                    if binding.refs.iter().any(|r| r.0 == nt && r.1 == prod && r.3 == RefKind::Import) {
+                        error(d, a.name_span, "@qualify cannot combine with @import".into());
+                    } else {
+                        binding.refs.push((nt, prod, name_child, RefKind::Qualified));
+                        binding.quals.push((nt, prod, base_child, name_child));
+                    }
                 }
             }
 
@@ -1217,6 +1287,21 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                         Some(&(_, _, k, _)) => Some(TypeRule::FromRef { ref_child: k }),
                         None => {
                             error(d, a.name_span, "@type(ref) requires @ref on the same alternative".into());
+                            None
+                        }
+                    },
+                    // Multi-reference productions (a path's base @ref +
+                    // @qualify name) select WHICH reference by label.
+                    ("ref", 2) => match positions.get(a.args[1].0.as_str()) {
+                        Some(&k) if binding.refs.iter().any(|r| r.0 == nt && r.1 == prod && r.2 == k) => {
+                            Some(TypeRule::FromRef { ref_child: k })
+                        }
+                        Some(_) => {
+                            error(d, a.args[1].1, "that label is not a reference on this alternative".into());
+                            None
+                        }
+                        None => {
+                            error(d, a.args[1].1, format!("no symbol labeled `{}` in this alternative", a.args[1].0));
                             None
                         }
                     },
@@ -1422,6 +1507,35 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
         LangDef { lex, sg, binding, types: type_cfg, styles, outline, token_spans, prod_spans },
         diags,
     )
+}
+
+
+/// Label → symbol position that must hold a RULE (shared by the module
+/// and type attribute arms).
+fn rule_pos_of(
+    d: &mut Vec<RgDiag>,
+    positions: &HashMap<&str, usize>,
+    sg: &SynGrammar,
+    prod: u16,
+    arg: &(String, (u32, u32), bool),
+) -> Option<usize> {
+    let push = |d: &mut Vec<RgDiag>, span, msg: String| {
+        d.push(RgDiag { span, msg, severity: 1 })
+    };
+    let k = match positions.get(arg.0.as_str()) {
+        Some(&k) => k,
+        None => {
+            push(d, arg.1, format!("no symbol labeled `{}` in this alternative", arg.0));
+            return None;
+        }
+    };
+    match sg.prods[prod as usize].rhs.get(k) {
+        Some(Sym::N(_)) => Some(k),
+        _ => {
+            push(d, arg.1, format!("`{}` labels a token — a body must be a rule symbol", arg.0));
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

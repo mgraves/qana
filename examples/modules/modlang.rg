@@ -27,10 +27,11 @@ token COLON  = ":" @style(punctuation)
 token COMMA  = "," @style(punctuation)
 token SEMI   = ";" @style(punctuation)
 token ARROW  = "->" @style(operator)
+token PATHSEP = "::" @style(punctuation)
 token EQ     = "=" @style(operator)
 token PLUS   = "+" @style(operator)
 
-keywords IDENT = pub use as fn let return Num Str
+keywords IDENT = pub use as mod fn let return Num Str
 
 pair LPAREN RPAREN
 pair LBRACE RBRACE
@@ -44,12 +45,16 @@ rule file = File: decls @scope(unordered)
 rule decls = decl*
 
 rule decl =
+  | ModDecl:    "mod" name:IDENT b:mod_body @def(name) @module(b) @outline(name, module)
+  | PubModDecl: "pub" "mod" name:IDENT b:mod_body @def(name) @export @module(b) @outline(name, module)
   | UseDecl:    "use" name:IDENT ";" @def(name) @import(name) @type(ref) @outline(name)
   | UseAsDecl:  "use" target:IDENT "as" name:IDENT ";" @def(name) @import(target) @type(ref) @outline(name)
   | PubFnDecl:  "pub" "fn" name:IDENT t:fn_tail @def(name) @export @type(def, t) @outline(name, function)
   | FnDecl:     "fn" name:IDENT t:fn_tail @def(name) @type(def, t) @outline(name, function)
   | PubLetDecl: "pub" "let" name:IDENT "=" e:expr ";" @def(name) @export @type(def, e) @outline(name)
   | LetDecl:    "let" name:IDENT "=" e:expr ";" @def(name) @type(def, e) @outline(name)
+
+rule mod_body = ModBody: "{" decls "}" @scope
 
 rule fn_tail = FnTail: "(" p:params ")" "->" rt:ty block @scope @type(fn, p, rt)
 
@@ -75,5 +80,6 @@ rule expr =
   | NumLit:   NUMBER @type(Num)
   | StrLit:   STRING @type(Str)
   | NameRef:  name:IDENT @ref(name) @type(ref)
+  | PathRef:  base:IDENT "::" name:IDENT @ref(base) @qualify(base, name) @type(ref, name)
 
 rule args = expr* % ","

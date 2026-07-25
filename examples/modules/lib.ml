@@ -7,3 +7,8 @@ pub fn scale(factor: Num) -> Num {
 pub let base = 10;
 
 let secret = 32;
+
+pub mod math {
+  pub let pi = 3;
+  let tau_hidden = 6;
+}

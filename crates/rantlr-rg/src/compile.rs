@@ -1023,6 +1023,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
             let mut pending_ns: Option<usize> = None;
             let mut pending_macro: Option<usize> = None;
             let mut pending_splice: Option<usize> = None;
+            let mut pending_reflect: Option<usize> = None;
             let mut pending_module: Option<usize> = None;
             let mut pending_qualify: Option<usize> = None;
 
@@ -1173,6 +1174,19 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                             error(d, a.name_span, "@splice takes (name[, args]) labels".into());
                         } else if pending_splice.replace(ai).is_some() {
                             error(d, a.name_span, "duplicate @splice".into());
+                        }
+                    }
+                    "reflect" => {
+                        // `@reflect(ty[, "sep"])` — this @splice's macro
+                        // iterates the resolved type's declared members
+                        // (param 1 = member name, param 2 = its type),
+                        // joined by the separator string.
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@reflect takes (ty[, \"sep\"]) — a type label and an optional separator string".into());
+                        } else if a.args.len() == 2 && !a.args[1].2 {
+                            error(d, a.args[1].1, "@reflect's separator must be a string".into());
+                        } else if pending_reflect.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @reflect".into());
                         }
                     }
                     "precedence" => {
@@ -1358,6 +1372,40 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                 };
                 if let (Some(name), Some(args)) = (name, args) {
                     macros.uses.push((nt, prod, name, args));
+                }
+            }
+            if let Some(ai) = pending_reflect {
+                let a = &alt.attrs[ai];
+                if !macros.uses.iter().any(|u| u.0 == nt && u.1 == prod) {
+                    error(d, a.name_span, "@reflect requires @splice on the same alternative".into());
+                } else {
+                    let ty = match positions.get(a.args[0].0.as_str()) {
+                        Some(&k)
+                            if binding.refs.iter().any(|r| r.0 == nt && r.1 == prod && r.2 == k) =>
+                        {
+                            Some(k)
+                        }
+                        Some(_) => {
+                            error(
+                                d,
+                                a.args[0].1,
+                                "@reflect's type must carry @ref on the same alternative".into(),
+                            );
+                            None
+                        }
+                        None => {
+                            error(
+                                d,
+                                a.args[0].1,
+                                format!("no symbol labeled `{}` in this alternative", a.args[0].0),
+                            );
+                            None
+                        }
+                    };
+                    if let Some(ty) = ty {
+                        let sep = a.args.get(1).map(|s| s.0.clone()).unwrap_or_else(|| " ".into());
+                        macros.reflects.push((nt, prod, ty, sep));
+                    }
                 }
             }
 

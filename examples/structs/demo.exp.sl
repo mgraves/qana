@@ -29,7 +29,7 @@ let lbl: Str = tag.text;
 # grammar-declared " + ". Iterate a struct's fields by writing the
 # per-field expression once.
 macro coords(f, t) => { origin.f }
-let span: Num = coords!{Point};
+let span: Num = origin.x + origin.y;
 
 struct Wrap {
   p: Point,
@@ -41,4 +41,4 @@ fn probe(pt: Point) -> Num {
 }
 
 macro spawns(f, t) => { probe(new t) }
-let grown: Num = spawns!{Wrap};
+let grown: Num = probe(new Point) + probe(new Point);

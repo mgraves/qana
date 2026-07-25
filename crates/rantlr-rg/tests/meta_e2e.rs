@@ -144,6 +144,14 @@ fn committed_materializations_are_current() {
     let cout = expand_document(&clexer, &cdef.def, &ctables, c_demo, &[], 8).unwrap();
     let ccommitted = include_str!("../../../examples/c/demo.exp.c");
     assert_eq!(ccommitted, cout.text, "demo.exp.c drifted — rerun `rantlr expand`");
+
+    let sl_rg = include_str!("../../../examples/structs/structlang.rg");
+    let sl_demo = include_str!("../../../examples/structs/demo.sl");
+    let sdef = compile_source(&tc, sl_rg);
+    let (slexer, stables) = certify(&sdef.def).unwrap();
+    let sout = expand_document(&slexer, &sdef.def, &stables, sl_demo, &[], 8).unwrap();
+    let scommitted = include_str!("../../../examples/structs/demo.exp.sl");
+    assert_eq!(scommitted, sout.text, "demo.exp.sl drifted — rerun `rantlr expand`");
 }
 
 /// CROSS-FILE macros: a macro defined in a sibling expands here. The
@@ -209,4 +217,94 @@ fn c_macros_cross_files_like_headers() {
     let four = out.text.find("* 4;").unwrap() + 2;
     let seg = out.segs.iter().find(|s| s.out.0 <= four as u32 && (four as u32) < s.out.1).unwrap();
     assert_eq!(seg.src_uri.as_deref(), Some("defs.h"), "the 4 came from the header: {seg:?}");
+}
+
+/// REFLECTION: the meta tier meets the type tier. `@reflect(ty, sep)`
+/// makes a splice iterate the resolved type's DECLARED members — the
+/// member map is the type tier's own `deftype`/`def`/`member` forms,
+/// not an engine schema — substituting parameter 1 at member-name
+/// positions and parameter 2 at ordinary ref positions, per member,
+/// joined by the grammar-declared separator. "Write the per-field
+/// expression once" — the client's original struct-iterator dream, as
+/// two annotations.
+#[test]
+fn reflection_iterates_declared_members() {
+    let sl_rg = include_str!("../../../examples/structs/structlang.rg");
+    let sl_demo = include_str!("../../../examples/structs/demo.sl");
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, sl_rg);
+    assert!(out.diags.is_empty(), "structlang compiles: {:?}", out.diags);
+    let (lexer, tables) = certify(&out.def).expect("structlang certifies");
+
+    let exp = expand_document(&lexer, &out.def, &tables, sl_demo, &[], 8).expect("expands");
+    assert!(exp.diags.is_empty(), "{:?}", exp.diags);
+    assert!(
+        exp.text.contains("let span: Num = origin.x + origin.y;"),
+        "member names iterate: {}",
+        exp.text
+    );
+    assert!(
+        exp.text.contains("let grown: Num = probe(new Point) + probe(new Point);"),
+        "member TYPES iterate: {}",
+        exp.text
+    );
+    assert!(tiles(&exp.segs, exp.text.len() as u32));
+
+    // Provenance points at the FIELDS: the generated `x` maps to the
+    // struct's own `x: Num` declaration; the ` + ` join is synthesized
+    // (kind Sep, no source).
+    let gx = exp.text.find("origin.x + origin.y").unwrap() + "origin.".len();
+    let seg = exp.segs.iter().find(|s| s.out.0 <= gx as u32 && (gx as u32) < s.out.1).unwrap();
+    assert_eq!(seg.kind, SegKind::Arg);
+    let field_x = sl_demo.find("x: Num").unwrap();
+    assert_eq!(seg.src.0 as usize, field_x, "generated x points at the field: {seg:?}");
+    let join = exp.text.find("origin.x + origin.y").unwrap() + "origin.x ".len();
+    let jseg = exp.segs.iter().find(|s| s.out.0 <= join as u32 && (join as u32) < s.out.1).unwrap();
+    assert_eq!(jseg.kind, SegKind::Sep, "{jseg:?}");
+
+    // The materialized output is an ordinary TYPED document: it
+    // parses, resolves, and TYPE-CHECKS clean — the instantiations
+    // are checked even though the template is exempt.
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, &exp.text).unwrap();
+    assert!(session.last_repairs.is_empty(), "{:?}", session.last_repairs);
+    let mut db = SemDb::new(out.def.binding.clone());
+    db.set_types(out.def.types.clone());
+    db.set_macro_bodies(&out.def.macros);
+    db.set_tree("exp", session.tree().unwrap().clone());
+    assert!(db.unresolved("exp").is_empty(), "{:?}", db.unresolved("exp"));
+    let report = db.types("exp");
+    assert!(report.diags.is_empty(), "expanded output type-checks: {:?}", report.diags);
+
+    // And the PRE-expansion document type-checks too, BECAUSE macro
+    // bodies are templates: exempt at the definition, checked per
+    // instantiation.
+    let mut db2 = SemDb::new(out.def.binding.clone());
+    db2.set_types(out.def.types.clone());
+    db2.set_macro_bodies(&out.def.macros);
+    let s2 = IncSession::new(&lexer, &out.def.sg, &tables, sl_demo).unwrap();
+    db2.set_tree("src", s2.tree().unwrap().clone());
+    assert!(db2.unresolved("src").is_empty(), "{:?}", db2.unresolved("src"));
+    let r2 = db2.types("src");
+    assert!(r2.diags.is_empty(), "templates are type-exempt at the def: {:?}", r2.diags);
+
+    // Membership drift is a semantic edit: add a field, re-expand,
+    // and the derived expression GROWS — reflection reads the
+    // declarations, so the output follows them.
+    let grown = sl_demo.replace("  x: Num,\n  y: Num", "  x: Num,\n  y: Num,\n  z: Num");
+    let exp2 = expand_document(&lexer, &out.def, &tables, &grown, &[], 8).unwrap();
+    assert!(
+        exp2.text.contains("origin.x + origin.y + origin.z"),
+        "a new field joins the derive: {}",
+        exp2.text
+    );
+
+    // Reflecting a non-type is diagnosed and left intact.
+    let bad = "struct P { x: Num }\nmacro m(f, t) => { zero.f }\nlet zero: Num = 0;\nlet q: Num = m!{zero};\n";
+    let e3 = expand_document(&lexer, &out.def, &tables, bad, &[], 8).unwrap();
+    assert!(
+        e3.diags.iter().any(|d| d.msg.contains("does not resolve to a declared type")),
+        "{:?}",
+        e3.diags
+    );
+    assert!(e3.text.contains("m!{zero}"), "left intact: {}", e3.text);
 }

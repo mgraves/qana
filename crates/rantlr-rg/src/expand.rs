@@ -74,7 +74,8 @@ pub fn expand_document(
             db.set_tree(uri, t.clone());
         }
         db.set_tree("expand", tree.clone());
-        let pass = expand_pass(&mut db, "expand", &tree, &current, &def.macros);
+        let pass =
+            expand_pass(&mut db, "expand", &tree, &current, &def.macros, Some(&def.types));
         diags.extend(pass.diags.iter().cloned());
         if pass.substitutions == 0 {
             break;
@@ -112,6 +113,7 @@ pub fn provenance_json(source_uri: &str, source: &str, out: &ExpandOutcome) -> S
             SegKind::Verbatim => "verbatim",
             SegKind::Body => "body",
             SegKind::Arg => "arg",
+            SegKind::Sep => "sep",
         };
         let file = match &seg.src_uri {
             Some(u) => format!(", \"file\": {u:?}"),

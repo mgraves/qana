@@ -26,6 +26,7 @@
 //! pieces from the definition, argument pieces from the use site),
 //! composable across passes because every segment is a copy.
 
+use crate::types::{TypeConfig, TypeRule};
 use crate::{SemDb, SymbolTable, Target};
 use rantlr_grammar::green::{GreenChild, GreenNode, LIST_PROD};
 use std::collections::HashMap;
@@ -41,6 +42,15 @@ pub struct MacroConfig {
     /// sites; a ref without `@splice` never expands (which is what
     /// keeps C's `#ifdef LIMIT` intact while `return LIMIT;` opens).
     pub uses: Vec<(u16, u16, usize, Option<usize>)>,
+    /// (nt, prod, type-name child index, separator) — `@reflect(ty[,
+    /// sep])` on a `@splice` production: the macro's arguments come
+    /// from ITERATION over the resolved type's declared members, one
+    /// substitution per member — parameter 1 gets the member's name,
+    /// parameter 2 its declared type text — joined by `sep`. The
+    /// member map is the TYPE tier's own declared forms (`deftype`
+    /// bodies and their typed defs): reflection reads the language's
+    /// declarations, not an engine-side schema.
+    pub reflects: Vec<(u16, u16, usize, String)>,
 }
 
 impl MacroConfig {
@@ -56,8 +66,14 @@ pub enum SegKind {
     Verbatim,
     /// Copied from a macro definition's body.
     Body,
-    /// Copied from a use site's argument.
+    /// Copied from a use site's argument — or, for a reflection
+    /// splice, from the reflected member's declaration (name or type
+    /// annotation): generated fields point at the fields.
     Arg,
+    /// Synthesized separator bytes from a `@reflect` join — declared
+    /// in the GRAMMAR, so they have no document source (the one
+    /// exception to the everything-is-a-copy rule; src is empty).
+    Sep,
 }
 
 /// One provenance segment: output bytes `out` are a copy of source
@@ -108,6 +124,81 @@ struct Job {
     /// is silent without one (every C name is a splice site) and a
     /// diagnostic with one (`x!(…)` on a non-macro is an error).
     has_args: bool,
+    /// `@reflect`: (type-name ref index into st.refs, separator).
+    reflect: Option<(usize, String)>,
+    /// Resolved reflection: the members to iterate, with the join.
+    members: Option<(Vec<RMember>, String)>,
+}
+
+/// One reflected member: spans of its declared name and its type
+/// annotation — both substitution source AND provenance (generated
+/// code points at the field that generated it).
+struct RMember {
+    name_span: (u32, u32),
+    ty_span: (u32, u32),
+}
+
+/// What one tree walk learns from the TYPE tier's declared forms:
+/// where deftypes and their bodies are, where typed defs (fields)
+/// are, and which tokens sit in member-name positions.
+#[derive(Default)]
+struct TypeMap {
+    /// (introducing def-name span, body span) per `deftype` node.
+    deftypes: Vec<((u32, u32), (u32, u32))>,
+    /// (name span, name text, type-annotation span, its text) per
+    /// `@type(def, …)` node.
+    fields: Vec<((u32, u32), String, (u32, u32), String)>,
+    /// (span, text) of every member-NAME position token.
+    member_positions: Vec<((u32, u32), String)>,
+}
+
+fn type_map(tree: &GreenNode, text: &str, tcfg: &TypeConfig) -> TypeMap {
+    let mut map = TypeMap::default();
+    go(tree, 0, tcfg, text, &mut map);
+    return map;
+
+    fn slice(text: &str, s: (u32, u32)) -> String {
+        text[s.0 as usize..s.1 as usize].to_string()
+    }
+    fn go(n: &GreenNode, base: u32, tcfg: &TypeConfig, text: &str, map: &mut TypeMap) {
+        if let Some((_, _, rule)) =
+            tcfg.rules.iter().find(|&&(nt, p, _)| nt == n.nt && p == n.prod)
+        {
+            match rule {
+                TypeRule::DefType { def_child, body_child: Some(body) } => {
+                    if let (Some((ds, _)), Some((bs, _))) =
+                        (symbol_child(n, base, *def_child), symbol_child(n, base, *body))
+                    {
+                        map.deftypes.push((ds, bs));
+                    }
+                }
+                TypeRule::DefFrom { src, def_child } => {
+                    if let (Some((ns, _)), Some((ts, tn))) =
+                        (symbol_child(n, base, *def_child), symbol_child(n, base, *src))
+                    {
+                        let ts = match tn {
+                            Some(m) => content_span(m, ts.0),
+                            None => ts,
+                        };
+                        map.fields.push((ns, slice(text, ns), ts, slice(text, ts)));
+                    }
+                }
+                TypeRule::Member { name_child, .. } => {
+                    if let Some((ms, _)) = symbol_child(n, base, *name_child) {
+                        map.member_positions.push((ms, slice(text, ms)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut off = base;
+        for c in &n.children {
+            if let GreenChild::Node(m) = c {
+                go(m, off, tcfg, text, map);
+            }
+            off += c.width();
+        }
+    }
 }
 
 fn trim_span(text: &str, span: (u32, u32)) -> (u32, u32) {
@@ -215,15 +306,33 @@ fn list_elements(n: &GreenNode, base: u32) -> Vec<(u32, u32)> {
 /// Build a file's macro registry: every @macro node in `tree`, keyed
 /// by the ABSOLUTE index of the def it introduces (the production's
 /// own @def, found by containment outside the params/body children).
+/// `member_positions` lets a parameter substitute at MEMBER-name
+/// positions too (`origin.f` where `f` is the parameter): those
+/// tokens are not binding refs — the TYPE tier's `member` form is
+/// what identifies them, and v0 matches them by TEXT within the body.
 fn build_registry(
     tree: &GreenNode,
     text: &str,
     st: &SymbolTable,
     res: &[Target],
     cfg: &MacroConfig,
+    member_positions: &[((u32, u32), String)],
 ) -> HashMap<usize, MacroDef> {
     let mut registry = HashMap::new();
     go(tree, 0, cfg, st, res, text, &mut registry);
+    for m in registry.values_mut() {
+        let names: Vec<&str> =
+            m.params.iter().map(|&p| st.defs[p].name.as_str()).collect();
+        for (span, mtext) in member_positions {
+            if span.0 >= m.body.0 && span.1 <= m.body.1 {
+                if let Some(pi) = names.iter().position(|n| *n == mtext.as_str()) {
+                    m.param_refs.push((*span, pi));
+                }
+            }
+        }
+        m.param_refs.sort_by_key(|&(s, _)| s.0);
+        m.param_refs.dedup();
+    }
     return registry;
 
     fn go(
@@ -293,19 +402,26 @@ fn build_registry(
 /// Run ONE expansion pass over `uri`. `tree`/`text` must be what `db`
 /// holds for it. Uses resolving to macros in SIBLING files (the db's
 /// other set_tree'd documents) expand too: their bodies splice from
-/// the sibling's text, and the segments say so (`src_uri`).
+/// the sibling's text, and the segments say so (`src_uri`). With a
+/// TYPE config, `@reflect` splices iterate the resolved type's
+/// declared members.
 pub fn expand_pass(
     db: &mut SemDb,
     uri: &str,
     tree: &GreenNode,
     text: &str,
     cfg: &MacroConfig,
+    tcfg: Option<&TypeConfig>,
 ) -> PassOut {
     let st = db.symbols(uri);
     let res = db.resolve(uri);
     let mut diags = Vec::new();
 
-    let registry = build_registry(tree, text, &st, &res, cfg);
+    // The TYPE tier's declared forms, mapped once: deftype bodies,
+    // typed defs (fields), member-name positions.
+    let tmap = tcfg.map(|t| type_map(tree, text, t)).unwrap_or_default();
+
+    let registry = build_registry(tree, text, &st, &res, cfg, &tmap.member_positions);
     let mut jobs: Vec<Job> = Vec::new();
     walk(tree, 0, cfg, &st, &res, &mut jobs);
 
@@ -319,9 +435,46 @@ pub fn expand_pass(
                 let ftext = ftree.text();
                 let fst = db.symbols(fu);
                 let fres = db.resolve(fu);
-                let freg = build_registry(&ftree, &ftext, &fst, &fres, cfg);
+                let fmap = tcfg.map(|t| type_map(&ftree, &ftext, t)).unwrap_or_default();
+                let freg =
+                    build_registry(&ftree, &ftext, &fst, &fres, cfg, &fmap.member_positions);
                 foreign.insert(fu.clone(), (freg, ftext));
             }
+        }
+    }
+
+    // Resolve @reflect jobs to member lists: the type-name ref must
+    // resolve to a LOCAL deftype (v0); its body's typed defs are the
+    // members, in declaration order.
+    for j in jobs.iter_mut() {
+        let Some((tri, sep)) = &j.reflect else { continue };
+        match res.get(*tri) {
+            Some(&Target::Local { def }) => {
+                let dspan = st.defs[def].span;
+                match tmap.deftypes.iter().find(|(ds, _)| *ds == dspan) {
+                    Some(&(_, body)) => {
+                        let ms: Vec<RMember> = tmap
+                            .fields
+                            .iter()
+                            .filter(|(ns, ..)| ns.0 >= body.0 && ns.1 <= body.1)
+                            .map(|(ns, _, ts, _)| RMember { name_span: *ns, ty_span: *ts })
+                            .collect();
+                        j.members = Some((ms, sep.clone()));
+                    }
+                    None => diags.push(MacroDiag {
+                        span: j.span,
+                        msg: "reflected name does not resolve to a declared type".into(),
+                    }),
+                }
+            }
+            Some(Target::Foreign { .. }) => diags.push(MacroDiag {
+                span: j.span,
+                msg: "reflected type must be defined in this document (v0)".into(),
+            }),
+            _ => diags.push(MacroDiag {
+                span: j.span,
+                msg: "reflected name does not resolve to a declared type".into(),
+            }),
         }
     }
 
@@ -374,7 +527,7 @@ pub fn expand_pass(
         };
         let Some(m) = m else {
             // Callee resolves, but not to a macro.
-            if j.has_args {
+            if j.has_args || j.reflect.is_some() {
                 diags.push(MacroDiag {
                     span: j.span,
                     msg: "spliced name does not resolve to a macro".into(),
@@ -384,6 +537,55 @@ pub fn expand_pass(
             cursor = j.span.1;
             continue;
         };
+        // REFLECTION: substitute the body once per declared member —
+        // parameter 1 takes the member's name, parameter 2 its type
+        // annotation, both spliced from the STRUCT's own declaration
+        // (provenance points at the fields) — joined by the declared
+        // separator (synthesized bytes, marked Sep).
+        if let Some((members, sep)) = &j.members {
+            if m.params.len() != 2 {
+                diags.push(MacroDiag {
+                    span: j.span,
+                    msg: format!(
+                        "a reflection macro takes (member, type) — this one has {} parameter(s)",
+                        m.params.len()
+                    ),
+                });
+                push(&mut out, &mut segs, text, &None, j.span, SegKind::Verbatim);
+                cursor = j.span.1;
+                continue;
+            }
+            for (mi, mem) in members.iter().enumerate() {
+                if mi > 0 && !sep.is_empty() {
+                    let start = out.len() as u32;
+                    out.push_str(sep);
+                    segs.push(Seg {
+                        out: (start, out.len() as u32),
+                        src: (0, 0),
+                        kind: SegKind::Sep,
+                        src_uri: None,
+                    });
+                }
+                let mut b = m.body.0;
+                for &(rspan, pi) in &m.param_refs {
+                    push(&mut out, &mut segs, body_text, body_uri, (b, rspan.0), SegKind::Body);
+                    let src = if pi == 0 { mem.name_span } else { mem.ty_span };
+                    push(&mut out, &mut segs, text, &None, src, SegKind::Arg);
+                    b = rspan.1;
+                }
+                push(&mut out, &mut segs, body_text, body_uri, (b, m.body.1), SegKind::Body);
+            }
+            substitutions += 1;
+            cursor = j.span.1;
+            continue;
+        }
+        if j.reflect.is_some() {
+            // Reflection declared but the type never resolved (the
+            // diagnostic is already recorded): leave the use intact.
+            push(&mut out, &mut segs, text, &None, j.span, SegKind::Verbatim);
+            cursor = j.span.1;
+            continue;
+        }
         if j.args.len() != m.params.len() {
             diags.push(MacroDiag {
                 span: j.span,
@@ -441,6 +643,17 @@ fn walk(
                         .and_then(|k| symbol_child(n, base, k))
                         .and_then(|(s, node)| node.map(|m| list_elements(m, s.0)))
                         .unwrap_or_default();
+                    // `@reflect` on the same production: iteration
+                    // will supply the "arguments" per member.
+                    let reflect = cfg
+                        .reflects
+                        .iter()
+                        .find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
+                        .and_then(|(_, _, ty_child, sep)| {
+                            let (tspan, _) = symbol_child(n, base, *ty_child)?;
+                            let tri = st.refs.iter().position(|r| r.span == tspan)?;
+                            Some((tri, sep.clone()))
+                        });
                     // The replaced span is token-exact — leading
                     // trivia stays in the surrounding text.
                     jobs.push(Job {
@@ -449,6 +662,8 @@ fn walk(
                         def,
                         args,
                         has_args: args_child.is_some(),
+                        reflect,
+                        members: None,
                     });
                 }
             }
@@ -471,7 +686,8 @@ fn walk(
 pub fn compose(a: &[Seg], b: &[Seg]) -> Vec<Seg> {
     let mut out = Vec::new();
     for bs in b {
-        if bs.src_uri.is_some() {
+        if bs.src_uri.is_some() || bs.kind == SegKind::Sep {
+            // Foreign or synthesized: src never references t1.
             out.push(bs.clone());
             continue;
         }
@@ -485,12 +701,18 @@ pub fn compose(a: &[Seg], b: &[Seg]) -> Vec<Seg> {
             }
             let os = s.max(asg.out.0);
             let oe = e.min(asg.out.1);
-            out.push(Seg {
-                out: (bs.out.0 + (os - bs.src.0), bs.out.0 + (oe - bs.src.0)),
-                src: (asg.src.0 + (os - asg.out.0), asg.src.0 + (oe - asg.out.0)),
-                kind: if bs.kind == SegKind::Verbatim { asg.kind } else { bs.kind },
-                src_uri: asg.src_uri.clone(),
-            });
+            let piece_out = (bs.out.0 + (os - bs.src.0), bs.out.0 + (oe - bs.src.0));
+            if asg.kind == SegKind::Sep {
+                // Copied separator bytes stay separators (no source).
+                out.push(Seg { out: piece_out, src: (0, 0), kind: SegKind::Sep, src_uri: None });
+            } else {
+                out.push(Seg {
+                    out: piece_out,
+                    src: (asg.src.0 + (os - asg.out.0), asg.src.0 + (oe - asg.out.0)),
+                    kind: if bs.kind == SegKind::Verbatim { asg.kind } else { bs.kind },
+                    src_uri: asg.src_uri.clone(),
+                });
+            }
             s = oe;
             if s >= e {
                 break;
@@ -502,13 +724,15 @@ pub fn compose(a: &[Seg], b: &[Seg]) -> Vec<Seg> {
 }
 
 /// Do the segments tile [0, len) exactly — full cover, no overlap?
+/// (Sep segments are synthesized and exempt from the copy-length
+/// rule; every other segment is a copy.)
 pub fn tiles(segs: &[Seg], len: u32) -> bool {
     let mut at = 0u32;
     for s in segs {
         if s.out.0 != at || s.out.1 < s.out.0 {
             return false;
         }
-        if (s.out.1 - s.out.0) != (s.src.1 - s.src.0) {
+        if s.kind != SegKind::Sep && (s.out.1 - s.out.0) != (s.src.1 - s.src.0) {
             return false;
         }
         at = s.out.1;

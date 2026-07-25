@@ -606,6 +606,9 @@ pub struct SemDb {
     cfg: BindingConfig,
     /// The declared type tier, when the grammar declared one.
     type_cfg: Option<types::TypeConfig>,
+    /// (nt, prod) → symbol-child index of a MACRO BODY: subtrees the
+    /// type walker exempts (templates type per instantiation).
+    pub(crate) macro_body_exempt: HashMap<(u16, u16), usize>,
     /// Per-file memoization of the type pass (converged results +
     /// per-item outputs keyed by subtree identity).
     type_caches: HashMap<String, types::TypeCache>,
@@ -641,6 +644,7 @@ impl SemDb {
         SemDb {
             cfg,
             type_cfg: None,
+            macro_body_exempt: HashMap::new(),
             type_caches: HashMap::new(),
             gvocab: types::GlobalVocab::default(),
             global_members: HashMap::new(),

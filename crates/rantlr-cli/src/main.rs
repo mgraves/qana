@@ -762,6 +762,7 @@ fn cmd_types(args: &Args) {
 
     let mut db = SemDb::new(lang.def.binding.clone());
     db.set_types(lang.def.types.clone());
+    db.set_macro_bodies(&lang.def.macros);
     load_siblings(&lang, &mut db, doc_path);
     db.set_tree(doc_path, session.tree().expect("total").clone());
     let report = db.types(doc_path);

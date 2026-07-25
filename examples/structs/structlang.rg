@@ -26,11 +26,13 @@ token DOT    = "." @style(punctuation)
 token ARROW  = "->" @style(operator)
 token EQ     = "=" @style(operator)
 token PLUS   = "+" @style(operator)
+token BANG   = "!" @style(operator)
+token FATARROW = "=>" @style(operator)
 
 // `Num` and `Str` are KEYWORDS of Structlang: the closed part of its
 // type vocabulary maps 1:1 onto grammar atoms. Struct names are the
 // OPEN part — and that is where v0 will go silent.
-keywords IDENT = struct fn let return new Num Str
+keywords IDENT = struct fn let return new macro Num Str
 
 pair LPAREN RPAREN
 pair LBRACE RBRACE
@@ -49,6 +51,13 @@ rule decl =
   | StructDecl: "struct" name:IDENT b:struct_body @def(name) @outline(name, struct) @type(deftype, b)
   | FnDecl:     "fn" name:IDENT t:fn_tail @def(name) @outline(name, function) @type(def, t)
   | LetDecl:    "let" name:IDENT ti:typed_init ";" @def(name) @outline(name) @type(def, ti)
+  // The META tier meets the TYPE tier. A macro's body is a real expr;
+  // its two parameters bind per-MEMBER when spliced through @reflect.
+  | MacroDecl:  "macro" name:IDENT "(" ps:mparams ")" "=>" "{" body:expr "}" @def(name) @macro(ps, body) @scope @outline(name, function)
+
+rule mparams = mparam* % ","
+
+rule mparam = MParam: name:IDENT @def(name)
 
 rule struct_body = StructBody: "{" fields "}" @scope
 
@@ -95,6 +104,13 @@ rule expr =
   | FieldExpr: b:expr "." m:IDENT @type(member, b, m)
   | CallExpr:  callee:IDENT "(" a:args ")" @ref(callee, call) @type(apply, a)
   | NewExpr:   "new" name:IDENT @ref(name) @type(named)
+  // REFLECTION: `sum!{Point}` substitutes the macro's body once per
+  // declared member of Point — parameter 1 is the member's NAME
+  // (matched at member positions, `origin.f`), parameter 2 its TYPE
+  // (an ordinary binding ref, `new t`) — joined by the declared "+".
+  // The member map IS the type tier's own declarations; the engine
+  // brings no schema of its own.
+  | Reflect:   name:IDENT "!" "{" ty:IDENT "}" @ref(name) @ref(ty) @splice(name) @reflect(ty, " + ")
   | NumLit:    NUMBER @type(Num)
   | StrLit:    STRING @type(Str)
   | NameRef:   name:IDENT @ref(name) @type(ref)

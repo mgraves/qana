@@ -203,6 +203,12 @@ impl TypeReport {
 
 struct Walker<'a> {
     rules: &'a HashMap<(u16, u16), &'a TypeRule>,
+    /// (nt, prod) → symbol-child index the walker must NOT type: a
+    /// `@macro` body is a TEMPLATE, not an expression — its typing
+    /// happens per instantiation, in the materialized output (which
+    /// is an ordinary, fully checked document). Rust and cpp make the
+    /// same call.
+    exempt: &'a HashMap<(u16, u16), usize>,
     /// The run vocabulary (grammar atoms + document types + arrows).
     /// Mutable: arrow types intern on first encounter, and the tables
     /// persist across fixpoint passes so ids stay stable.
@@ -331,12 +337,19 @@ impl<'a> Walker<'a> {
             Some(TypeRule::Member { name_child, .. }) => Some(*name_child),
             _ => None,
         };
+        let exempt_child = self.exempt.get(&(n.nt, n.prod)).copied();
         let mut off = base;
         for c in &n.children {
             let w = c.width();
             match c {
                 GreenChild::Node(m) if m.nt != ERROR_NT => {
-                    let t = self.node(m, off);
+                    // A template child stays UNWALKED: positional
+                    // alignment is kept, but no types, no diagnostics.
+                    let t = if exempt_child == Some(pos_types.len()) {
+                        None
+                    } else {
+                        self.node(m, off)
+                    };
                     if fn_rt_child == Some(pos_types.len()) {
                         self.ret_stack.push(t);
                         pushed_ret = true;
@@ -670,6 +683,18 @@ impl SemDb {
         self.type_cfg = if cfg.rules.is_empty() { None } else { Some(cfg) };
     }
 
+    /// Tell the type tier where MACRO BODIES live, so it exempts them:
+    /// a template is not an expression — its typing happens per
+    /// instantiation, in the materialized output.
+    pub fn set_macro_bodies(&mut self, macros: &crate::macros::MacroConfig) {
+        let map: HashMap<(u16, u16), usize> =
+            macros.defs.iter().map(|&(nt, p, _, body)| ((nt, p), body)).collect();
+        if map != self.macro_body_exempt {
+            self.macro_body_exempt = map;
+            self.type_caches.clear();
+        }
+    }
+
     /// Derive the file's type facts from the declared rules. Types flow
     /// through names via the binding tier's own resolution; def-typing
     /// and member tables iterate to a fixed point so chains converge
@@ -890,6 +915,7 @@ impl SemDb {
         }
 
         // One walk of one item, capturing its outputs relative to base.
+        let exempt = self.macro_body_exempt.clone();
         let walk_item = |vocab: &mut Vec<String>,
                          arrows: &mut HashMap<TypeId, (Vec<TypeId>, TypeId)>,
                          arrow_intern: &mut HashMap<(Vec<TypeId>, TypeId), TypeId>,
@@ -900,6 +926,7 @@ impl SemDb {
          -> ItemOut {
             let mut w = Walker {
                 rules: &rules,
+                exempt: &exempt,
                 vocab,
                 arrows,
                 arrow_intern,

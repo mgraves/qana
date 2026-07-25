@@ -13,7 +13,7 @@
 use crate::compile::LangDef;
 use rantlr_engine::IncSession;
 use rantlr_grammar::{CompiledLexer, LrTables};
-use rantlr_sem::macros::{compose, expand_pass, MacroDiag, Seg, SegKind};
+use rantlr_sem::macros::{compose, expand_pass, MacroDiag, Seg, SegKind, SyntaxInfo};
 use rantlr_sem::SemDb;
 
 pub struct ExpandOutcome {
@@ -45,6 +45,10 @@ pub fn expand_document(
     max_passes: u32,
 ) -> Result<ExpandOutcome, String> {
     // Parse each sibling ONCE — their trees are pass-invariant.
+    // What the grammar declares about shape — precedence and its own
+    // grouping productions. This is what makes substitution
+    // syntax-aware instead of textual.
+    let syn = SyntaxInfo::derive(&def.lex, &def.sg);
     let mut sib_trees = Vec::new();
     for (uri, stext) in siblings {
         let s = IncSession::new(lexer, &def.sg, tables, stext)
@@ -75,7 +79,7 @@ pub fn expand_document(
         }
         db.set_tree("expand", tree.clone());
         let pass =
-            expand_pass(&mut db, "expand", &tree, &current, &def.macros, Some(&def.types));
+            expand_pass(&mut db, "expand", &tree, &current, &def.macros, Some(&def.types), &syn);
         diags.extend(pass.diags.iter().cloned());
         if pass.substitutions == 0 {
             break;
@@ -114,6 +118,7 @@ pub fn provenance_json(source_uri: &str, source: &str, out: &ExpandOutcome) -> S
             SegKind::Body => "body",
             SegKind::Arg => "arg",
             SegKind::Sep => "sep",
+            SegKind::Paren => "paren",
         };
         let file = match &seg.src_uri {
             Some(u) => format!(", \"file\": {u:?}"),

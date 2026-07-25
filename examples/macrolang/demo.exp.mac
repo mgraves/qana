@@ -6,6 +6,14 @@ macro quad(y) => { twice!(y) + twice!(y) }
 macro scaled(v) => { (v) * unit }
 
 let a = 3 + 3;
-let b = 2 + 2 + 2 + 2;
+let b = 2 + 2 + (2 + 2);
 let c = (a + 1) * unit;
-let d = 4 + 4 + 4 + 4;
+let d = 4 + 4 + (4 + 4);
+
+// The two classic macro traps, both closed by DECLARED precedence:
+// a weak argument landing next to a strong operator, and a weak
+// result landing next to one. cpp needs hand-written parens for
+// these; here the grammar already said what binds tighter.
+macro square(v) => { v * v }
+let e = (1 + 2) * (1 + 2);
+let f = 3 * (4 + 4);

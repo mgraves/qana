@@ -475,3 +475,26 @@ fn object_like_defines_expand_in_code_only() {
         "provenance tiles the C expansion"
     );
 }
+
+/// The BOUNDARY of syntax-aware substitution, drawn by the grammar
+/// itself: shape analysis needs a shape. C declares its macro bodies
+/// as `pp_tokens` — a token list, not an expression — so the expander
+/// has no parse to compare strengths against and splices textually,
+/// reproducing cpp's classic regrouping exactly. That is the honest
+/// consequence of the declaration, and it is pinned here.
+#[test]
+fn c_macro_bodies_are_token_soup_so_splicing_stays_textual() {
+    let tc = RgToolchain::new();
+    let out = compile_source(&tc, C_RG);
+    let (lexer, tables) = certify(&out.def).unwrap();
+    let doc = "#define ADD 1 + 2\nint f(int x) { return x * ADD; }\n";
+    let exp = expand_document(&lexer, &out.def, &tables, doc, &[], 8).unwrap();
+    assert!(exp.diags.is_empty(), "{:?}", exp.diags);
+    assert!(
+        exp.text.contains("return x * 1 + 2;"),
+        "cpp's grouping, because the body has no declared shape: {}",
+        exp.text
+    );
+    // A MacLang-style body (a real expression) would have been
+    // parenthesized — see meta_e2e::substitution_is_syntax_aware.
+}

@@ -1368,11 +1368,53 @@ THERE changes the derive HERE (gated, including through the CLI's
 drift check: a sibling edit makes the materialization stale). The
 generated member accesses then type-check against the foreign struct,
 because the global type vocabulary already made members cross-file.
-159 tests.
+
+## Syntax-aware substitution: the macro traps, closed by declaration
+
+The last textual thing about the meta tier is gone. Substitution now
+preserves the parse SHAPE the author wrote, using two things the
+grammar already declared for the parser's sake: `prec` strengths
+(read exactly as the LR builder reads them — explicit override, else
+the last terminal, yacc's rule) and each rule's own GROUPING
+production, discovered by shape (`open expr close` with no strength
+of its own) rather than assumed to be `(` and `)`. The two classic
+cpp traps close at once:
+
+  macro square(v) => { v * v }
+  let e = square!(1 + 2);      →  let e = (1 + 2) * (1 + 2);
+  let f = 3 * twice!(4);       →  let f = 3 * (4 + 4);
+
+A weak argument in a strong slot gets parentheses; so does a weak
+result in a strong slot. And not one paren more than the shape needs:
+`twice!(2 * 5)` stays `2 * 5 + 2 * 5`, `twice!(1) + 9` stays
+`1 + 1 + 9` (left-associative, left side), and a fenced slot — tokens
+on both sides — never wraps at all. The gate checks the SHAPE, not
+just the spelling: it re-parses the expansion and asserts the body's
+operator is still on top, which textual splicing would fail.
+
+Where the shape isn't known, the tier says so instead of guessing. A
+C `#define` body is `pp_tokens` by declaration — a token list, not an
+expression — so it splices textually and reproduces cpp's grouping,
+pinned by its own gate. A rule that declares no grouping production
+gets a diagnostic ("expansion needs parentheses to preserve grouping,
+but rule `expr` declares no grouping production") rather than a
+silent change of meaning. Added parentheses are their own provenance
+kind, so a reader of generated code can see exactly which bytes the
+expander contributed and why.
+
+Building this also caught a REAL engine bug the suite had been
+hiding: the type tier's per-item memoization keyed its cache by raw
+subtree address without keeping the subtree alive, so a freed item's
+address could be recycled by its replacement and a SIGNATURE edit
+would silently replay stale types. It reproduced only under some
+allocation histories — the gate passed in a whole-file run and failed
+when run alone. The cache now pins its subtrees (as the binding tier's
+fragment cache always did) and keeps exactly two generations. 161
+tests.
 
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 159 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 161 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

@@ -9,3 +9,11 @@ let a = twice!(3);
 let b = quad!(2);
 let c = scaled!(a + 1);
 let d = twice!(twice!(4));
+
+// The two classic macro traps, both closed by DECLARED precedence:
+// a weak argument landing next to a strong operator, and a weak
+// result landing next to one. cpp needs hand-written parens for
+// these; here the grammar already said what binds tighter.
+macro square(v) => { v * v }
+let e = square!(1 + 2);
+let f = 3 * twice!(4);

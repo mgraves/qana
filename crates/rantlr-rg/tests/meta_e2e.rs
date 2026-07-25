@@ -32,13 +32,15 @@ fn expansion_reaches_the_expected_fixpoint() {
     assert!(out.diags.is_empty(), "no diagnostics: {:?}", out.diags);
     assert_eq!(out.repairs, 0, "no pass ever parsed broken text");
     assert_eq!(out.passes, 2, "nested macros need exactly two passes");
-    assert_eq!(out.substitutions, 8, "4 outer + 4 inner uses");
+    assert_eq!(out.substitutions, 10, "6 outer + 4 inner uses");
 
-    // Definitions stay; uses open. Exact lines:
+    // Definitions stay; uses open. Exact lines — including the parens
+    // the expander adds to keep the author's grouping (`quad`'s body
+    // says twice(y) + twice(y), so the second twice stays a unit).
     assert!(out.text.contains("let a = 3 + 3;"), "{}", out.text);
-    assert!(out.text.contains("let b = 2 + 2 + 2 + 2;"), "{}", out.text);
+    assert!(out.text.contains("let b = 2 + 2 + (2 + 2);"), "{}", out.text);
     assert!(out.text.contains("let c = (a + 1) * unit;"), "{}", out.text);
-    assert!(out.text.contains("let d = 4 + 4 + 4 + 4;"), "{}", out.text);
+    assert!(out.text.contains("let d = 4 + 4 + (4 + 4);"), "{}", out.text);
     assert!(out.text.contains("macro twice(x) => { x + x }"), "defs verbatim: {}", out.text);
 }
 
@@ -169,7 +171,7 @@ fn cross_file_macros_expand_with_foreign_provenance() {
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     assert!(out.text.contains("let a = 3 + 3;"), "{}", out.text);
     assert!(out.text.contains("let b = (a + 1) * unit;"), "{}", out.text);
-    assert!(out.text.contains("let c = 2 + 2 + 2 + 2;"), "nested cross-file: {}", out.text);
+    assert!(out.text.contains("let c = 2 + 2 + (2 + 2);"), "nested cross-file: {}", out.text);
     assert!(tiles(&out.segs, out.text.len() as u32));
 
     // Provenance: a body byte names the DEFINING file and maps into
@@ -382,4 +384,111 @@ fn reflection_crosses_files() {
         "{:?}",
         e3.diags
     );
+}
+
+/// SYNTAX-AWARE SUBSTITUTION. The expander preserves the parse SHAPE
+/// the author wrote, on both sides of a splice: an argument that binds
+/// weaker than the operator it lands next to gets parentheses, and so
+/// does a body that binds weaker than the context it lands in. Both
+/// facts come from the grammar's OWN `prec` declarations, and the
+/// parentheses come from its OWN grouping production — the expander
+/// invents nothing. These are exactly the two classic cpp traps.
+#[test]
+fn substitution_is_syntax_aware() {
+    let (lexer, def, tables) = world();
+    let ex = |doc: &str| expand_document(&lexer, &def, &tables, doc, &[], 8).unwrap();
+
+    // Trap 1 — a weak ARGUMENT in a strong slot.
+    let out = ex("macro square(v) => { v * v }\nlet e = square!(1 + 2);\n");
+    assert!(out.text.contains("let e = (1 + 2) * (1 + 2);"), "{}", out.text);
+    // Trap 2 — a weak RESULT in a strong slot.
+    let out2 = ex("macro twice(x) => { x + x }\nlet f = 3 * twice!(4);\n");
+    assert!(out2.text.contains("let f = 3 * (4 + 4);"), "{}", out2.text);
+
+    // Not a paren more than the shape needs: a strong argument in a
+    // weak slot, an equal-strength argument on the associating side,
+    // and a fenced slot all stay bare.
+    let out3 = ex("macro twice(x) => { x + x }\nlet g = twice!(2 * 5);\n");
+    assert!(out3.text.contains("let g = 2 * 5 + 2 * 5;"), "{}", out3.text);
+    let out4 = ex("macro twice(x) => { x + x }\nlet h = twice!(1) + 9;\n");
+    assert!(out4.text.contains("let h = 1 + 1 + 9;"), "left-assoc, left side: {}", out4.text);
+    let out5 = ex("macro id(x) => { x }\nlet i = id!(1 + 2);\nlet j = 2 * id!(3 + 4);\n");
+    assert!(out5.text.contains("let i = 1 + 2;"), "fenced slot stays bare: {}", out5.text);
+    assert!(out5.text.contains("let j = 2 * (3 + 4);"), "…but a strong slot wraps: {}", out5.text);
+
+    // THE SHAPE ITSELF, not just the spelling: re-parse the expansion
+    // and check the top operator. Textual splicing would leave `+` on
+    // top of `1 + 2 * 1 + 2`; syntax-aware splicing keeps the `*` the
+    // macro's body declared.
+    let s = IncSession::new(&lexer, &def.sg, &tables, &out.text).unwrap();
+    assert!(s.last_repairs.is_empty(), "{:?}", s.last_repairs);
+    assert_eq!(
+        let_rhs_prod(s.tree().unwrap(), &def.sg, "e").as_deref(),
+        Some("Mul"),
+        "the body's operator stays on top"
+    );
+    let s2 = IncSession::new(&lexer, &def.sg, &tables, &out2.text).unwrap();
+    assert_eq!(
+        let_rhs_prod(s2.tree().unwrap(), &def.sg, "f").as_deref(),
+        Some("Mul"),
+        "the use site's operator stays on top"
+    );
+
+    // Provenance names the added bytes for what they are: the expander
+    // synthesized them, and they have no place in any source file.
+    let paren_at = out.text.find("(1 + 2)").unwrap();
+    let seg = out
+        .segs
+        .iter()
+        .find(|s| s.out.0 <= paren_at as u32 && (paren_at as u32) < s.out.1)
+        .unwrap();
+    assert_eq!(seg.kind, SegKind::Paren, "{seg:?}");
+    assert_eq!(seg.src, (0, 0), "synthesized bytes have no source");
+    assert!(tiles(&out.segs, out.text.len() as u32));
+
+    // And the honest refusal: a grammar with no grouping production
+    // cannot be parenthesized, so the expander says so instead of
+    // silently changing the meaning.
+    let no_parens = MAC_RG.replace("  | Paren:   \"(\" expr \")\"\n", "");
+    assert_ne!(no_parens, MAC_RG, "probe edit took");
+    let tc = RgToolchain::new();
+    let probe = compile_source(&tc, &no_parens);
+    let (plexer, ptables) = certify(&probe.def).expect("the probe grammar certifies");
+    let out6 = expand_document(
+        &plexer,
+        &probe.def,
+        &ptables,
+        "macro square(v) => { v * v }\nlet e = square!(1 + 2);\n",
+        &[],
+        8,
+    )
+    .unwrap();
+    assert!(
+        out6.diags.iter().any(|d| d.msg.contains("declares no grouping production")),
+        "{:?}",
+        out6.diags
+    );
+    assert!(out6.text.contains("let e = 1 + 2 * 1 + 2;"), "spliced textually: {}", out6.text);
+}
+
+/// The production name of `let NAME = <expr>;`'s right-hand side.
+fn let_rhs_prod(
+    n: &rantlr_grammar::GreenNode,
+    sg: &rantlr_grammar::syn::SynGrammar,
+    name: &str,
+) -> Option<String> {
+    use rantlr_grammar::GreenChild;
+    if (n.prod as usize) < sg.prods.len() && sg.prod_name(n.prod as usize) == "LetDef" {
+        let kids: Vec<&GreenChild> = n.symbol_children().collect();
+        if let (Some(GreenChild::Token(t)), Some(GreenChild::Node(e))) = (kids.get(1), kids.get(3))
+        {
+            if t.text == name {
+                return Some(sg.prod_name(e.prod as usize));
+            }
+        }
+    }
+    n.children.iter().find_map(|c| match c {
+        GreenChild::Node(m) => let_rhs_prod(m, sg, name),
+        _ => None,
+    })
 }

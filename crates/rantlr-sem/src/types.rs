@@ -22,6 +22,7 @@ use crate::SemDb;
 use rantlr_grammar::green::ERROR_NT;
 use rantlr_grammar::{GreenChild, GreenNode};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Index into [`TypeConfig::atoms`].
 pub type TypeId = u16;
@@ -853,7 +854,7 @@ impl SemDb {
         let mut gv = std::mem::take(&mut self.gvocab);
         let mut gen_current: Vec<(usize, u32, String)> = Vec::new();
         for (idx, (node, base, ptr)) in item_meta.iter().enumerate() {
-            if let Some(it) = cache.per_item.get(ptr) {
+            if let Some((_, it)) = cache.per_item.get(ptr).map(|(a, b)| (a, b)) {
                 for (rel, name) in &it.rel_deftypes {
                     gen_current.push((idx, *rel, name.clone()));
                 }
@@ -901,11 +902,12 @@ impl SemDb {
         // too, so self-recursive items resolve in the first pass. ----
         let mut warm_defs: HashMap<u32, TypeId> = HashMap::new();
         for (idx, (_, base, ptr)) in item_meta.iter().enumerate() {
-            let it = cache.per_item.get(ptr).or_else(|| {
+            let it = cache.per_item.get(ptr).map(|(_, o)| o).or_else(|| {
                 cache
                     .items_order
                     .get(idx)
                     .and_then(|old| cache.per_item.get(old))
+                    .map(|(_, o)| o)
             });
             if let Some(it) = it {
                 for (rel, _, t) in &it.rel_defs {
@@ -1015,7 +1017,8 @@ impl SemDb {
                 let old = cache
                     .items_order
                     .get(idx)
-                    .and_then(|old| cache.per_item.get(old));
+                    .and_then(|old| cache.per_item.get(old))
+                    .map(|(_, o)| o);
                 let seq_ok = match old {
                     Some(o) => {
                         o.rel_defs.iter().map(|(_, _, t)| *t).collect::<Vec<_>>()
@@ -1044,7 +1047,7 @@ impl SemDb {
             self.stats.type_passes += 1;
             for (idx, (_, _, ptr)) in item_meta.iter().enumerate() {
                 if outs[idx].is_none() {
-                    outs[idx] = cache.per_item.get(ptr).cloned();
+                    outs[idx] = cache.per_item.get(ptr).map(|(_, o)| o.clone());
                 }
             }
             (outs, warm_members)
@@ -1100,7 +1103,10 @@ impl SemDb {
         cache.deftype_gen = gen_current;
         cache.member_types = member_final.clone();
         cache.foreign_snapshot = foreign_snapshot;
-        cache.items_order = item_meta.iter().map(|(_, _, p)| *p).collect();
+        let prev_order = std::mem::replace(
+            &mut cache.items_order,
+            item_meta.iter().map(|(_, _, p)| *p).collect(),
+        );
         self.gvocab = GlobalVocab {
             names: vocab,
             grammar_atoms,
@@ -1130,7 +1136,7 @@ impl SemDb {
                 v
             },
         };
-        for (out, (_, base, ptr)) in final_outs.into_iter().zip(&item_meta) {
+        for (out, (node, base, ptr)) in final_outs.into_iter().zip(&item_meta) {
             let Some(out) = out else { continue };
             for &((a, b), t) in &out.rel_types {
                 report.types.push(((base + a, base + b), t));
@@ -1143,8 +1149,19 @@ impl SemDb {
                     .diags
                     .push(TypeDiag { span: (base + a, base + b), msg: msg.clone() });
             }
-            cache.per_item.insert(*ptr, out);
+            cache.per_item.insert(*ptr, (node.clone(), out));
         }
+        // Keep exactly two generations: the current items, and the
+        // ones they replaced (a replaced item finds its predecessor by
+        // index, which is how a BODY edit is told from a SIGNATURE
+        // edit). Anything older would pin subtrees forever.
+        let live: std::collections::HashSet<usize> = cache
+            .items_order
+            .iter()
+            .copied()
+            .chain(prev_order.iter().copied())
+            .collect();
+        cache.per_item.retain(|k, _| live.contains(k));
         report.types.sort_unstable_by_key(|((s, e), _)| (*s, u32::MAX - (*e - *s)));
         report.def_types.sort_unstable_by_key(|(s, _)| s.0);
         report.diags.sort_unstable_by_key(|d| d.span);
@@ -1179,7 +1196,13 @@ pub(crate) struct TypeCache {
     /// Item subtree pointers at cache time, in order — how a replaced
     /// item finds its predecessor for the body/signature comparison.
     items_order: Vec<usize>,
-    per_item: HashMap<usize, ItemOut>,
+    /// Item pointer → (KEEPALIVE, outputs). The Arc is load-bearing:
+    /// it pins the subtree so its address cannot be recycled by a
+    /// later allocation and mistaken for this entry (the binding
+    /// tier's `frag_cache` pins its nodes for the same reason). Without
+    /// it, an edit that frees an item can hand its address to the
+    /// replacement, and a SIGNATURE edit silently replays stale types.
+    per_item: HashMap<usize, (Arc<GreenNode>, ItemOut)>,
 }
 
 #[derive(Clone, PartialEq)]

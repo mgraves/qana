@@ -121,11 +121,13 @@ pub const MOD_REF: u8 = 1 << 1;
 /// A reference that does not resolve — including "exists but is not
 /// exported" and broken qualified paths (the squiggle substrate).
 pub const MOD_UNRESOLVED: u8 = 1 << 2;
-/// The definition is exported (a module tier's `pub`).
+/// The definition is visible outside its own module or file —
+/// whatever the language calls that (`pub`, `export`, `public`).
 pub const MOD_PUBLIC: u8 = 1 << 3;
 /// The reference resolves into ANOTHER file.
 pub const MOD_FOREIGN: u8 = 1 << 4;
-/// The name carries a known type (a type tier has a fact here).
+/// A type is known for this name. What counts as a type is the
+/// engine's business; this bit only says one is available.
 pub const MOD_TYPED: u8 = 1 << 5;
 
 /// `style` value for bytes with no declared class (trivia, plain).
@@ -185,7 +187,7 @@ pub struct LineEdit {
 // Facts (hover) and hints (inline decoration)
 // ---------------------------------------------------------------------------
 
-/// Everything the tiers know about the name at an offset, in one
+/// Everything the engine knows about the name at an offset, in one
 /// record. No transport, no markdown — the editor renders it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FactCard {
@@ -199,9 +201,11 @@ pub struct FactCard {
     pub def_site: Option<(String, (u32, u32))>,
     /// "cannot find …", "… is not exported", when unresolved.
     pub problem: Option<String>,
-    /// Display type, when a type tier knows one.
+    /// Display type, already rendered as the engine wants it shown.
     pub ty: Option<String>,
-    /// Declared namespace when not the default (`tag`, `label`).
+    /// Which of the language's namespaces this name lives in, when it
+    /// has more than one and this is not the default. (C, for example,
+    /// puts struct tags and goto labels in namespaces of their own.)
     pub ns: Option<String>,
 }
 

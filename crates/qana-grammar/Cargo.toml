@@ -3,6 +3,7 @@ name = "qana-grammar"
 version = "0.0.1"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "P1: grammar-as-value model, pattern→DFA compilation, static envelope lints (L1/L2), table-driven line lexer"
 
 [dependencies]

@@ -1,7 +1,8 @@
-//! LIMN — to illuminate a manuscript. The engine-neutral protocol for
-//! binding language intelligence to an editor: line-keyed, two-wave
-//! code PAINT plus on-demand FACTS, with a trait ([`Limner`]) an
-//! editor widget can be generic over.
+//! LINEWORK — the drawn marks of an illustration, and here they are
+//! keyed by line. The engine-neutral protocol for binding language
+//! intelligence to an editor: line-keyed, two-wave code PAINT plus
+//! on-demand FACTS, with a trait ([`Limner`]) an editor widget can be
+//! generic over.
 //!
 //! This crate has NO dependencies and knows nothing about any
 //! particular engine or editor. An intelligence engine (a parser
@@ -143,8 +144,9 @@ pub struct Hint {
 // The trait: what an editor is generic over
 // ---------------------------------------------------------------------------
 
-/// One who limns. An intelligence engine implements this; an editor
-/// widget holds one and stays ignorant of everything behind it.
+/// One who limns: the thing that draws a document's linework. An
+/// intelligence engine implements this; an editor widget holds one and
+/// stays ignorant of everything behind it.
 ///
 /// The contract, in editor terms:
 /// * [`open`](Limner::open) once per document (or on wholesale

@@ -3,6 +3,7 @@ name = "qana-engine"
 version = "0.0.1"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "P1: generic incremental line-lexing engine + block skeleton, parameterized by compiled grammars"
 
 [dependencies]

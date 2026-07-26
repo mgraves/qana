@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/limn", "crates/qana-lex", "crates/qana-grammar", "crates/qana-engine", "crates/qana-services", "crates/qana-lsp", "crates/qana-sem", "crates/qana-lang", "crates/qana-cli"]
+members = ["crates/linework", "crates/qana-lex", "crates/qana-grammar", "crates/qana-engine", "crates/qana-services", "crates/qana-lsp", "crates/qana-sem", "crates/qana-lang", "crates/qana-cli"]
 
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/mgraves/qana"

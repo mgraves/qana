@@ -2,7 +2,7 @@
 //! trait object alone, with no knowledge of the engine behind it.
 //! This is the seam Synkro's RichCodeArea holds.
 
-use limn::{LineEdit, Limner, MOD_DEF, MOD_TYPED, MOD_UNRESOLVED};
+use linework::{LineEdit, Limner, MOD_DEF, MOD_TYPED, MOD_UNRESOLVED};
 use qana_lang::live::LiveDoc;
 use qana_lang::EmbeddedLang;
 use std::sync::Arc;

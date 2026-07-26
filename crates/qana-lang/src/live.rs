@@ -1,15 +1,15 @@
 //! A LIVE DOCUMENT: the whole certified pipeline behind one
-//! [`limn::Limner`]. This is what an editor widget holds — through
+//! [`linework::Limner`]. This is what an editor widget holds — through
 //! the trait, never through this crate — to get keystroke-synchronous
 //! paint, semantic modifier bits, hover facts, and inline hints from
 //! a single `.qana` grammar.
 //!
-//! Layering (the point of the exercise): the editor depends on `limn`
-//! alone; this crate depends on `limn` and implements it. The two
+//! Layering (the point of the exercise): the editor depends on `linework`
+//! alone; this crate depends on `linework` and implements it. The two
 //! meet only at the trait.
 
 use crate::EmbeddedLang;
-use limn::{FactCard, Hint, LineEdit, Limner, Paint, PaintDelta};
+use linework::{FactCard, Hint, LineEdit, Limner, Paint, PaintDelta};
 use qana_engine::{IncSession, Line, LineTerm};
 use qana_sem::SemDb;
 use qana_services::paint::{facts_at, type_hints, Painter};

@@ -3,6 +3,7 @@ name = "qana-sem"
 version = "0.0.1"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "P4: salsa-architecture semantic layer — declarative binding (defs/refs/scopes), revisioned queries with signature firewalls, cross-file resolution"
 
 [dependencies]

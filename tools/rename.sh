@@ -21,8 +21,17 @@
 #                   omit to keep `.rg` exactly as it is.
 #   --dir-name D    Directory the repo will live in (default: NAME).
 #                   Synkro's path deps are pointed here.
-#   --keep-dir      Leave the repo directory named `rantlr`. Implies
-#                   --dir-name rantlr.
+#   --keep-dir      Leave the repo directory named `qana`. Implies
+#                   --dir-name qana.
+#   --protocol-to N Also rename the editor-protocol crate: `linework` ->
+#                   N, its module paths, and Synkro's dependency on it.
+#                   Independent of --to: that crate is deliberately
+#                   engine-neutral and should NOT carry the project name.
+#   --protocol-trait T
+#                   Trait name to pair with --protocol-to. Defaults to the
+#                   agent noun (`tint` -> `Tinter`). Override when that
+#                   reads badly — `linework` would yield `Lineworker`,
+#                   which is exactly why the trait is `Limner`.
 #   --synkro PATH   Path to the Synkro repo (default: ../synkro).
 #   --dry-run       Report what would change; modify nothing.
 #   --allow-dirty   Skip the clean-worktree check. Not recommended: a
@@ -36,12 +45,12 @@
 # live with and to say out loud.
 #
 # The script is idempotent: running it twice with the same --to is a no-op
-# the second time, because the audit's definition of done is "no `rantlr`
+# the second time, because the audit's definition of done is "no `qana`
 # anywhere", and that is already true.
 
 set -euo pipefail
 
-OLD=rantlr
+OLD=qana
 
 # ---------------------------------------------------------------------------
 # Arguments
@@ -54,8 +63,8 @@ KEEP_DIR=0
 SYNKRO=""
 DRY=0
 ALLOW_DIRTY=0
-LIMN_TO=""
-LIMN_TRAIT=""
+PROTO_TO=""
+PROTO_TRAIT=""
 
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 note() { printf '\033[36m%s\033[0m\n' "$*"; }
@@ -69,8 +78,8 @@ while [ $# -gt 0 ]; do
     --dir-name)    DIRNAME="${2:-}"; shift 2 ;;
     --keep-dir)    KEEP_DIR=1; shift ;;
     --synkro)      SYNKRO="${2:-}"; shift 2 ;;
-    --limn-to)     LIMN_TO="${2:-}"; shift 2 ;;
-    --limn-trait)  LIMN_TRAIT="${2:-}"; shift 2 ;;
+    --protocol-to)     PROTO_TO="${2:-}"; shift 2 ;;
+    --protocol-trait)  PROTO_TRAIT="${2:-}"; shift 2 ;;
     --dry-run)     DRY=1; shift ;;
     --allow-dirty) ALLOW_DIRTY=1; shift ;;
     -h|--help)     sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;$d'; exit 0 ;;
@@ -117,18 +126,19 @@ fi
 # The protocol crate is named independently of the project — it is a
 # standalone artifact that Synkro depends on WITHOUT depending on this
 # project, which was the whole point of splitting it out. So it gets its
-# own optional rename. The trait defaults to the agent noun (`limn` ->
-# `Limner`, `tint` -> `Tinter`); override when that reads badly.
-LIMN_CAMEL=""
-LIMN_UPPER=""
-if [ -n "$LIMN_TO" ]; then
-  printf '%s' "$LIMN_TO" | grep -qE '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' \
-    || die "'$LIMN_TO' is not a valid crate name"
-  LIMN_CAMEL="$(printf '%s' "$LIMN_TO" | awk -F- '{for(i=1;i<=NF;i++) printf toupper(substr($i,1,1)) substr($i,2)}')"
-  LIMN_UPPER="$(printf '%s' "${LIMN_TO//-/_}" | tr '[:lower:]' '[:upper:]')"
-  [ -n "$LIMN_TRAIT" ] || LIMN_TRAIT="${LIMN_CAMEL}er"
+# own optional rename. The trait defaults to the agent noun (`tint` ->
+# `Tinter`); override when that reads badly, as it does here: `linework`
+# would give `Lineworker`, so the trait stays `Limner` — one who limns.
+PROTO_CAMEL=""
+PROTO_UPPER=""
+if [ -n "$PROTO_TO" ]; then
+  printf '%s' "$PROTO_TO" | grep -qE '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' \
+    || die "'$PROTO_TO' is not a valid crate name"
+  PROTO_CAMEL="$(printf '%s' "$PROTO_TO" | awk -F- '{for(i=1;i<=NF;i++) printf toupper(substr($i,1,1)) substr($i,2)}')"
+  PROTO_UPPER="$(printf '%s' "${PROTO_TO//-/_}" | tr '[:lower:]' '[:upper:]')"
+  [ -n "$PROTO_TRAIT" ] || PROTO_TRAIT="${PROTO_CAMEL}er"
 fi
-LIMN_TRAIT_LOWER="$(printf '%s' "$LIMN_TRAIT" | tr '[:upper:]' '[:lower:]')"
+PROTO_TRAIT_LOWER="$(printf '%s' "$PROTO_TRAIT" | tr '[:upper:]' '[:lower:]')"
 
 # ---------------------------------------------------------------------------
 # Locate the repos
@@ -156,7 +166,7 @@ check_clean() { # $1 = repo
 # ---------------------------------------------------------------------------
 # The substitution program
 #
-# Order matters. The suffixed forms (`rantlr_x`, `rantlr-x`) must be
+# Order matters. The suffixed forms (`qana_x`, `qana-x`) must be
 # rewritten before the bare form, or the bare rule would consume their
 # prefix and leave the wrong separator behind.
 #
@@ -186,7 +196,7 @@ build_perl_program() {
     s{\Q$OLD\E-}{${KEBAB}-}g;
 
     # -- 2. case variants (case-sensitive, so these cannot collide) --------
-    #    Unanchored for the same reason as the limn rules: an identifier
+    #    Unanchored for the same reason as the linework rules: an identifier
     #    like FOO_RANTLR has no word boundary before the name.
     s{Rantlr}{${CAMEL}}g;
     s{RANTLR}{${UPPER}}g;
@@ -238,28 +248,35 @@ PERL
   fi
 }
 
-build_limn_program() {
-  [ -n "$LIMN_TO" ] || return 0
-  # `Limner` before `Limn`, or an overridden trait name would be clobbered
-  # by the generic prefix rule.
-  # No \b anchors here. `_` is a word character, so `\bLIMN` does not
-  # match inside `CHECK_LIMN` — and identifiers that embed the name after
-  # an underscore are exactly the ones a rename must not miss. `limn` is
-  # distinctive enough that an unanchored match is safe; the only English
-  # word containing it is "limnology", which this codebase has no reason
-  # to mention. Contrast the `rg` rules below, which MUST stay anchored:
-  # unanchored, they would turn "large" into "lazge".
+build_protocol_program() {
+  [ -n "$PROTO_TO" ] || return 0
+  # The trait is parked on a sentinel FIRST and restored LAST. Ordering
+  # alone is not enough: it protects a trait renamed to something that no
+  # longer contains the crate stem, but NOT a trait whose new name still
+  # contains it — including leaving the trait unchanged. `Limner` kept
+  # as-is would survive `s{Limner}{Limner}` only to be eaten by the later
+  # `s{Linework}` rule and come out `Lineworker`. \x01 cannot occur in
+  # these text files, so it is a safe parking spot.
+  #
+  # No \b anchors here. `_` is a word character, so `\bLINEWORK` would not
+  # match inside `CHECK_LINEWORK` — and identifiers that embed the name
+  # after an underscore are exactly the ones a rename must not miss.
+  # `linework` is distinctive enough that an unanchored match is safe: no
+  # English word contains it. Contrast the `rg` rules below, which MUST
+  # stay anchored — unanchored, they would turn "large" into "lazge".
   cat <<PERL
-    s{Limner}{${LIMN_TRAIT}}g;
-    s{LIMN}{${LIMN_UPPER}}g;
-    s{Limn}{${LIMN_CAMEL}}g;
-    s{limner}{${LIMN_TRAIT_LOWER}}g;
-    s{limn}{${LIMN_TO}}g;
+    s{Limner}{\x01T\x01}g;
+    s{limner}{\x01t\x01}g;
+    s{LINEWORK}{${PROTO_UPPER}}g;
+    s{Linework}{${PROTO_CAMEL}}g;
+    s{linework}{${PROTO_TO}}g;
+    s{\x01T\x01}{${PROTO_TRAIT}}g;
+    s{\x01t\x01}{${PROTO_TRAIT_LOWER}}g;
 PERL
 }
 
-PROGRAM_HOME="$(build_perl_program)$(build_ext_program home)$(build_limn_program)"
-PROGRAM_FOREIGN="$(build_perl_program)$(build_ext_program foreign)$(build_limn_program)"
+PROGRAM_HOME="$(build_perl_program)$(build_ext_program home)$(build_protocol_program)"
+PROGRAM_FOREIGN="$(build_perl_program)$(build_ext_program foreign)$(build_protocol_program)"
 
 # ---------------------------------------------------------------------------
 # Dry run: report, change nothing
@@ -279,10 +296,10 @@ if [ "$DRY" = 1 ]; then
   else
     printf '    grammar extension     .rg (unchanged)\n'
   fi
-  if [ -n "$LIMN_TO" ]; then
-    printf '    protocol crate        limn -> %s  (trait Limner -> %s)\n' "$LIMN_TO" "$LIMN_TRAIT"
+  if [ -n "$PROTO_TO" ]; then
+    printf '    protocol crate        linework -> %s  (trait Limner -> %s)\n' "$PROTO_TO" "$PROTO_TRAIT"
   else
-    printf '    protocol crate        limn (unchanged)\n'
+    printf '    protocol crate        linework (unchanged)\n'
   fi
   echo
   for repo in "$HERE" $([ "$HAVE_SYNKRO" = 1 ] && echo "$SYNKRO"); do
@@ -321,10 +338,16 @@ check_clean "$HERE"
 [ "$HAVE_SYNKRO" = 1 ] && check_clean "$SYNKRO"
 
 # This script names the old project on purpose — it is the one file that
-# must keep saying `rantlr` for its own patterns to work. It is also the
+# must keep saying `qana` for its own patterns to work. It is also the
 # file bash is reading as it runs, and bash reads scripts incrementally:
 # rewriting it mid-execution would make the interpreter resume inside
 # shifted bytes. Excluded from both the rewrite and the audit.
+#
+# THE COST OF THAT EXCLUSION: `OLD` above does not update itself. After a
+# successful rename, edit it by hand to the new name, or the next run
+# silently matches nothing and reports success having done nothing. This
+# was already missed once — `OLD` sat at `rantlr` through the whole qana
+# rename, which is why the audit could not have caught a second run.
 SELF_REL="tools/$(basename "$0")"
 
 rewrite_repo() { # $1 = repo, $2 = perl program
@@ -357,9 +380,9 @@ move_dirs() { # $1 = repo
     git -C "$repo" mv "synkro_$OLD" "synkro_$SNAKE"
     printf '    synkro_%s -> synkro_%s\n' "$OLD" "$SNAKE"
   fi
-  if [ -n "$LIMN_TO" ] && [ -d "$repo/crates/limn" ]; then
-    git -C "$repo" mv crates/limn "crates/$LIMN_TO"
-    printf '    crates/limn -> crates/%s\n' "$LIMN_TO"
+  if [ -n "$PROTO_TO" ] && [ -d "$repo/crates/linework" ]; then
+    git -C "$repo" mv crates/linework "crates/$PROTO_TO"
+    printf '    crates/linework -> crates/%s\n' "$PROTO_TO"
   fi
 }
 
@@ -443,7 +466,7 @@ note "5/5  auditing"
 FAIL=0
 audit_repo() { # $1 = repo, $2 = label
   local repo="$1" label="$2" content paths pat="$OLD"
-  [ -n "$LIMN_TO" ] && pat="$OLD\|limn"
+  [ -n "$PROTO_TO" ] && pat="$OLD\|linework"
   content=$(git -C "$repo" grep -Iin "$pat" -- . ":(exclude)$SELF_REL" || true)
   paths=$(git -C "$repo" ls-files | grep -i "$pat" || true)
   # Under --keep-dir the repo intentionally stays at its old directory

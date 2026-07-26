@@ -1,0 +1,7 @@
+[package]
+name = "linework"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The linework protocol: line-keyed, two-wave code paint and facts — engine-neutral types and the Limner trait binding language intelligence to editors"

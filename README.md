@@ -1544,11 +1544,12 @@ incrementality and a cached symbol table (today's wave-1 cost is
 dominated by whole-table rebuilds), richer facet bits, and wiring the
 Synkro adapter to consume paint directly.
 
-The protocol now lives in its own ZERO-DEPENDENCY crate, `limn` (to
-limn: to illuminate a manuscript) — types, modifier bits, wire form,
-and the `Limner` trait an editor widget is generic over. The
-dependency shape is the point: an editor depends on `limn` alone;
-this project depends on `limn` and implements it (`qana_lang::live::
+The protocol now lives in its own ZERO-DEPENDENCY crate, `linework` (the
+drawn marks of an illustration — and this protocol is keyed by line) —
+types, modifier bits, wire form, and the `Limner` trait an editor widget
+is generic over. The
+dependency shape is the point: an editor depends on `linework` alone;
+this project depends on `linework` and implements it (`qana_lang::live::
 LiveDoc` — the whole certified pipeline behind one trait object); the
 two meet only at the trait. The first consumer is Synkro's
 `RichCodeArea<L: Limner>` (in the Synkro workspace), whose exerciser

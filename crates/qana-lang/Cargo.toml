@@ -3,6 +3,7 @@ name = "qana-lang"
 version = "0.0.1"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "P5: the .qana textual grammar surface — self-hosted on the qana engine"
 
 [dependencies]
@@ -10,4 +11,4 @@ qana-grammar = { path = "../qana-grammar" }
 qana-engine = { path = "../qana-engine" }
 qana-services = { path = "../qana-services" }
 qana-sem = { path = "../qana-sem" }
-limn = { path = "../limn" }
+linework = { path = "../linework" }

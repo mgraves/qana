@@ -20,10 +20,10 @@
 
 set -euo pipefail
 
-# The workspace as it stands. `limn` is deliberately absent — it is a
+# The workspace as it stands. `linework` is deliberately absent — it is a
 # standalone protocol crate with its own name, independent of whatever
-# this project ends up called. Check it separately with --limn.
-SUFFIXES=(lex grammar engine services lsp sem qana cli)
+# this project ends up called. Check it separately with --linework.
+SUFFIXES=(lex grammar engine services lsp sem lang cli)
 
 UA="name-check (local availability check)"
 API="https://crates.io/api/v1/crates"
@@ -32,11 +32,11 @@ die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v curl >/dev/null || die "curl is required"
 
-CHECK_LIMN=0
+CHECK_LINEWORK=0
 CANDIDATES=()
 for a in "$@"; do
   case "$a" in
-    --limn) CHECK_LIMN=1 ;;
+    --linework) CHECK_LINEWORK=1 ;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;$d'; exit 0 ;;
     *) CANDIDATES+=("$a") ;;
   esac
@@ -70,9 +70,9 @@ glyph() {
   esac
 }
 
-if [ "$CHECK_LIMN" = 1 ]; then
-  s=$(status limn)
-  printf 'limn  %s  %s\n\n' "$(glyph "$s")" "$s"
+if [ "$CHECK_LINEWORK" = 1 ]; then
+  s=$(status linework)
+  printf 'linework  %s  %s\n\n' "$(glyph "$s")" "$s"
 fi
 
 [ ${#CANDIDATES[@]} -gt 0 ] || die "give me at least one candidate name (try --help)"

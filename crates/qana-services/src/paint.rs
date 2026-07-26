@@ -34,11 +34,11 @@ use qana_engine::{DamageReport, IncSession, LexedBuffer};
 use qana_grammar::CompiledLexer;
 use qana_sem::{RefKind, SemDb, Target};
 
-// The protocol TYPES live in the engine-neutral `limn` crate — this
+// The protocol TYPES live in the engine-neutral `linework` crate — this
 // module is qana's IMPLEMENTATION of them (the Painter, the facts
-// assembly). Editors depend on `limn`; qana depends on `limn`;
+// assembly). Editors depend on `linework`; qana depends on `linework`;
 // neither depends on the other.
-pub use limn::{
+pub use linework::{
     decode_lines, encode_lines, FactCard, Hint, Paint, PaintDelta, Run, MOD_DEF, MOD_FOREIGN,
     MOD_PUBLIC, MOD_REF, MOD_TYPED, MOD_UNRESOLVED, STYLE_NONE,
 };

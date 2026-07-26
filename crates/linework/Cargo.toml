@@ -4,7 +4,16 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
+# `repository` is DELIBERATELY ABSENT for 0.0.1, not forgotten. The
+# workspace value points at github.com/mgraves/qana, which is private
+# until 2026-09-01 and therefore returns 404 to everyone else. An absent
+# field is unremarkable; a dead repository link on a crate you are asking
+# people to build on reads as abandoned or hijacked. Metadata is
+# per-version, so restore `repository.workspace = true` for 0.0.2 once
+# the repo is public. `documentation` covers the gap meanwhile: docs.rs
+# builds it automatically on publish, so that link is live and accurate
+# from the moment the crate exists.
+documentation = "https://docs.rs/linework"
 description = "The linework protocol: line-keyed, two-wave code paint and facts — engine-neutral types and the Limner trait binding language intelligence to editors"
 readme = "README.md"
 keywords = ["editor", "syntax-highlighting", "protocol", "lsp", "incremental"]

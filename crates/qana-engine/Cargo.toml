@@ -5,7 +5,10 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "P1: generic incremental line-lexing engine + block skeleton, parameterized by compiled grammars"
+description = "Incremental lexing and parsing over compiled grammars: line-anchored damage tracking, optimal tree reuse on edit, and error recovery that always yields a complete tree"
+readme = "README.md"
+keywords = ["incremental", "parser", "lexer", "editor", "reparse"]
+categories = ["parsing", "development-tools"]
 
 [dependencies]
 qana-grammar.workspace = true

@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "A language-building toolchain: grammars inside its language-shape envelope get incremental parsing, editor intelligence, error containment and lossless trees by construction, or are refused with counterexamples"
+readme = "README.md"
 keywords = ["parser", "incremental", "grammar", "lsp", "language"]
 categories = ["parsing", "development-tools"]
 

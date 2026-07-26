@@ -5,7 +5,10 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "P3: LSP server over the qana incremental toolchain, with live grammar-config hot-reload"
+description = "Language server over the qana toolchain, with live grammar hot-reload: edit the .qana file and the language it defines updates in the editor immediately"
+readme = "README.md"
+keywords = ["lsp", "language-server", "editor", "grammar", "ide"]
+categories = ["text-editors", "development-tools"]
 
 [dependencies]
 qana-grammar.workspace = true

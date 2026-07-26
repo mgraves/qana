@@ -5,7 +5,10 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "P5: the .qana textual grammar surface — self-hosted on the qana engine"
+description = "The .qana grammar language: one file declares tokens, syntax, precedence, highlighting, outline and name binding — self-hosted on the qana engine"
+readme = "README.md"
+keywords = ["grammar", "dsl", "parser", "language", "codegen"]
+categories = ["parsing", "development-tools"]
 
 [dependencies]
 qana-grammar.workspace = true

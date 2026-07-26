@@ -5,7 +5,10 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The `qana` command: certify a .qana grammar and inspect every layer it derives — lex, parse, services, incremental reparse, exports"
+description = "The qana command: scaffold a language, certify a .qana grammar against the envelope, and inspect every layer it derives — tokens, tables, trees, services, incremental reparse, exports"
+readme = "README.md"
+keywords = ["cli", "parser", "grammar", "codegen", "lsp"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "qana"

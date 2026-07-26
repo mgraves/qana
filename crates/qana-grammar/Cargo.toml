@@ -5,7 +5,10 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "P1: grammar-as-value model, pattern→DFA compilation, static envelope lints (L1/L2), table-driven line lexer"
+description = "Grammar as a plain value: pattern-to-DFA compilation, canonical LR(1) tables with conflict counterexamples, and the envelope lints that make incremental parsing provable rather than hoped for"
+readme = "README.md"
+keywords = ["parser", "grammar", "lr", "dfa", "lexer"]
+categories = ["parsing", "development-tools"]
 
 [dependencies]
 # Zero dependencies, deliberately.

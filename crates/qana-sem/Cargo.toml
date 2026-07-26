@@ -5,7 +5,10 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "P4: salsa-architecture semantic layer — declarative binding (defs/refs/scopes), revisioned queries with signature firewalls, cross-file resolution"
+description = "Semantic layer for qana grammars: declarative name binding, a declared type tier, macro expansion, and revisioned queries with signature firewalls"
+readme = "README.md"
+keywords = ["semantic", "binding", "types", "macros", "incremental"]
+categories = ["parsing", "development-tools"]
 
 [dependencies]
 qana-grammar.workspace = true

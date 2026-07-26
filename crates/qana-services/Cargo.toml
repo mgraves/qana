@@ -5,7 +5,10 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "P3: grammar-derived editor services — semantic tokens (full + LSP delta), folding, outline, completion from ACTION rows, diagnostics from repairs"
+description = "Editor services derived from a grammar: semantic tokens with LSP deltas, folding, outline, completion from parser ACTION rows, and diagnostics from parse repairs"
+readme = "README.md"
+keywords = ["lsp", "editor", "completion", "folding", "highlighting"]
+categories = ["text-editors", "development-tools"]
 
 [dependencies]
 qana-grammar.workspace = true

@@ -62,7 +62,16 @@ multiple-versions = "warn"
 wildcards = "deny"
 # Crates that must not enter the graph. Empty for now.
 deny = []
-allow-wildcards = []
+# Internal path dependencies carry no version, so cargo-deny sees them as
+# `*` wildcards. This permits that for PATH deps only — registry deps
+# still may not use `*`, which is where the non-reproducibility risk
+# actually lives. (qana-lex is exactly this case: a path-only
+# dev-dependency with no version.)
+#
+# NB `allow-wildcards` is NOT a cargo-deny key. Copying it from synkro's
+# config failed deserialization outright, so every cargo-deny run errored
+# before checking a single dependency.
+allow-wildcard-paths = true
 
 # ---------------------------------------------------------------------------
 # Sources — restrict where dependencies may come from.

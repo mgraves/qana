@@ -1,8 +1,8 @@
 # qana
 
 Named 2026-07-25. The whole crate family — `qana` and `qana-{lex, grammar,
-engine, services, lsp, sem, rg, cli}` — was verified free on crates.io at
-that time, but nothing is published yet, so nothing is reserved.
+engine, services, lsp, sem, lang, cli}` — was verified free on crates.io
+at that time, but nothing is published yet, so nothing is reserved.
 
 A language-building toolchain built around a **language-shape envelope**: any
 language designed inside the envelope gets incremental parsing, editor

@@ -1,18 +1,20 @@
 [package]
 name = "linework"
-version.workspace = true
+# NOT `version.workspace = true`. linework is engine-neutral and has no
+# dependency on qana; an editor adopting it should not see qana's release
+# cadence in its version number, and a qana release should not bump a
+# protocol that did not change. It versions on its own schedule.
+version = "0.0.2"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-# `repository` is DELIBERATELY ABSENT for 0.0.1, not forgotten. The
-# workspace value points at github.com/mgraves/qana, which is private
-# until 2026-09-01 and therefore returns 404 to everyone else. An absent
-# field is unremarkable; a dead repository link on a crate you are asking
-# people to build on reads as abandoned or hijacked. Metadata is
-# per-version, so restore `repository.workspace = true` for 0.0.2 once
-# the repo is public. `documentation` covers the gap meanwhile: docs.rs
-# builds it automatically on publish, so that link is live and accurate
-# from the moment the crate exists.
+# Restored at 0.0.2. It was deliberately absent from 0.0.1, when
+# github.com/mgraves/qana was still private and the link would have
+# 404'd for everyone — a dead repository link on a crate you are asking
+# people to build on reads as abandoned. The repo is public now, so the
+# link resolves. Metadata is per-version, which is why this needed a
+# release rather than an edit.
+repository.workspace = true
 documentation = "https://docs.rs/linework"
 description = "The linework protocol: line-keyed, two-wave code paint and facts — engine-neutral types and the Limner trait binding language intelligence to editors"
 readme = "README.md"

@@ -1,4 +1,4 @@
-// ChartLang playground — served by rantlr-lsp.
+// ChartLang playground — served by qana-lsp.
 // Everything you see derives from one grammar value:
 // highlighting, folding, outline, completion, diagnostics.
 

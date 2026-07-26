@@ -4,7 +4,7 @@
 //
 // Open demo.cl next to this file (F5 the extension, open this folder).
 // Edit ANYTHING here and save: the pipeline re-certifies and open
-// documents re-colorize. This file itself gets rantlr highlighting,
+// documents re-colorize. This file itself gets qana highlighting,
 // outline, and live envelope diagnostics as you type.
 
 language Tasklang

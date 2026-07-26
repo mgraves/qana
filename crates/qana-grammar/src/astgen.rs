@@ -1,0 +1,208 @@
+//! Typed-AST code generation: a [`SynGrammar`] value in, Rust source
+//! out. Deterministic (drift-tested), zero-cost wrappers over
+//! [`crate::typed`]: one type per nonterminal (enum when it has multiple
+//! productions), one struct per production, one accessor per RHS symbol.
+//!
+//! This is the "ramification as type errors" mechanism: regenerate after
+//! a grammar change and every downstream use that no longer matches the
+//! language fails to compile, with the grammar diff as the explanation.
+
+use crate::lr::LrTables;
+use crate::syn::{camel, Sym, SynGrammar};
+use std::collections::HashMap;
+use std::fmt::Write;
+
+fn snake(s: &str) -> String {
+    s.to_lowercase()
+}
+
+/// Generate the typed-AST module source for a grammar. List-shaped
+/// nonterminals (envelope L4, detected in the LR tables) become structs
+/// with flattened `items()` accessors instead of cons-cell enums — the
+/// balanced run representation stays invisible to typed consumers.
+pub fn generate(sg: &SynGrammar, tables: &LrTables) -> String {
+    generate_with_paths(sg, tables, "crate")
+}
+
+/// Like [`generate`], but with an explicit crate path for the runtime
+/// types (`"crate"` inside qana-grammar itself, `"qana_grammar"` for
+/// generated code living in downstream crates — the out-of-tree story).
+pub fn generate_with_paths(sg: &SynGrammar, tables: &LrTables, krate: &str) -> String {
+    let mut out = String::new();
+    let w = &mut out;
+
+    // Uniqueness of production type names (generator contract).
+    {
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for i in 0..sg.prods.len() {
+            let n = sg.prod_name(i);
+            if let Some(prev) = seen.insert(n.clone(), i) {
+                panic!("duplicate production type name `{n}` (prods {prev} and {i})");
+            }
+        }
+    }
+
+    writeln!(w, "//! @generated typed AST for the `{}` grammar. DO NOT EDIT.", sg.name).unwrap();
+    writeln!(w, "//! Regenerate with the grammar's astgen binary (drift-gated).").unwrap();
+    writeln!(w, "#![allow(dead_code)]").unwrap();
+    writeln!(w).unwrap();
+    writeln!(w, "use {krate}::typed::{{AstNode, NodeRef, TokenRef}};").unwrap();
+
+    for (nt, nt_name) in sg.nt_names.iter().enumerate() {
+        let prods: Vec<usize> =
+            (0..sg.prods.len()).filter(|&i| sg.prods[i].lhs as usize == nt).collect();
+        let nt_ty = camel(nt_name);
+
+        if let Some(shape) = tables.lists.get(&(nt as u16)) {
+            // L4 list nonterminal: struct + flattened items().
+            let cons_rhs = &sg.prods[shape.cons as usize].rhs;
+            let item_nt = cons_rhs[1..]
+                .iter()
+                .find_map(|s| match s {
+                    Sym::N(n) => Some(*n),
+                    Sym::T(_) => None,
+                })
+                .expect("list detection guarantees one element NT");
+            let item_ty = camel(&sg.nt_names[item_nt as usize]);
+            writeln!(w).unwrap();
+            writeln!(w, "/// `{nt_name}` — balanced list of `{}` (envelope L4).", item_ty).unwrap();
+            writeln!(w, "#[derive(Clone, Copy, Debug)]").unwrap();
+            writeln!(w, "pub struct {nt_ty}<'g>(pub NodeRef<'g>);").unwrap();
+            writeln!(w).unwrap();
+            writeln!(w, "impl<'g> AstNode<'g> for {nt_ty}<'g> {{").unwrap();
+            writeln!(w, "    fn cast(node: NodeRef<'g>) -> Option<Self> {{").unwrap();
+            writeln!(
+                w,
+                "        (node.nt() == {nt} && node.prod() == {krate}::green::LIST_PROD).then(|| {nt_ty}(node))"
+            )
+            .unwrap();
+            writeln!(w, "    }}").unwrap();
+            writeln!(w, "    fn node(&self) -> NodeRef<'g> {{").unwrap();
+            writeln!(w, "        self.0").unwrap();
+            writeln!(w, "    }}").unwrap();
+            writeln!(w, "}}").unwrap();
+            writeln!(w).unwrap();
+            writeln!(w, "impl<'g> {nt_ty}<'g> {{").unwrap();
+            writeln!(w, "    pub fn items(&self) -> Vec<{item_ty}<'g>> {{").unwrap();
+            writeln!(w, "        self.0").unwrap();
+            writeln!(w, "            .flat_symbol_children()").unwrap();
+            writeln!(w, "            .into_iter()").unwrap();
+            writeln!(w, "            .filter_map(|c| match c {{").unwrap();
+            writeln!(
+                w,
+                "                {krate}::typed::SymbolChild::Node(n) => {item_ty}::cast(n),"
+            )
+            .unwrap();
+            writeln!(w, "                _ => None,").unwrap();
+            writeln!(w, "            }})").unwrap();
+            writeln!(w, "            .collect()").unwrap();
+            writeln!(w, "    }}").unwrap();
+            writeln!(w, "}}").unwrap();
+            continue; // no per-production structs for list NTs
+        }
+
+        if prods.len() > 1 {
+            // Enum over the productions.
+            writeln!(w).unwrap();
+            writeln!(w, "/// `{nt_name}` — {} productions.", prods.len()).unwrap();
+            writeln!(w, "#[derive(Clone, Copy, Debug)]").unwrap();
+            writeln!(w, "pub enum {nt_ty}<'g> {{").unwrap();
+            for &p in &prods {
+                let pn = sg.prod_name(p);
+                writeln!(w, "    {pn}({pn}<'g>),").unwrap();
+            }
+            writeln!(w, "}}").unwrap();
+            writeln!(w).unwrap();
+            writeln!(w, "impl<'g> AstNode<'g> for {nt_ty}<'g> {{").unwrap();
+            writeln!(w, "    fn cast(node: NodeRef<'g>) -> Option<Self> {{").unwrap();
+            writeln!(w, "        if node.nt() != {nt} {{").unwrap();
+            writeln!(w, "            return None;").unwrap();
+            writeln!(w, "        }}").unwrap();
+            writeln!(w, "        match node.prod() {{").unwrap();
+            for &p in &prods {
+                let pn = sg.prod_name(p);
+                writeln!(w, "            {p} => Some({nt_ty}::{pn}({pn}(node))),").unwrap();
+            }
+            writeln!(w, "            _ => None,").unwrap();
+            writeln!(w, "        }}").unwrap();
+            writeln!(w, "    }}").unwrap();
+            writeln!(w, "    fn node(&self) -> NodeRef<'g> {{").unwrap();
+            writeln!(w, "        match self {{").unwrap();
+            for &p in &prods {
+                let pn = sg.prod_name(p);
+                writeln!(w, "            {nt_ty}::{pn}(x) => x.0,").unwrap();
+            }
+            writeln!(w, "        }}").unwrap();
+            writeln!(w, "    }}").unwrap();
+            writeln!(w, "}}").unwrap();
+        }
+
+        for &p in &prods {
+            // Single-prod NTs: the production struct doubles as the NT
+            // type, so its name must be the NT's camel name.
+            let pn = if prods.len() == 1 { nt_ty.clone() } else { sg.prod_name(p) };
+            writeln!(w).unwrap();
+            writeln!(w, "/// `{}`", sg.prod_display(p)).unwrap();
+            writeln!(w, "#[derive(Clone, Copy, Debug)]").unwrap();
+            writeln!(w, "pub struct {pn}<'g>(pub NodeRef<'g>);").unwrap();
+            writeln!(w).unwrap();
+            writeln!(w, "impl<'g> AstNode<'g> for {pn}<'g> {{").unwrap();
+            writeln!(w, "    fn cast(node: NodeRef<'g>) -> Option<Self> {{").unwrap();
+            writeln!(
+                w,
+                "        (node.nt() == {nt} && node.prod() == {p}).then(|| {pn}(node))"
+            )
+            .unwrap();
+            writeln!(w, "    }}").unwrap();
+            writeln!(w, "    fn node(&self) -> NodeRef<'g> {{").unwrap();
+            writeln!(w, "        self.0").unwrap();
+            writeln!(w, "    }}").unwrap();
+            writeln!(w, "}}").unwrap();
+
+            let rhs = &sg.prods[p].rhs;
+            if rhs.is_empty() {
+                continue;
+            }
+            writeln!(w).unwrap();
+            writeln!(w, "impl<'g> {pn}<'g> {{").unwrap();
+            let mut used: HashMap<String, usize> = HashMap::new();
+            for (k, sym) in rhs.iter().enumerate() {
+                let base = match sym {
+                    Sym::T(t) => format!("{}_token", snake(sg.term_name(*t))),
+                    Sym::N(n) => snake(&sg.nt_names[*n as usize]),
+                };
+                let count = used.entry(base.clone()).or_insert(0);
+                *count += 1;
+                let field = if *count == 1 { base } else { format!("{base}_{count}") };
+                match sym {
+                    Sym::T(t) => {
+                        writeln!(
+                            w,
+                            "    pub fn {field}(&self) -> Option<TokenRef<'g>> {{"
+                        )
+                        .unwrap();
+                        writeln!(
+                            w,
+                            "        self.0.child_token({k}, {t}) // {}",
+                            sg.term_name(*t)
+                        )
+                        .unwrap();
+                        writeln!(w, "    }}").unwrap();
+                    }
+                    Sym::N(n) => {
+                        let child_ty = camel(&sg.nt_names[*n as usize]);
+                        writeln!(
+                            w,
+                            "    pub fn {field}(&self) -> Option<{child_ty}<'g>> {{"
+                        )
+                        .unwrap();
+                        writeln!(w, "        {child_ty}::cast(self.0.child_node({k})?)").unwrap();
+                        writeln!(w, "    }}").unwrap();
+                    }
+                }
+            }
+            writeln!(w, "}}").unwrap();
+        }
+    }
+    out
+}

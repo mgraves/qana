@@ -2,9 +2,9 @@
 //
 // Open demo.cl next to this file and edit anything here: tokens,
 // keywords, operators, precedence, whole productions. On save, the
-// rantlr pipeline (envelope lints, LR tables, styles, binding) rebuilds
+// qana pipeline (envelope lints, LR tables, styles, binding) rebuilds
 // in milliseconds and open documents re-colorize. This file is ALSO
-// served by rantlr itself — highlighting, outline, go-to-definition on
+// served by qana itself — highlighting, outline, go-to-definition on
 // rule names, and live envelope diagnostics as you type.
 //
 // Things to try:

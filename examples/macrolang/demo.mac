@@ -1,4 +1,4 @@
-// MacLang demo — expanded by `rantlr expand` into demo.exp.mac.
+// MacLang demo — expanded by `qana expand` into demo.exp.mac.
 let unit = 10;
 
 macro twice(x) => { x + x }

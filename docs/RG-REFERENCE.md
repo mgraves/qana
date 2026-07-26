@@ -3,7 +3,7 @@
 A `.rg` file is a complete language definition: lexical structure,
 syntax, precedence, highlighting, outline, and name binding. It is
 parsed and compiled by the same toolchain it describes — the surface is
-[self-hosted](../crates/rantlr-rg/rg.rg), and `rg.rg` compiled by the
+[self-hosted](../crates/qana-rg/rg.rg), and `rg.rg` compiled by the
 bootstrap must reproduce the bootstrap exactly.
 
 For the practical path, start with the [guide](GUIDE.md).
@@ -164,7 +164,7 @@ A production's precedence defaults to its last terminal; override it per
 alternative with `@precedence(token)`.
 
 Precedence is how you keep an expression grammar inside the envelope.
-Without it, `expr "+" expr` is ambiguous and `rantlr check` refuses it.
+Without it, `expr "+" expr` is ambiguous and `qana check` refuses it.
 
 ---
 
@@ -231,7 +231,7 @@ These desugar to ordinary left-recursive productions, which the engine
 then recognises as **auto-balanced lists** (envelope rule L4): the tree
 holds shallow balanced runs instead of a cons spine, so editing one item
 in a 10,000-item file stays cheap. The generated labels — which is what
-you see in `rantlr parse` — follow a fixed convention:
+you see in `qana parse` — follow a fixed convention:
 
 | Sugar | Generated alternatives |
 | --- | --- |
@@ -265,7 +265,7 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@qualify(base, name)` | The `name` token resolves among the members of what `base` resolves to (`a::b` paths; nest via a recursive path rule) |
 | `@ns(name)` | This alternative's `@def`/`@ref` live in the NAMED namespace `name`: refs only bind same-namespace defs, and named namespaces resolve hoisted (order-free) in every scope — per-namespace ordering (C struct tags are forward-declarable while values stay define-before-use) |
 | `@macro([params,] body)` | The meta tier: this alternative's `@def` introduces a MACRO whose parameters are the defs inside the `params` child and whose template is the `body` child — real syntax, parsed and bound at the definition. Substitution is binding-guided: body refs that resolve to a parameter get the corresponding argument's text. It is also SHAPE-PRESERVING: the expander compares the declared `prec` strengths of the argument, the hole, the body, and the use site, and where splicing would regroup them it wraps the text in the rule's own grouping production (`Paren: "(" expr ")"` — discovered by shape, whatever the delimiters are). A body with no declared shape (C's `pp_tokens`) splices textually, and a rule with no grouping production yields a diagnostic rather than a silent regrouping |
-| `@splice(name[, args])` | Expansion may happen HERE: when `name`'s `@ref` resolves to a macro, this node is replaced by the substituted body (`args` is the argument-list child for parameterized macros). Refs without `@splice` never expand — C's `#ifdef X` stays closed while `return X;` opens. Run `rantlr expand` to materialize (deterministic `<stem>.exp.<ext>` + provenance sidecar, write-if-changed, `--check` = the read-only drift gate). Expansion is HYGIENIC: every reference that survives must resolve to the same definition afterwards as where it was written, and where it would not, the expander renames the binder that swallowed it (reported as a note) — falling back to a diagnostic when no name the grammar admits is available |
+| `@splice(name[, args])` | Expansion may happen HERE: when `name`'s `@ref` resolves to a macro, this node is replaced by the substituted body (`args` is the argument-list child for parameterized macros). Refs without `@splice` never expand — C's `#ifdef X` stays closed while `return X;` opens. Run `qana expand` to materialize (deterministic `<stem>.exp.<ext>` + provenance sidecar, write-if-changed, `--check` = the read-only drift gate). Expansion is HYGIENIC: every reference that survives must resolve to the same definition afterwards as where it was written, and where it would not, the expander renames the binder that swallowed it (reported as a note) — falling back to a diagnostic when no name the grammar admits is available |
 | `@reflect(ty[, "sep"[, facet…]])` | REFLECTION, on a `@splice` alternative: the macro's parameters bind PER MEMBER of the type `ty` resolves to — one body per member, joined by `sep`. The parameters take the declared FACETS in order (default `name, type`; available: `name`, `type`, `owner`, `index`, `count`), and a facet/parameter count mismatch is diagnosed. `name`/`type`/`owner` are copies of the declaration, so provenance points at the field or the struct; `index`/`count` are computed. The member map is the type tier's own `deftype`/`def` declarations, in whichever file declared them: a type resolving into a sibling reflects its members from there. Macro bodies are type-EXEMPT at the definition (templates type per instantiation, in the materialized output) |
 
 Attribute names cannot be `.rg` reserved words, which is why the
@@ -435,6 +435,6 @@ carries a witness — a concrete input, not a category.
 | **L8** | Binding is data (`@def`/`@ref`/`@scope`), not code | Name resolution is derivable and memoizable |
 | **L9** | Signature and body are firewalled | Editing a function body cannot invalidate other files |
 
-L1 through L4 are what `rantlr check` reports on directly. L5, L6, L8,
+L1 through L4 are what `qana check` reports on directly. L5, L6, L8,
 and L9 are structural: they are properties of the design that the
 surface has no way to express a violation of.

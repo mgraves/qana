@@ -1,0 +1,17 @@
+[package]
+name = "qana-cli"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "The `qana` command: certify a .rg grammar and inspect every layer it derives — lex, parse, services, incremental reparse, exports"
+
+[[bin]]
+name = "qana"
+path = "src/main.rs"
+
+[dependencies]
+qana-rg = { path = "../qana-rg" }
+qana-grammar = { path = "../qana-grammar" }
+qana-engine = { path = "../qana-engine" }
+qana-services = { path = "../qana-services" }
+qana-sem = { path = "../qana-sem" }

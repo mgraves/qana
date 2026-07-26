@@ -28,80 +28,80 @@ dependencies = [
 ]
 
 [[package]]
+name = "qana-cli"
+version = "0.0.1"
+dependencies = [
+ "qana-engine",
+ "qana-grammar",
+ "qana-rg",
+ "qana-sem",
+ "qana-services",
+]
+
+[[package]]
+name = "qana-engine"
+version = "0.0.1"
+dependencies = [
+ "qana-grammar",
+ "qana-lex",
+]
+
+[[package]]
+name = "qana-grammar"
+version = "0.0.1"
+
+[[package]]
+name = "qana-lex"
+version = "0.0.1"
+
+[[package]]
+name = "qana-lsp"
+version = "0.0.1"
+dependencies = [
+ "qana-engine",
+ "qana-grammar",
+ "qana-rg",
+ "qana-sem",
+ "qana-services",
+ "serde_json",
+]
+
+[[package]]
+name = "qana-rg"
+version = "0.0.1"
+dependencies = [
+ "limn",
+ "qana-engine",
+ "qana-grammar",
+ "qana-sem",
+ "qana-services",
+]
+
+[[package]]
+name = "qana-sem"
+version = "0.0.1"
+dependencies = [
+ "qana-engine",
+ "qana-grammar",
+]
+
+[[package]]
+name = "qana-services"
+version = "0.0.1"
+dependencies = [
+ "limn",
+ "qana-engine",
+ "qana-grammar",
+ "qana-sem",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
-]
-
-[[package]]
-name = "rantlr-cli"
-version = "0.0.1"
-dependencies = [
- "rantlr-engine",
- "rantlr-grammar",
- "rantlr-rg",
- "rantlr-sem",
- "rantlr-services",
-]
-
-[[package]]
-name = "rantlr-engine"
-version = "0.0.1"
-dependencies = [
- "rantlr-grammar",
- "rantlr-lex",
-]
-
-[[package]]
-name = "rantlr-grammar"
-version = "0.0.1"
-
-[[package]]
-name = "rantlr-lex"
-version = "0.0.1"
-
-[[package]]
-name = "rantlr-lsp"
-version = "0.0.1"
-dependencies = [
- "rantlr-engine",
- "rantlr-grammar",
- "rantlr-rg",
- "rantlr-sem",
- "rantlr-services",
- "serde_json",
-]
-
-[[package]]
-name = "rantlr-rg"
-version = "0.0.1"
-dependencies = [
- "limn",
- "rantlr-engine",
- "rantlr-grammar",
- "rantlr-sem",
- "rantlr-services",
-]
-
-[[package]]
-name = "rantlr-sem"
-version = "0.0.1"
-dependencies = [
- "rantlr-engine",
- "rantlr-grammar",
-]
-
-[[package]]
-name = "rantlr-services"
-version = "0.0.1"
-dependencies = [
- "limn",
- "rantlr-engine",
- "rantlr-grammar",
- "rantlr-sem",
 ]
 
 [[package]]

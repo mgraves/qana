@@ -1,6 +1,6 @@
-# rantlr — user guide
+# qana — user guide
 
-You describe a language in one `.rg` file. rantlr checks that description
+You describe a language in one `.rg` file. qana checks that description
 against a fixed set of rules (the *envelope*), and if it passes, derives
 everything else: an incremental lexer, an LR(1) parser that never fails,
 syntax highlighting, folding, an outline, go-to-definition, rename, and
@@ -26,15 +26,15 @@ There is nothing on crates.io — build from the repo:
 cargo build --release
 ```
 
-That gives you two binaries in `target/release/`: `rantlr` (this guide)
-and `rantlr-lsp` (the editor server). To put `rantlr` on your `PATH`:
+That gives you two binaries in `target/release/`: `qana` (this guide)
+and `qana-lsp` (the editor server). To put `qana` on your `PATH`:
 
 ```bash
-cargo install --path crates/rantlr-cli
+cargo install --path crates/qana-cli
 ```
 
-Everything below assumes `rantlr` is on your `PATH`. If it isn't,
-substitute `cargo run -q -p rantlr-cli --` for `rantlr`.
+Everything below assumes `qana` is on your `PATH`. If it isn't,
+substitute `cargo run -q -p qana-cli --` for `qana`.
 
 ---
 
@@ -43,7 +43,7 @@ substitute `cargo run -q -p rantlr-cli --` for `rantlr`.
 ### 1. Scaffold
 
 ```bash
-rantlr new mylang --name Mylang --ext .my
+qana new mylang --name Mylang --ext .my
 ```
 
 You get `mylang/mylang.rg` — a complete, commented, working grammar with
@@ -54,7 +54,7 @@ operator precedence, statements, blocks, and expressions — plus
 ### 2. Certify it
 
 ```bash
-rantlr check mylang/mylang.rg
+qana check mylang/mylang.rg
 ```
 
 ```text
@@ -91,7 +91,7 @@ will do with this language, derived from the same file.
 ### 3. Parse something
 
 ```bash
-rantlr parse mylang/mylang.rg mylang/example.my
+qana parse mylang/mylang.rg mylang/example.my
 ```
 
 ```text
@@ -136,7 +136,7 @@ blank while you are mid-keystroke.
 ### 5. See the semantics
 
 ```bash
-rantlr defs mylang/mylang.rg mylang/example.my
+qana defs mylang/mylang.rg mylang/example.my
 ```
 
 ```text
@@ -160,7 +160,7 @@ Delete `let width = 3;` and rerun: the references come back
 ### 6. Watch an edit stay cheap
 
 ```bash
-rantlr edit mylang/mylang.rg mylang/example.my --line 4 --text "let width  = 30;"
+qana edit mylang/mylang.rg mylang/example.my --line 4 --text "let width  = 30;"
 ```
 
 ```text
@@ -195,7 +195,7 @@ add an alternative to `rule stmt`:
   | WhileStmt: "while" "(" expr ")" block
 ```
 
-`rantlr check` re-certifies in milliseconds and `WhileStmt` is now a node
+`qana check` re-certifies in milliseconds and `WhileStmt` is now a node
 kind, an outline candidate, and a highlight class.
 
 **Add an operator.** Declare `token CARET = "^" @style(operator)`, add
@@ -225,7 +225,7 @@ your grammar, not in someone's document a year later.
 
 ## The type tier: declared, not predefined
 
-rantlr ships **no types**. The starter grammar declares its own:
+qana ships **no types**. The starter grammar declares its own:
 
 ```
 rule expr =
@@ -244,7 +244,7 @@ through every use, riding the same resolution that powers
 go-to-definition. One generic engine derives the rest:
 
 ```bash
-rantlr types mylang/mylang.rg mylang/example.my
+qana types mylang/mylang.rg mylang/example.my
 ```
 
 ```text
@@ -387,11 +387,11 @@ error: `tau_hidden` exists in the module but is not exported
 
 ## In an editor
 
-The VS Code extension is a thin client over `rantlr-lsp`. It serves two
+The VS Code extension is a thin client over `qana-lsp`. It serves two
 languages: your target language, and `.rg` grammar files themselves.
 
 ```bash
-cargo build --release -p rantlr-lsp
+cargo build --release -p qana-lsp
 cd editor/vscode-chartlang && npm install
 ```
 
@@ -406,7 +406,7 @@ and saving it hot-reloads the pipeline: open documents re-colorize, and
 a grammar that leaves the envelope publishes its refusal as a diagnostic
 on the offending line while the last good pipeline stays live.
 
-For a custom file extension, `rantlr new` already wrote
+For a custom file extension, `qana new` already wrote
 `.vscode/settings.json` for you:
 
 ```json
@@ -430,7 +430,7 @@ Editors are not the only host. `EmbeddedLang` compiles a grammar and
 hands back a ready pipeline, in process, with no LSP hop:
 
 ```rust
-use rantlr_rg::EmbeddedLang;
+use qana_rg::EmbeddedLang;
 
 let lang = EmbeddedLang::from_rg_source(include_str!("mylang.rg"))?;
 let mut session = lang.session("let x = 1;\n");
@@ -441,7 +441,7 @@ let tree = session.tree().expect("parsing is total");
 the tree. `lang.styles`, `lang.outline`, and `lang.binding` drive
 highlighting, outline, and navigation exactly as they do over LSP.
 
-A worked integration lives outside this repo: `synkro_rantlr` in the
+A worked integration lives outside this repo: `synkro_qana` in the
 Synkro workspace implements that GUI framework's `TokenProvider` and
 `CreaseProvider` over `EmbeddedLang`, giving its `CodeArea` widget
 grammar-driven highlighting and folding.
@@ -451,8 +451,8 @@ grammar-driven highlighting and folding.
 ## Exports
 
 ```bash
-rantlr ts mylang/mylang.rg tree-sitter/mylang   # tree-sitter grammar + highlight queries
-rantlr ast mylang/mylang.rg > src/ast.rs        # typed Rust AST over the green tree
+qana ts mylang/mylang.rg tree-sitter/mylang   # tree-sitter grammar + highlight queries
+qana ast mylang/mylang.rg > src/ast.rs        # typed Rust AST over the green tree
 ```
 
 The tree-sitter export gives you an escape hatch into the tree-sitter
@@ -470,9 +470,10 @@ identifier token you labelled `name:` in the grammar.
 An honest inventory, so nothing surprises you halfway in.
 
 **Packaging.** Nothing is published. Build from source; there is no
-`cargo install rantlr` from crates.io, and the `rantlr` name there
-belongs to an unrelated project. The VS Code extension is a development
-shell — it is not packaged as a `.vsix` or published to the marketplace.
+`cargo install qana` from crates.io yet. The name family is free there as
+of 2026-07-25 but unclaimed, so it stays free only until someone claims
+it. The VS Code extension is a development shell — it is not packaged as
+a `.vsix` or published to the marketplace.
 
 **Language features.** The `.rg` surface has no parenthesized groups
 (`(a b)?`); repetition sugar is `*`, `+`, `?`, and `% separator`, and
@@ -504,15 +505,15 @@ memoized semantics, composition — are built and gated.
 
 | Command | What it shows |
 | --- | --- |
-| `rantlr new <dir> [--name L] [--ext .x]` | Scaffold a working grammar and sample document |
-| `rantlr check <g.rg>` | Certify; print the envelope report, or the refusal with a counterexample |
-| `rantlr tokens <g.rg> <file>` | The lex: every token, its style class, and each line's entry state |
-| `rantlr parse <g.rg> <file> [--trivia] [--depth N]` | The lossless tree, losslessness check, and any repairs |
-| `rantlr outline <g.rg> <file>` | Derived document symbols |
-| `rantlr defs <g.rg> <file>` | Derived binding: definitions, references, resolution |
-| `rantlr types <g.rg> <file> [--all]` | The declared type tier: typed definitions and mismatches |
-| `rantlr edit <g.rg> <file> --line N --text "…"` | Incremental reparse: reuse, timing, and the batch differential |
-| `rantlr ts <g.rg> <outdir>` | Emit a tree-sitter grammar and highlight queries |
-| `rantlr ast <g.rg>` | Emit a typed Rust AST to stdout |
+| `qana new <dir> [--name L] [--ext .x]` | Scaffold a working grammar and sample document |
+| `qana check <g.rg>` | Certify; print the envelope report, or the refusal with a counterexample |
+| `qana tokens <g.rg> <file>` | The lex: every token, its style class, and each line's entry state |
+| `qana parse <g.rg> <file> [--trivia] [--depth N]` | The lossless tree, losslessness check, and any repairs |
+| `qana outline <g.rg> <file>` | Derived document symbols |
+| `qana defs <g.rg> <file>` | Derived binding: definitions, references, resolution |
+| `qana types <g.rg> <file> [--all]` | The declared type tier: typed definitions and mismatches |
+| `qana edit <g.rg> <file> --line N --text "…"` | Incremental reparse: reuse, timing, and the batch differential |
+| `qana ts <g.rg> <outdir>` | Emit a tree-sitter grammar and highlight queries |
+| `qana ast <g.rg>` | Emit a typed Rust AST to stdout |
 
 Exit codes: `0` success, `1` refusal or error in the input, `2` usage.

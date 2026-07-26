@@ -1,4 +1,4 @@
-// ChartLang extension: thin LanguageClient over the rantlr-lsp binary.
+// ChartLang extension: thin LanguageClient over the qana-lsp binary.
 const path = require("path");
 const fs = require("fs");
 const vscode = require("vscode");
@@ -11,22 +11,22 @@ function serverPath(context) {
   if (configured && fs.existsSync(configured)) return configured;
   const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (ws) {
-    for (const rel of ["target/release/rantlr-lsp", "target/debug/rantlr-lsp"]) {
+    for (const rel of ["target/release/qana-lsp", "target/debug/qana-lsp"]) {
       const p = path.join(ws, rel);
       if (fs.existsSync(p)) return p;
     }
   }
-  return "rantlr-lsp"; // PATH fallback
+  return "qana-lsp"; // PATH fallback
 }
 
 function activate(context) {
   const command = serverPath(context);
   client = new LanguageClient(
     "chartlang",
-    "ChartLang (rantlr)",
+    "ChartLang (qana)",
     { command, transport: TransportKind.stdio },
     {
-      documentSelector: [{ language: "chartlang" }, { language: "rantlr-grammar" }],
+      documentSelector: [{ language: "chartlang" }, { language: "qana-grammar" }],
       // Let the server see language-definition saves quickly (it also
       // polls). Any `.rg` in the workspace root can be the language
       // definition, so watch them all rather than one fixed name.

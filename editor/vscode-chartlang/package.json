@@ -1,9 +1,9 @@
 {
   "name": "chartlang",
-  "displayName": "ChartLang (rantlr demo)",
-  "description": "Demo language served by the rantlr incremental toolchain: semantic highlighting with deltas, diagnostics from repair, outline, folding, completion, and live grammar hot-reload via chartlang.rg — with .rg grammar files themselves served by the same engine.",
+  "displayName": "ChartLang (qana demo)",
+  "description": "Demo language served by the qana incremental toolchain: semantic highlighting with deltas, diagnostics from repair, outline, folding, completion, and live grammar hot-reload via chartlang.rg — with .rg grammar files themselves served by the same engine.",
   "version": "0.0.1",
-  "publisher": "rantlr",
+  "publisher": "qana",
   "private": true,
   "engines": { "vscode": "^1.85.0" },
   "main": "./extension.js",
@@ -17,9 +17,9 @@
         "configuration": "./language-configuration.json"
       },
       {
-        "id": "rantlr-grammar",
+        "id": "qana-grammar",
         "extensions": [".rg"],
-        "aliases": ["rantlr grammar"],
+        "aliases": ["qana grammar"],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -29,7 +29,7 @@
         "chartlang.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the rantlr-lsp binary (defaults to `rantlr-lsp` on PATH, or target/release/rantlr-lsp in the workspace)."
+          "description": "Path to the qana-lsp binary (defaults to `qana-lsp` on PATH, or target/release/qana-lsp in the workspace)."
         }
       }
     },
@@ -49,7 +49,7 @@
         }
       },
       {
-        "language": "rantlr-grammar",
+        "language": "qana-grammar",
         "scopes": {
           "keyword": ["keyword.control.rg"],
           "variable": ["variable.other.rg"],

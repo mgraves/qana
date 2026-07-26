@@ -1,0 +1,12 @@
+[package]
+name = "qana-services"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "P3: grammar-derived editor services — semantic tokens (full + LSP delta), folding, outline, completion from ACTION rows, diagnostics from repairs"
+
+[dependencies]
+qana-grammar = { path = "../qana-grammar" }
+qana-engine = { path = "../qana-engine" }
+qana-sem = { path = "../qana-sem" }
+limn = { path = "../limn" }

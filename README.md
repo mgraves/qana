@@ -1,7 +1,8 @@
-# rantlr
+# qana
 
-Working name (crates.io naming TBD — `rantlr` was claimed by a third party on
-2026-07-18; verify before publishing anything).
+Named 2026-07-25. The whole crate family — `qana` and `qana-{lex, grammar,
+engine, services, lsp, sem, rg, cli}` — was verified free on crates.io at
+that time, but nothing is published yet, so nothing is reserved.
 
 A language-building toolchain built around a **language-shape envelope**: any
 language designed inside the envelope gets incremental parsing, editor
@@ -14,10 +15,10 @@ report (artifact link in the project notes).
 
 ```bash
 cargo build --release
-cargo install --path crates/rantlr-cli    # puts `rantlr` on your PATH
-rantlr new mylang --name Mylang --ext .my
-rantlr check mylang/mylang.rg
-rantlr parse mylang/mylang.rg mylang/example.my
+cargo install --path crates/qana-cli    # puts `qana` on your PATH
+qana new mylang --name Mylang --ext .my
+qana check mylang/mylang.rg
+qana parse mylang/mylang.rg mylang/example.my
 ```
 
 One `.rg` file is the whole language: tokens, keywords, precedence,
@@ -34,7 +35,7 @@ counterexample. Everything else is derived.
 The rest of this file is the engineering log: what each increment
 proves, how it is gated, and what it measures.
 
-## What this spike proves (`crates/rantlr-lex`)
+## What this spike proves (`crates/qana-lex`)
 
 The two riskiest lexical-layer claims, in ~700 lines of dependency-free Rust:
 
@@ -121,7 +122,7 @@ cargo run --release --bin p1bench # P1 generated-lexer numbers
 Two new crates supersede the hand-written approach while leaving the P0
 crate untouched as the reference implementation:
 
-- **`crates/rantlr-grammar`** — grammar-as-value core model (`LexGrammar`
+- **`crates/qana-grammar`** — grammar-as-value core model (`LexGrammar`
   is a plain `Clone + Eq` value: modes, token patterns, trivia/bracket
   roles, keyword specialization, push/pop actions), compiled via Thompson
   NFA → subset-construction DFA over a 132-column classified alphabet,
@@ -130,7 +131,7 @@ crate untouched as the reference implementation:
   string), L2 (mode-push graph acyclic or explicitly bounded — violations
   name the cycle), empty-match rejection. Out-of-envelope grammars don't
   produce a lexer; they produce a counterexample.
-- **`crates/rantlr-engine`** — the P0 incremental machinery generalized
+- **`crates/qana-engine`** — the P0 incremental machinery generalized
   over a `LineLexer` trait (any pure line lexer with a small `Eq` state),
   plus the vocab-driven block skeleton.
 
@@ -211,7 +212,7 @@ next non-trivia token; richer ownership views are derived layers.
 `ancestor_spans` / `token_at_offset` provide the LSP `selectionRange`
 primitive — the nesting invariant is property-tested at every offset.
 
-**Typed AST codegen.** `cargo run -p rantlr-grammar --bin astgen`
+**Typed AST codegen.** `cargo run -p qana-grammar --bin astgen`
 regenerates `demo_ast.rs` (checked in, 698 lines) from the grammar
 *value*: an enum per multi-production nonterminal, a struct per named
 production, an accessor per RHS symbol (trivia-transparent, token ids
@@ -323,7 +324,7 @@ incremental ≡ batch semantic gate. Repairs surface as diagnostics.
 
 ## P3 — increment 1 (shipped): derived editor services
 
-`rantlr-services`: everything computed from artifacts the toolchain
+`qana-services`: everything computed from artifacts the toolchain
 already generates, LSP-shaped but transport-free:
 
 - **Semantic tokens** (tier 0): token-id → legend classes, LSP quintuple
@@ -348,7 +349,7 @@ are the documented refinement).
 
 ## P3 — increment 2 (shipped): LSP server, VS Code extension, hot-reload
 
-**`rantlr-lsp`** — a working language server (the workspace's first and
+**`qana-lsp`** — a working language server (the workspace's first and
 only external dependency: `serde_json`). Hand-rolled Content-Length
 framing over stdio; a fully testable `Server::handle(msg) → messages`
 core: initialize with utf-8 position-encoding negotiation, incremental
@@ -384,7 +385,7 @@ byte-counted positions (fine for ASCII demos).
 
 ## P4 — increment 1 (shipped): the semantic layer
 
-`rantlr-sem` — envelope commitments L8 (binding as data) and L9
+`qana-sem` — envelope commitments L8 (binding as data) and L9
 (signature/body firewalls), running. The architecture is **salsa's** —
 revisions, memoized queries, early cutoff by output comparison
 ("backdating": an unchanged signature keeps its old change-revision so
@@ -417,7 +418,7 @@ next granularity); `names_in_scope` is demo-grade positional.
 
 ## P5 — increment 1 (shipped): the `.rg` textual grammar surface, self-hosted
 
-`crates/rantlr-rg` is the textual surface: a `.rg` file declares the
+`crates/qana-rg` is the textual surface: a `.rg` file declares the
 ENTIRE language — tokens (`/regex/` or `"literal"` patterns), modes,
 `keywords` (specialization), bracket `pair`s, `prec` lines, labeled
 productions, and the editor annotations (`@style`, `@def/@ref/@scope`,
@@ -465,7 +466,7 @@ target language (pipeline hot-reloaded from `chartlang.rg`, with
 `chartlang.toml` as legacy fallback) and `.rg` files themselves
 (highlighting incl. a `regexp` class, outline of rules/tokens/modes with
 LSP kinds, forward-reference go-to-definition via the new UNORDERED
-binding mode in rantlr-sem, and live envelope diagnostics as you type —
+binding mode in qana-sem, and live envelope diagnostics as you type —
 conflicts pointing at productions). The playground's config is now the
 full grammar file. Protocol tests cover both (.rg services + .rg
 hot-reload with span-accurate refusal).
@@ -520,7 +521,7 @@ cheaper); text → certified pipeline still under 2 ms.
 
 ## P5 — increment 3 (shipped): tree-sitter grammar emission
 
-`rantlr_rg::tsgen` + the `rg2ts` binary emit a tree-sitter
+`qana_rg::tsgen` + the `rg2ts` binary emit a tree-sitter
 `grammar.js` and `queries/highlights.scm` from any envelope-certified
 grammar — the "derived artifact" of the original feasibility report:
 one definition also reaches every tree-sitter-native surface (Neovim,
@@ -557,7 +558,7 @@ soft-skips when the CLI is absent.
 
 ## P6 — increment 1 (shipped): per-item semantic memoization
 
-The granularity refinement named in P4: rantlr-sem now memoizes at the
+The granularity refinement named in P4: qana-sem now memoizes at the
 level of a file's top-level ITEMS. The mechanism falls out of machinery
 the toolchain already had — the incremental parser reuses untouched
 subtrees by `Arc` identity, so an item's pointer is a free, exact memo
@@ -604,7 +605,7 @@ diff directly) is the named next step.
 
 Part III's language nesting runs, and the design's central claim held:
 **composition is a construction, not new machinery.** The generic
-`compose()` operator (`rantlr_grammar::compose`) builds the PRODUCT
+`compose()` operator (`qana_grammar::compose`) builds the PRODUCT
 grammar of a host and a guest as ordinary grammar values — guest modes,
 tokens, and nonterminals offset into one space (names prefixed,
 astgen-clean), each island an OPEN token in a host mode pushing the
@@ -670,7 +671,7 @@ seal their namespace in both directions — a guest reference never
 silently resolves to a host binding (`rule file = File: tempting`
 with a host `let tempting` is UNRESOLVED and diagnosed, not a
 cross-language jump), and island names are invisible to the host and
-to other islands. `rantlr_sem::compose_binding(host, guest, sg, map)`
+to other islands. `qana_sem::compose_binding(host, guest, sg, map)`
 composes the configs mechanically: host entries unchanged (ids
 preserved by composition), guest entries offset, each island a barrier
 scope carrying the guest's root ordering. The `.rg` surface gained
@@ -691,11 +692,11 @@ other); the seal is diagnosed in both directions; and unresolved
 diagnostics inside a garbage-filled island stay CONTAINED to the
 island span while host navigation flows around it. 97 tests.
 
-## The on-ramp (shipped): the `rantlr` CLI, the guide, and four surface fixes
+## The on-ramp (shipped): the `qana` CLI, the guide, and four surface fixes
 
 Everything before this increment was reachable only from Rust or from a
-running editor. This one makes the toolchain drivable: a `rantlr` binary
-(`crates/rantlr-cli`, no third-party dependencies) whose subcommands each
+running editor. This one makes the toolchain drivable: a `qana` binary
+(`crates/qana-cli`, no third-party dependencies) whose subcommands each
 expose one derived layer — `new` scaffolds a working grammar, `check`
 prints the envelope certificate or the refusal, `tokens` shows the lex,
 `parse` the lossless tree, `outline`/`defs` the derived services, `edit`
@@ -750,7 +751,7 @@ here is a third way, the same one binding already took — **the tier is
 not predefined, but the grammar definition has a means of building it.**
 The toolchain ships zero types. A grammar declares a vocabulary and
 per-production rules as annotations; the compiler lowers them to a
-`TypeConfig` VALUE (`rantlr-sem::types`); one generic engine derives
+`TypeConfig` VALUE (`qana-sem::types`); one generic engine derives
 type assignment and diagnostics for any language from that data. A
 grammar that declares nothing gets a tier of exactly nothing.
 
@@ -768,9 +769,9 @@ their binding counterparts) — the envelope pattern extended to types.
 Checking is bottom-up synthesis with def→ref chains iterated to a fixed
 point, so declaration order never matters; **unknown never cascades**
 (unresolved names and repaired regions type as nothing rather than
-erroring). Surfaced everywhere the other tiers are: `rantlr types`
+erroring). Surfaced everywhere the other tiers are: `qana types`
 (typed definitions, mismatches on the exact operand, exit 1), a type
-line in `rantlr check`, and live LSP diagnostics that heal on fix —
+line in `qana check`, and live LSP diagnostics that heal on fix —
 including through grammar hot-reload. `compose_types` mirrors
 `compose_binding` for island composition (host ids preserved, guest
 offset, vocabularies merged by name).
@@ -809,7 +810,7 @@ Engine: a static pre-pass collects introduction sites (document order,
 site-keyed), the run vocabulary extends the grammar's atoms, and the
 existing fixpoint machinery needs no change. `compose_types` passes the
 new forms through untouched (they carry no atom ids). New surfaces:
-`rantlr types` splits the vocabulary line; examples/structs/ is a
+`qana types` splits the vocabulary line; examples/structs/ is a
 committed playground (structs + functions + `new`, served by the LSP
 via the BYO-grammar path). Gates: 119 tests — open-vocabulary flow,
 non-type-name diagnosis, nominal-identity-by-site under shadowing,
@@ -967,7 +968,7 @@ import to the access error).
 
 examples/modules/ is the committed playground (lib.ml exports, app.ml
 imports, one alias), drift-gated by the e2e suite include_str'ing it.
-`rantlr check` reports the tier; `rantlr defs` marks pub/private,
+`qana check` reports the tier; `qana defs` marks pub/private,
 shows cross-file arrows, loads sibling files, and exits 1 on access
 errors. Named next steps: module scopes within a file, qualified
 paths, re-exports, visibility levels.
@@ -1014,7 +1015,7 @@ flow, and the LSP wire.
 
 ## The C exerciser + Pager merging (shipped): the wall-finder that paid on turn one
 
-The directive: clone C inside the envelope. The first `rantlr check`
+The directive: clone C inside the envelope. The first `qana check`
 of the C grammar NEVER RETURNED — canonical LR(1) keys states by full
 item sets and explodes on C-sized grammars (the exact reason yacc used
 LALR; Pager/IELR merging was a named P1 deferral, and C called the
@@ -1300,7 +1301,7 @@ bodies with the cpp parenthesization discipline); syntax-aware
 auto-parenthesization is the named v1 refinement the trees make
 possible.
 
-Materialization honors every locked commitment: `rantlr expand`
+Materialization honors every locked commitment: `qana expand`
 writes `<stem>.exp.<ext>` (deterministic naming, write-if-changed)
 plus a sourcemap-style provenance sidecar in which every output byte
 is a COPY — verbatim, from a definition body, or from a use-site
@@ -1308,7 +1309,7 @@ argument — segments tiling the output exactly, composed across
 passes, gated to point home. The materialized file is an ORDINARY
 document: it parses clean and every reference resolves — full editor
 intelligence inside expansion output, the thing `cargo expand` can
-never be. Read-only is enforced the astgen way: `rantlr expand
+never be. Read-only is enforced the astgen way: `qana expand
 --check` fails red on a tampered or stale materialization, and the
 committed `.exp` files are drift-gated in CI.
 
@@ -1338,7 +1339,7 @@ annotation on top of everything already built:
 
   macro coords(f, t) => { origin.f }
   let span: Num = coords!{Point};
-        ⇩  rantlr expand
+        ⇩  qana expand
   let span: Num = origin.x + origin.y;
 
 `@reflect(ty, " + ")` on the splice makes the macro's two parameters
@@ -1493,7 +1494,7 @@ tests.
 
 The prime imperative, stated as an interface. LSP and tree-sitter
 remain supported exports — but they are COMPATIBILITY tiers, and the
-project's own answer is `rantlr_services::paint`: the protocol an
+project's own answer is `qana_services::paint`: the protocol an
 editor built FOR this engine consumes, designed around the two facts
 the architecture guarantees and generic servers cannot. Damage is
 line-bounded and known synchronously (L1/L2), so highlighting can be
@@ -1547,7 +1548,7 @@ The protocol now lives in its own ZERO-DEPENDENCY crate, `limn` (to
 limn: to illuminate a manuscript) — types, modifier bits, wire form,
 and the `Limner` trait an editor widget is generic over. The
 dependency shape is the point: an editor depends on `limn` alone;
-this project depends on `limn` and implements it (`rantlr_rg::live::
+this project depends on `limn` and implements it (`qana_rg::live::
 LiveDoc` — the whole certified pipeline behind one trait object); the
 two meet only at the trait. The first consumer is Synkro's
 `RichCodeArea<L: Limner>` (in the Synkro workspace), whose exerciser
@@ -1556,7 +1557,7 @@ red in the same frame, facts at the cursor from warm tiers.
 
 ## Status
 
-Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 171 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`qana`, `qana-lsp`); 171 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

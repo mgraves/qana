@@ -35,6 +35,80 @@
 //! The wire form is the memory form, little-endian; see
 //! [`encode_lines`]/[`decode_lines`]. Decoding is bounds checks, not
 //! parsing.
+//!
+//! # Both sides of the seam
+//!
+//! An engine implements [`Limner`]; an editor holds one and asks. This
+//! toy engine paints each line's first word as style 0 and marks it a
+//! definition — enough to show the shape without being a real
+//! highlighter.
+//!
+//! ```
+//! use linework::{FactCard, Hint, LineEdit, Limner, Paint, PaintDelta, Run,
+//!                MOD_DEF, STYLE_NONE};
+//!
+//! fn paint_line(line: &str) -> Vec<Run> {
+//!     if line.is_empty() {
+//!         return Vec::new();
+//!     }
+//!     // Byte indices throughout — never char indices.
+//!     let head = line.find(' ').unwrap_or(line.len()) as u16;
+//!     let tail = line.len() as u16 - head;
+//!     let mut runs = vec![Run { len: head, style: 0, mods: MOD_DEF }];
+//!     if tail > 0 {
+//!         runs.push(Run { len: tail, style: STYLE_NONE, mods: 0 });
+//!     }
+//!     runs
+//! }
+//!
+//! #[derive(Default)]
+//! struct FirstWord { rev: u64, text: String }
+//!
+//! impl Limner for FirstWord {
+//!     fn open(&mut self, text: &str) -> Paint {
+//!         self.text = text.to_string();
+//!         self.rev += 1;
+//!         Paint { rev: self.rev, lines: text.lines().map(paint_line).collect() }
+//!     }
+//!
+//!     fn edit(&mut self, edit: &LineEdit) -> PaintDelta {
+//!         self.rev += 1;
+//!         let runs = edit.lines.iter().map(|l| paint_line(l)).collect();
+//!         // Only the spliced window is re-emitted; untouched lines are
+//!         // absent from the delta, not repeated.
+//!         PaintDelta {
+//!             rev: self.rev,
+//!             splice: Some(((edit.start, edit.end), runs)),
+//!             repaints: Vec::new(),
+//!         }
+//!     }
+//!
+//!     fn facts(&mut self, _offset: u32) -> Option<FactCard> { None }
+//!     fn hints(&mut self) -> Vec<Hint> { Vec::new() }
+//!     fn legend(&self) -> Vec<String> { vec!["keyword".to_string()] }
+//!     fn text(&mut self) -> String { self.text.clone() }
+//! }
+//!
+//! // --- the editor side: generic over the trait, blind to the engine ---
+//! fn total_painted_bytes(limner: &mut dyn Limner, src: &str) -> u32 {
+//!     let paint = limner.open(src);
+//!     paint.lines.iter().flatten().map(|r| r.len as u32).sum()
+//! }
+//!
+//! let mut engine = FirstWord::default();
+//! assert_eq!(total_painted_bytes(&mut engine, "let x\nlet y"), 10);
+//!
+//! // An edit returns only what changed.
+//! let delta = engine.edit(&LineEdit {
+//!     start: 1,
+//!     end: 2,
+//!     lines: vec!["let zz".to_string()],
+//! });
+//! assert!(delta.repaints.is_empty());
+//! let (range, lines) = delta.splice.unwrap();
+//! assert_eq!(range, (1, 2));
+//! assert_eq!(lines[0][0].mods, MOD_DEF);
+//! ```
 
 // ---------------------------------------------------------------------------
 // Modifier bits (wave 1)

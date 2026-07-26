@@ -6,3 +6,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "The linework protocol: line-keyed, two-wave code paint and facts — engine-neutral types and the Limner trait binding language intelligence to editors"
+readme = "README.md"
+keywords = ["editor", "syntax-highlighting", "protocol", "lsp", "incremental"]
+categories = ["text-editors", "development-tools"]

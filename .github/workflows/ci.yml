@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The real gate. The workspace has no external services, no network
+  # access, and no platform-specific code, so a green test run here means
+  # the same thing it means locally.
+  test:
+    name: build + test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --workspace --all-targets
+
+      - run: cargo test --workspace
+
+  # Style is reported, not enforced. The tree is not currently rustfmt-clean
+  # and clippy has open lints; making either a hard gate today would turn
+  # every PR red for reasons unrelated to the change under review. Promote
+  # these to blocking once the backlog is cleared.
+  style:
+    name: fmt + clippy (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      - name: clippy
+        continue-on-error: true
+        env:
+          RUSTFLAGS: ""
+        run: cargo clippy --workspace --all-targets

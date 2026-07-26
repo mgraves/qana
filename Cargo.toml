@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Michael Graves <groupmg@gmail.com>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -32,9 +32,9 @@ repository = "https://github.com/mgraves/qana"
 # packaging, so it needs no version and is never published.
 [workspace.dependencies]
 linework = { path = "crates/linework", version = "0.0.2" }
-qana-grammar = { path = "crates/qana-grammar", version = "0.0.1" }
-qana-engine = { path = "crates/qana-engine", version = "0.0.1" }
-qana-sem = { path = "crates/qana-sem", version = "0.0.1" }
-qana-services = { path = "crates/qana-services", version = "0.0.1" }
-qana-lang = { path = "crates/qana-lang", version = "0.0.1" }
+qana-grammar = { path = "crates/qana-grammar", version = "0.0.2" }
+qana-engine = { path = "crates/qana-engine", version = "0.0.2" }
+qana-sem = { path = "crates/qana-sem", version = "0.0.2" }
+qana-services = { path = "crates/qana-services", version = "0.0.2" }
+qana-lang = { path = "crates/qana-lang", version = "0.0.2" }
 qana-lex = { path = "crates/qana-lex" }

@@ -5,7 +5,7 @@ Language server over the qana toolchain, with live grammar hot-reload: edit the 
 Part of the [qana](https://crates.io/crates/qana) language-building toolchain.
 
 ```toml
-qana-lsp = "0.0.1"
+qana-lsp = "0.0.2"
 ```
 
 A language server that serves whatever language a `.qana` file defines.

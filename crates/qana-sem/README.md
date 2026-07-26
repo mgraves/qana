@@ -5,7 +5,7 @@ Semantic layer for qana grammars: declarative name binding, a declared type tier
 Part of the [qana](https://crates.io/crates/qana) language-building toolchain.
 
 ```toml
-qana-sem = "0.0.1"
+qana-sem = "0.0.2"
 ```
 
 Everything above the syntax tree: which names are definitions, which are references,

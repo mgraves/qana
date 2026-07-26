@@ -5,7 +5,7 @@ The .qana grammar language: one file declares tokens, syntax, precedence, highli
 Part of the [qana](https://crates.io/crates/qana) language-building toolchain.
 
 ```toml
-qana-lang = "0.0.1"
+qana-lang = "0.0.2"
 ```
 
 One `.qana` file is a whole language: token patterns, keywords, precedence, productions

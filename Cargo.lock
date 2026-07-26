@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "qana"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "linework",
  "qana-engine",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "qana-cli"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "qana-engine",
  "qana-grammar",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "qana-engine"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "qana-grammar",
  "qana-lex",
@@ -60,11 +60,11 @@ dependencies = [
 
 [[package]]
 name = "qana-grammar"
-version = "0.0.1"
+version = "0.0.2"
 
 [[package]]
 name = "qana-lang"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "linework",
  "qana-engine",
@@ -75,11 +75,11 @@ dependencies = [
 
 [[package]]
 name = "qana-lex"
-version = "0.0.1"
+version = "0.0.2"
 
 [[package]]
 name = "qana-lsp"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "qana-engine",
  "qana-grammar",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "qana-sem"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "qana-engine",
  "qana-grammar",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "qana-services"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "linework",
  "qana-engine",

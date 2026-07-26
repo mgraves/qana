@@ -7,7 +7,7 @@ intelligence, error containment, lossless trees and parallel cold parsing
 counterexamples.
 
 ```toml
-qana = "0.0.1"
+qana = "0.0.2"
 ```
 
 ## The bet
@@ -54,7 +54,7 @@ tree-sitter grammar for editors that don't speak this toolchain at all.
 The layers nest, so name only the highest you need:
 
 ```toml
-qana = { version = "0.0.1", default-features = false, features = ["engine"] }
+qana = { version = "0.0.2", default-features = false, features = ["engine"] }
 ```
 
 `grammar` ⊂ `engine` ⊂ `sem` ⊂ `services` ⊂ `lang` (default).

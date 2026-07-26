@@ -9,7 +9,7 @@ language runtime, or editor.
 
 ```toml
 [dependencies]
-linework = "0.0.1"
+linework = "0.0.2"
 ```
 
 ## What it is for

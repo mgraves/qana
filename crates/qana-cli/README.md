@@ -5,7 +5,7 @@ The qana command: scaffold a language, certify a .qana grammar against the envel
 Part of the [qana](https://crates.io/crates/qana) language-building toolchain.
 
 ```toml
-qana-cli = "0.0.1"
+qana-cli = "0.0.2"
 ```
 
 ```sh

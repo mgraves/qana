@@ -5,7 +5,7 @@ Incremental lexing and parsing over compiled grammars: line-anchored damage trac
 Part of the [qana](https://crates.io/crates/qana) language-building toolchain.
 
 ```toml
-qana-engine = "0.0.1"
+qana-engine = "0.0.2"
 ```
 
 Takes the compiled lexer and tables from `qana-grammar` and runs them incrementally.

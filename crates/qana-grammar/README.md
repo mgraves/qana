@@ -5,7 +5,7 @@ Grammar as a plain value: pattern-to-DFA compilation, canonical LR(1) tables wit
 Part of the [qana](https://crates.io/crates/qana) language-building toolchain.
 
 ```toml
-qana-grammar = "0.0.1"
+qana-grammar = "0.0.2"
 ```
 
 A grammar here is a `Clone + Eq` **value**, not generated code: token patterns, modes,

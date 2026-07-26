@@ -35,8 +35,8 @@ number, no logic of its own. The layers nest, so name only the highest
 one you need.
 
 ```toml
-qana = "0.0.1"                                       # everything
-qana = { version = "0.0.1", default-features = false, features = ["engine"] }
+qana = "0.0.2"                                       # everything
+qana = { version = "0.0.2", default-features = false, features = ["engine"] }
 ```
 
 `grammar` ⊂ `engine` ⊂ `sem` ⊂ `services` ⊂ `lang`. Every crate stays

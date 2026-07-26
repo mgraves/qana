@@ -30,8 +30,8 @@
 //! The layers nest, so name only the highest one you need:
 //!
 //! ```toml
-//! qana = "0.0.1"                                             # everything (default: "lang")
-//! qana = { version = "0.0.1", default-features = false, features = ["engine"] }   # just parsing
+//! qana = "0.0.2"                                             # everything (default: "lang")
+//! qana = { version = "0.0.2", default-features = false, features = ["engine"] }   # just parsing
 //! ```
 //!
 //! `grammar` ⊂ `engine` ⊂ `sem` ⊂ `services` ⊂ `lang`.

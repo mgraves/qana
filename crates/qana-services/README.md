@@ -5,7 +5,7 @@ Editor services derived from a grammar: semantic tokens with LSP deltas, folding
 Part of the [qana](https://crates.io/crates/qana) language-building toolchain.
 
 ```toml
-qana-services = "0.0.1"
+qana-services = "0.0.2"
 ```
 
 The services an editor asks for, none of them hand-written per language.

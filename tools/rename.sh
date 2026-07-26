@@ -170,12 +170,14 @@ DIRSENT=$'\001RENAME_DIR_SENTINEL\001'
 build_perl_program() {
   cat <<PERL
     # -- 0. stash cross-repo path references behind a sentinel -------------
-    #    Any `../<old>/` is a reference to the DIRECTORY this repo lives
-    #    in, which is a separate choice from the project name (--keep-dir).
-    #    Matching only `<old>/crates/` was too narrow: Synkro's exerciser
-    #    reaches in via `../../../../../<old>/examples/` for an
-    #    include_str!, and that path is invisible to `cargo metadata`, so
-    #    a manifest-only check will not catch it.
+    #    Any ../OLD/ is a reference to the DIRECTORY this repo lives in,
+    #    which is a separate choice from the project name (--keep-dir).
+    #    Matching only OLD/crates/ was too narrow: Synkro's exerciser
+    #    reaches in via ../../../../../OLD/examples/ for an include_str!,
+    #    and that path is invisible to cargo metadata, so a manifest-only
+    #    check will not catch it.
+    #    (No backticks in this heredoc — it is unquoted, so backticks are
+    #    command substitution and the shell would try to RUN the comment.)
     s{\.\./\Q$OLD\E/}{../${DIRSENT}/}g;
 
     # -- 1. compound forms, longest-separator-first ------------------------

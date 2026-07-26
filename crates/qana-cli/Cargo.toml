@@ -1,6 +1,6 @@
 [package]
 name = "qana-cli"
-version = "0.0.1"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,8 +11,8 @@ name = "qana"
 path = "src/main.rs"
 
 [dependencies]
-qana-lang = { path = "../qana-lang" }
-qana-grammar = { path = "../qana-grammar" }
-qana-engine = { path = "../qana-engine" }
-qana-services = { path = "../qana-services" }
-qana-sem = { path = "../qana-sem" }
+qana-lang.workspace = true
+qana-grammar.workspace = true
+qana-engine.workspace = true
+qana-services.workspace = true
+qana-sem.workspace = true

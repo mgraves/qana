@@ -28,6 +28,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "qana"
+version = "0.0.1"
+dependencies = [
+ "linework",
+ "qana-engine",
+ "qana-grammar",
+ "qana-lang",
+ "qana-sem",
+ "qana-services",
+]
+
+[[package]]
 name = "qana-cli"
 version = "0.0.1"
 dependencies = [

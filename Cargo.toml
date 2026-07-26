@@ -1,8 +1,39 @@
 [workspace]
 resolver = "2"
-members = ["crates/linework", "crates/qana-lex", "crates/qana-grammar", "crates/qana-engine", "crates/qana-services", "crates/qana-lsp", "crates/qana-sem", "crates/qana-lang", "crates/qana-cli"]
+members = [
+    "crates/linework",
+    "crates/qana-lex",
+    "crates/qana-grammar",
+    "crates/qana-engine",
+    "crates/qana-services",
+    "crates/qana-lsp",
+    "crates/qana-sem",
+    "crates/qana-lang",
+    "crates/qana",
+    "crates/qana-cli",
+]
 
 [workspace.package]
+version = "0.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mgraves/qana"
+
+# Internal crates carry BOTH a path and a version. The path is what the
+# workspace builds against; the version is what cargo writes into the
+# published manifest, and `cargo publish` refuses a dependency without
+# one ("all dependencies must have a version requirement specified").
+# Declaring them here means a release bumps one number, not ten.
+#
+# qana-lex is the exception: it is a dev-dependency only — the frozen
+# hand-written lexer that crates/qana-engine's equivalence test measures
+# the generated one against. Cargo strips path-only dev-dependencies when
+# packaging, so it needs no version and is never published.
+[workspace.dependencies]
+linework = { path = "crates/linework", version = "0.0.1" }
+qana-grammar = { path = "crates/qana-grammar", version = "0.0.1" }
+qana-engine = { path = "crates/qana-engine", version = "0.0.1" }
+qana-sem = { path = "crates/qana-sem", version = "0.0.1" }
+qana-services = { path = "crates/qana-services", version = "0.0.1" }
+qana-lang = { path = "crates/qana-lang", version = "0.0.1" }
+qana-lex = { path = "crates/qana-lex" }

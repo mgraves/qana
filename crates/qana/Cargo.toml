@@ -1,0 +1,38 @@
+[package]
+name = "qana"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A language-building toolchain: grammars inside its language-shape envelope get incremental parsing, editor intelligence, error containment and lossless trees by construction, or are refused with counterexamples"
+keywords = ["parser", "incremental", "grammar", "lsp", "language"]
+categories = ["parsing", "development-tools"]
+
+# The layers nest, because the crates do: services cannot work without
+# sem, sem cannot work without engine, and so on down to grammar, which
+# depends on nothing. So each feature enables the one below it and a
+# consumer names only the highest layer they need.
+#
+# `linework` rides with `services` rather than standing alone: it is the
+# editor-facing half of what services produces, and wanting one without
+# the other has no meaning. It remains a separate crate with no
+# dependency on qana, so an editor can depend on it ALONE — that is the
+# point of it, and the reason it is not called `qana-editor`.
+[features]
+default = ["lang"]
+grammar = ["dep:qana-grammar"]
+engine = ["grammar", "dep:qana-engine"]
+sem = ["engine", "dep:qana-sem"]
+services = ["sem", "dep:qana-services", "dep:linework"]
+lang = ["services", "dep:qana-lang"]
+
+[dependencies]
+qana-grammar = { workspace = true, optional = true }
+qana-engine = { workspace = true, optional = true }
+qana-sem = { workspace = true, optional = true }
+qana-services = { workspace = true, optional = true }
+qana-lang = { workspace = true, optional = true }
+linework = { workspace = true, optional = true }
+
+[package.metadata.docs.rs]
+all-features = true

@@ -1,16 +1,16 @@
 [package]
 name = "qana-engine"
-version = "0.0.1"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "P1: generic incremental line-lexing engine + block skeleton, parameterized by compiled grammars"
 
 [dependencies]
-qana-grammar = { path = "../qana-grammar" }
+qana-grammar.workspace = true
 
 [dev-dependencies]
-qana-lex = { path = "../qana-lex" }
+qana-lex.workspace = true
 
 [[bin]]
 name = "p1bench"

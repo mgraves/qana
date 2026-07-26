@@ -28,6 +28,30 @@ syntax, highlighting, outline, and name binding. `check` certifies it
 against the envelope and prints the certificate — or refuses it with a
 counterexample. Everything else is derived.
 
+### As a library
+
+The `qana` crate is a facade over the family: one namespace, one version
+number, no logic of its own. The layers nest, so name only the highest
+one you need.
+
+```toml
+qana = "0.0.1"                                       # everything
+qana = { version = "0.0.1", default-features = false, features = ["engine"] }
+```
+
+`grammar` ⊂ `engine` ⊂ `sem` ⊂ `services` ⊂ `lang`. Every crate stays
+independently usable — depend on them directly for a narrower tree than
+the features give you.
+
+The CLI is a separate crate (`cargo install qana-cli`) so that the
+library never drags an argument parser into your dependency tree. And
+`linework`, the editor protocol, depends on nothing at all — an editor
+can depend on it alone, ignorant of whatever engine sits behind the
+`Limner` it holds.
+
+Nothing is published to crates.io yet, so use a path or git dependency
+until it is.
+
 * **[docs/GUIDE.md](docs/GUIDE.md)** — the user guide: your own language in
   ten minutes, the editor path, embedding, and an honest list of what is
   not built yet.

@@ -1,10 +1,11 @@
 [package]
 name = "qana-lex"
-version = "0.0.1"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "P0 spike: line-anchored incremental lexing, block skeleton, lossless reproduction (envelope commitments L1/L2)"
+publish = false
 
 [dependencies]
 # Deliberately zero dependencies: the spike proves the contracts with std only.

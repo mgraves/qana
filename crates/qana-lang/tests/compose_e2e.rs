@@ -8,7 +8,7 @@
 use qana_engine::{IncSession, Line, LineEdit, LineTerm};
 use qana_grammar::green::semantic_eq;
 use qana_grammar::GreenNode;
-use qana_lang::{chartlang_with_rg_islands, ComposedToolchain};
+use qana_lang::{chartlang_with_qana_islands, ComposedToolchain};
 use qana_sem::SemDb;
 
 fn doc() -> String {
@@ -50,7 +50,7 @@ fn find_prod<'g>(n: &'g GreenNode, prod: u16) -> Option<&'g GreenNode> {
 fn product_certifies_and_parses_composed_documents_losslessly() {
     // Certification (L1/L2 lints + zero LR conflicts on the PRODUCT)
     // happens inside the constructor — the composition theorem, checked.
-    let tc = chartlang_with_rg_islands();
+    let tc = chartlang_with_qana_islands();
     let src = doc();
     let s = IncSession::new(&tc.lexer, &tc.sg, &tc.tables, &src).unwrap();
     assert!(s.last_repairs.is_empty(), "composed doc parses cleanly: {:?}", s.last_repairs);
@@ -90,7 +90,7 @@ fn product_certifies_and_parses_composed_documents_losslessly() {
 
 #[test]
 fn island_edits_hold_the_gate_and_reuse_the_host() {
-    let tc = chartlang_with_rg_islands();
+    let tc = chartlang_with_qana_islands();
     // A larger composed doc: host statements around a sizable island.
     let mut src = String::new();
     for i in 0..120 {
@@ -147,7 +147,7 @@ fn island_edits_hold_the_gate_and_reuse_the_host() {
 
 #[test]
 fn fence_damage_recovers_and_heals() {
-    let tc = chartlang_with_rg_islands();
+    let tc = chartlang_with_qana_islands();
     let src = doc();
     let mut s = IncSession::new(&tc.lexer, &tc.sg, &tc.tables, &src).unwrap();
     let close_line = src.lines().position(|l| l == "```").unwrap();
@@ -180,7 +180,7 @@ fn fence_damage_recovers_and_heals() {
 
 #[test]
 fn host_semantics_flow_around_islands_even_broken_ones() {
-    let tc = chartlang_with_rg_islands();
+    let tc = chartlang_with_qana_islands();
     // Garbage INSIDE the island; host defs before and after.
     let src = "let before = 1;\n```qana\n%%% utter garbage (((\n```\nlet after = before;\nemit(after, 1);\n";
     let s = IncSession::new(&tc.lexer, &tc.sg, &tc.tables, src).unwrap();
@@ -211,7 +211,7 @@ fn host_semantics_flow_around_islands_even_broken_ones() {
 /// and the seal holds in both directions.
 #[test]
 fn island_intellisense_resolves_within_and_never_across() {
-    let tc = chartlang_with_rg_islands();
+    let tc = chartlang_with_qana_islands();
     let src = "\
 let shared = 1;\n\
 ```qana\n\
@@ -273,7 +273,7 @@ emit(missing_host, 1);\n";
 /// diagnosed, never a silent cross-language jump.
 #[test]
 fn guest_refs_never_leak_to_host_bindings() {
-    let tc = chartlang_with_rg_islands();
+    let tc = chartlang_with_qana_islands();
     let src = "let tempting = 1;\n```qana\nrule file = File: tempting\n```\n";
     let s = IncSession::new(&tc.lexer, &tc.sg, &tc.tables, src).unwrap();
     assert!(s.last_repairs.is_empty());
@@ -297,7 +297,7 @@ fn guest_refs_never_leak_to_host_bindings() {
 /// perfectly good rule name in embedded .qana.
 #[test]
 fn keyword_spaces_stay_separate_across_the_boundary() {
-    let tc = chartlang_with_rg_islands();
+    let tc = chartlang_with_qana_islands();
     let src = "let x = 1;\n```qana\ntoken A = \"a\"\nrule let = IfRule: A\n```\nlet y = x;\n";
     let s = IncSession::new(&tc.lexer, &tc.sg, &tc.tables, src).unwrap();
     assert!(

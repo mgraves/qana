@@ -319,7 +319,7 @@ fn qana_documents_get_grammar_services() {
 /// are refused with span-accurate counterexamples on the grammar file,
 /// and the old pipeline stays live.
 #[test]
-fn hot_reload_from_rg_grammar_file() {
+fn hot_reload_from_qana_grammar_file() {
     let dir = std::env::temp_dir().join(format!("qana-lsp-qana-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("chartlang.qana");

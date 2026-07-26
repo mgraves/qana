@@ -11,7 +11,7 @@ const SL_RG: &str = include_str!("../../../examples/structs/structlang.qana");
 const SL_DEMO: &str = include_str!("../../../examples/structs/demo.sl");
 
 fn limner() -> Box<dyn Limner> {
-    let lang = Arc::new(EmbeddedLang::from_rg_source(SL_RG).expect("certifies"));
+    let lang = Arc::new(EmbeddedLang::from_qana_source(SL_RG).expect("certifies"));
     Box::new(LiveDoc::open(lang, "demo.sl", SL_DEMO))
 }
 

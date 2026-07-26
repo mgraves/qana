@@ -68,7 +68,7 @@ fn self_host_fixed_point() {
 }
 
 #[test]
-fn chartlang_rg_matches_demo() {
+fn chartlang_qana_matches_demo() {
     let tc = QanaToolchain::new();
     let out = compile_source(&tc, CHARTLANG_RG);
     assert!(out.repairs.is_empty(), "chartlang.qana parses cleanly: {:?}", out.repairs);

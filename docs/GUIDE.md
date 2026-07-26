@@ -432,7 +432,7 @@ hands back a ready pipeline, in process, with no LSP hop:
 ```rust
 use qana_lang::EmbeddedLang;
 
-let lang = EmbeddedLang::from_rg_source(include_str!("mylang.qana"))?;
+let lang = EmbeddedLang::from_qana_source(include_str!("mylang.qana"))?;
 let mut session = lang.session("let x = 1;\n");
 let tree = session.tree().expect("parsing is total");
 ```

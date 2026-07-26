@@ -208,8 +208,18 @@ build_ext_program() { # $1 = home | foreign  (default home)
   # package name `<name>-rg` matches `\brg\b` (hyphen is a boundary) but
   # the Rust module path `<name>_rg` does not, and renaming one without
   # the other unlinks the crate.
+  # The extension literal. At home, any `.rg` is ours. Abroad it is not:
+  # in WGSL and GLSL `.rg` is a SWIZZLE selecting the red and green
+  # channels, so `textureSample(...).rg` is not a filename. A foreign repo
+  # only ever names a grammar file through a path, so require a preceding
+  # slash there — `.../structlang.rg` matches, `).rg` and `color.rg` do
+  # not. (`.rgb` was never at risk: \b needs a boundary after `rg`.)
+  if [ "${1:-home}" = home ]; then
+    printf '    s{\\.rg\\b}{.%s}g;\n' "$EXT_LOWER"
+  else
+    printf '    s{(?<=/)([\\w.-]+)\\.rg\\b}{$1.%s}g;\n' "$EXT_LOWER"
+  fi
   cat <<PERL
-    s{\\.rg\b}{.${EXT_LOWER}}g;
     s{_rg\b}{_${EXT_LOWER}}g;
     s{_rg_}{_${EXT_LOWER}_}g;
     s{\bRg(?![a-z])}{${EXT_CAMEL}}g;

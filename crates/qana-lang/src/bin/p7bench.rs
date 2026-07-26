@@ -6,7 +6,7 @@
 //! product like any other envelope language.
 
 use qana_engine::{IncSession, Line, LineEdit, LineTerm};
-use qana_lang::chartlang_with_rg_islands;
+use qana_lang::chartlang_with_qana_islands;
 use std::time::{Duration, Instant};
 
 fn time<R>(f: impl FnOnce() -> R) -> (R, Duration) {
@@ -30,7 +30,7 @@ fn main() {
     println!("qana P7 — composition tier (chartlang ⊃ qana islands)");
     println!("=====================================================");
 
-    let (tc, d) = time(chartlang_with_rg_islands);
+    let (tc, d) = time(chartlang_with_qana_islands);
     println!(
         "compose + certify product:   {:>10}   ({} tokens, {} prods, {} states)",
         fmt_dur(d),

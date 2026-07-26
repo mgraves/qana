@@ -81,7 +81,7 @@ pub struct EmbeddedLang {
 impl EmbeddedLang {
     /// Compile + certify a `.qana` grammar source. Refusals come back as
     /// span-carrying diagnostics against the grammar text.
-    pub fn from_rg_source(src: &str) -> Result<Self, Vec<QanaDiag>> {
+    pub fn from_qana_source(src: &str) -> Result<Self, Vec<QanaDiag>> {
         let tc = QanaToolchain::new();
         let out = compile_source(&tc, src);
         let mut diags = out.diags.clone();
@@ -145,7 +145,7 @@ pub struct ComposedToolchain {
     pub map: qana_grammar::ComposeMap,
 }
 
-pub fn chartlang_with_rg_islands() -> ComposedToolchain {
+pub fn chartlang_with_qana_islands() -> ComposedToolchain {
     use qana_grammar::demo::{demo_grammar, demo_syn_grammar};
     let (host_lex, host_ids) = demo_grammar();
     let host_lexer = CompiledLexer::build(&host_lex).expect("host in envelope");

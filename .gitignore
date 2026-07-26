@@ -1,3 +1,7 @@
 /target
 .DS_Store
 /scratchpad
+
+# Editor and tool state. Local to whoever is working, never shared.
+/.idea/
+/.claude/settings.local.json

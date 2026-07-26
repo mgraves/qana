@@ -199,7 +199,7 @@ build_perl_program() {
 PERL
 }
 
-build_ext_program() {
+build_ext_program() { # $1 = home | foreign  (default home)
   [ -n "$EXT" ] || return 0
   # These stay anchored, unlike the name rules: `rg` is two characters, and
   # an unanchored `s{rg}{zg}` would turn "large" into "lazge" and "merge"
@@ -211,11 +211,21 @@ build_ext_program() {
   cat <<PERL
     s{\\.rg\b}{.${EXT_LOWER}}g;
     s{_rg\b}{_${EXT_LOWER}}g;
-    s{\bRg}{${EXT_CAMEL}}g;
+    s{_rg_}{_${EXT_LOWER}_}g;
+    s{\bRg(?![a-z])}{${EXT_CAMEL}}g;
     s{\brg_}{${EXT_LOWER}_}g;
     s{\brg2}{${EXT_LOWER}2}g;
-    s{\brg\b}{${EXT_LOWER}}g;
 PERL
+  # The bare-word rule runs in THIS repo only. Everywhere else `rg` is far
+  # more likely to be ripgrep in a shell example than this project's
+  # grammar extension: Synkro's docs carry `rg "YourPattern"` and
+  # `rg -c DEBUG`, and rewriting those yields a command that does not
+  # exist. A foreign repo only ever names the extension through a path
+  # literal or an exported identifier, and the anchored rules above cover
+  # both.
+  if [ "${1:-home}" = home ]; then
+    printf '    s{\\brg\\b}{%s}g;\n' "$EXT_LOWER"
+  fi
 }
 
 build_limn_program() {
@@ -238,7 +248,8 @@ build_limn_program() {
 PERL
 }
 
-PROGRAM="$(build_perl_program)$(build_ext_program)$(build_limn_program)"
+PROGRAM_HOME="$(build_perl_program)$(build_ext_program home)$(build_limn_program)"
+PROGRAM_FOREIGN="$(build_perl_program)$(build_ext_program foreign)$(build_limn_program)"
 
 # ---------------------------------------------------------------------------
 # Dry run: report, change nothing
@@ -306,8 +317,8 @@ check_clean "$HERE"
 # shifted bytes. Excluded from both the rewrite and the audit.
 SELF_REL="tools/$(basename "$0")"
 
-rewrite_repo() { # $1 = repo
-  local repo="$1" n=0
+rewrite_repo() { # $1 = repo, $2 = perl program
+  local repo="$1" PROGRAM="$2" n=0
   # `git grep -Il ''` lists every tracked file git considers text —
   # binaries are excluded automatically, so no extension allowlist to
   # keep in sync.
@@ -382,8 +393,8 @@ rename_grammar_files() { # $1 = repo
 }
 
 note "1/5  rewriting file contents"
-rewrite_repo "$HERE"
-[ "$HAVE_SYNKRO" = 1 ] && rewrite_repo "$SYNKRO"
+rewrite_repo "$HERE" "$PROGRAM_HOME"
+[ "$HAVE_SYNKRO" = 1 ] && rewrite_repo "$SYNKRO" "$PROGRAM_FOREIGN"
 
 note "2/5  moving directories"
 move_dirs "$HERE"

@@ -1543,6 +1543,17 @@ incrementality and a cached symbol table (today's wave-1 cost is
 dominated by whole-table rebuilds), richer facet bits, and wiring the
 Synkro adapter to consume paint directly.
 
+The protocol now lives in its own ZERO-DEPENDENCY crate, `limn` (to
+limn: to illuminate a manuscript) — types, modifier bits, wire form,
+and the `Limner` trait an editor widget is generic over. The
+dependency shape is the point: an editor depends on `limn` alone;
+this project depends on `limn` and implements it (`rantlr_rg::live::
+LiveDoc` — the whole certified pipeline behind one trait object); the
+two meet only at the trait. The first consumer is Synkro's
+`RichCodeArea<L: Limner>` (in the Synkro workspace), whose exerciser
+edits structlang live: colors with the keystroke, unresolved names
+red in the same frame, facts at the cursor from warm tiers.
+
 ## Status
 
 Eight crates + two binaries (`rantlr`, `rantlr-lsp`); 171 tests (`cargo test --workspace`); the full story runs:

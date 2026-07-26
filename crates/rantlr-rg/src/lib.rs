@@ -63,6 +63,7 @@ pub struct RgOutcome {
 /// LSP hop. Owns its certified pipeline with `'static` lifetimes (one
 /// bounded leak per grammar load, the same deliberate pattern the LSP
 /// server uses; grammar loads are rare and small).
+#[derive(Clone)]
 pub struct EmbeddedLang {
     pub lexer: &'static CompiledLexer,
     pub sg: &'static SynGrammar,

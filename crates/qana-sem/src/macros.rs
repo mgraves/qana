@@ -18,7 +18,7 @@
 //!
 //! One pass expands outermost uses only; uses inside macro BODIES are
 //! never expanded at the definition (they expand after splicing, at
-//! use sites) — the fixpoint driver in `qana-rg` re-parses and
+//! use sites) — the fixpoint driver in `qana-lang` re-parses and
 //! re-binds each pass's output, which is what makes expansion "the
 //! same engine, run again", and gives generated text full editor
 //! intelligence for free. Every output byte carries PROVENANCE: a

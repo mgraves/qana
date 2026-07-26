@@ -3,7 +3,7 @@
 
 use qana_grammar::astgen::generate_with_paths;
 use qana_grammar::{build_lr, CompiledLexer};
-use qana_rg::bootstrap::{rg_lex_grammar, rg_syn_grammar};
+use qana_lang::bootstrap::{rg_lex_grammar, rg_syn_grammar};
 
 #[test]
 fn generated_rg_ast_is_current() {
@@ -15,6 +15,6 @@ fn generated_rg_ast_is_current() {
     assert_eq!(
         include_str!("../src/rg_ast.rs"),
         want,
-        "regenerate: cargo run -p qana-rg --bin rg_astgen > crates/qana-rg/src/rg_ast.rs"
+        "regenerate: cargo run -p qana-lang --bin rg_astgen > crates/qana-lang/src/rg_ast.rs"
     );
 }

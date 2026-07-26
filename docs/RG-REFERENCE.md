@@ -3,7 +3,7 @@
 A `.rg` file is a complete language definition: lexical structure,
 syntax, precedence, highlighting, outline, and name binding. It is
 parsed and compiled by the same toolchain it describes — the surface is
-[self-hosted](../crates/qana-rg/rg.rg), and `rg.rg` compiled by the
+[self-hosted](../crates/qana-lang/rg.rg), and `rg.rg` compiled by the
 bootstrap must reproduce the bootstrap exactly.
 
 For the practical path, start with the [guide](GUIDE.md).

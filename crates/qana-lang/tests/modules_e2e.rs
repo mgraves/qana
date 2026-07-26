@@ -9,8 +9,8 @@
 //! (examples/modules/modlang.rg), so the example drift-gates itself.
 
 use qana_engine::{IncSession, Line, LineEdit};
-use qana_rg::compile::certify;
-use qana_rg::{compile_source, RgToolchain};
+use qana_lang::compile::certify;
+use qana_lang::{compile_source, RgToolchain};
 use qana_sem::SemDb;
 
 const MODLANG: &str = include_str!("../../../examples/modules/modlang.rg");
@@ -21,7 +21,7 @@ struct World {
     lexer: qana_grammar::CompiledLexer,
     sg: qana_grammar::SynGrammar,
     tables: qana_grammar::LrTables,
-    def: qana_rg::compile::LangDef,
+    def: qana_lang::compile::LangDef,
 }
 
 fn world() -> World {

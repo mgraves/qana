@@ -5,8 +5,8 @@
 //! interface an editor built for the engine consumes.
 
 use qana_engine::{IncSession, Line, LineEdit};
-use qana_rg::compile::certify;
-use qana_rg::{compile_source, RgToolchain};
+use qana_lang::compile::certify;
+use qana_lang::{compile_source, RgToolchain};
 use qana_sem::SemDb;
 use qana_services::paint::{
     decode_lines, encode_lines, facts_at, type_hints, Painter, MOD_DEF, MOD_FOREIGN, MOD_PUBLIC,
@@ -18,7 +18,7 @@ const C_DEMO: &str = include_str!("../../../examples/c/demo.c");
 const SL_RG: &str = include_str!("../../../examples/structs/structlang.rg");
 const SL_DEMO: &str = include_str!("../../../examples/structs/demo.sl");
 
-fn c_world() -> (qana_grammar::CompiledLexer, qana_rg::compile::LangDef, qana_grammar::LrTables)
+fn c_world() -> (qana_grammar::CompiledLexer, qana_lang::compile::LangDef, qana_grammar::LrTables)
 {
     let tc = RgToolchain::new();
     let out = compile_source(&tc, C_RG);

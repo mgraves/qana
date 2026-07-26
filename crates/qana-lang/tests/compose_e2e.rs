@@ -8,7 +8,7 @@
 use qana_engine::{IncSession, Line, LineEdit, LineTerm};
 use qana_grammar::green::semantic_eq;
 use qana_grammar::GreenNode;
-use qana_rg::{chartlang_with_rg_islands, ComposedToolchain};
+use qana_lang::{chartlang_with_rg_islands, ComposedToolchain};
 use qana_sem::SemDb;
 
 fn doc() -> String {

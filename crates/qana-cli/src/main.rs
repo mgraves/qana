@@ -24,9 +24,9 @@ use render::{bold, cyan, dim, green, red, Src, TreeOpts};
 use qana_engine::{IncSession, Line, LineEdit};
 use qana_grammar::astgen::generate_with_paths;
 use qana_grammar::{CompiledLexer, LrTables};
-use qana_rg::compile::{certify, compile, LangDef, RgDiag};
-use qana_rg::tsgen::emit_tree_sitter;
-use qana_rg::RgToolchain;
+use qana_lang::compile::{certify, compile, LangDef, RgDiag};
+use qana_lang::tsgen::emit_tree_sitter;
+use qana_lang::RgToolchain;
 use qana_sem::SemDb;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Instant;
@@ -658,7 +658,7 @@ fn cmd_expand(args: &Args) {
         }
     }
     siblings.sort();
-    let out = qana_rg::expand::expand_document(
+    let out = qana_lang::expand::expand_document(
         &lang.lexer,
         &lang.def,
         &lang.tables,
@@ -694,7 +694,7 @@ fn cmd_expand(args: &Args) {
         "{}.prov.json",
         exp_path.file_name().and_then(|s| s.to_str()).unwrap()
     ));
-    let prov = qana_rg::expand::provenance_json(doc_path, &src, &out);
+    let prov = qana_lang::expand::provenance_json(doc_path, &src, &out);
 
     if args.has("print") {
         print!("{}", out.text);

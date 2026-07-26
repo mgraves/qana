@@ -3,16 +3,16 @@
 //! pinned. The committed examples/macrolang is the exerciser.
 
 use qana_engine::IncSession;
-use qana_rg::compile::certify;
-use qana_rg::expand::expand_document;
-use qana_rg::{compile_source, RgToolchain};
+use qana_lang::compile::certify;
+use qana_lang::expand::expand_document;
+use qana_lang::{compile_source, RgToolchain};
 use qana_sem::macros::{tiles, SegKind};
 use qana_sem::SemDb;
 
 const MAC_RG: &str = include_str!("../../../examples/macrolang/mac.rg");
 const DEMO: &str = include_str!("../../../examples/macrolang/demo.mac");
 
-fn world() -> (qana_grammar::CompiledLexer, qana_rg::compile::LangDef, qana_grammar::LrTables)
+fn world() -> (qana_grammar::CompiledLexer, qana_lang::compile::LangDef, qana_grammar::LrTables)
 {
     let tc = RgToolchain::new();
     let out = compile_source(&tc, MAC_RG);

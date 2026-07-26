@@ -10,7 +10,7 @@ name = "qana"
 path = "src/main.rs"
 
 [dependencies]
-qana-rg = { path = "../qana-rg" }
+qana-lang = { path = "../qana-lang" }
 qana-grammar = { path = "../qana-grammar" }
 qana-engine = { path = "../qana-engine" }
 qana-services = { path = "../qana-services" }

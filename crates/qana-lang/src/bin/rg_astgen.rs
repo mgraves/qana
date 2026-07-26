@@ -1,9 +1,9 @@
 //! Regenerate the `.rg` typed AST:
-//!   cargo run -p qana-rg --bin rg_astgen > crates/qana-rg/src/rg_ast.rs
+//!   cargo run -p qana-lang --bin rg_astgen > crates/qana-lang/src/rg_ast.rs
 
 use qana_grammar::astgen::generate_with_paths;
 use qana_grammar::{build_lr, CompiledLexer};
-use qana_rg::bootstrap::{rg_lex_grammar, rg_syn_grammar};
+use qana_lang::bootstrap::{rg_lex_grammar, rg_syn_grammar};
 
 fn main() {
     let (g, ids) = rg_lex_grammar();

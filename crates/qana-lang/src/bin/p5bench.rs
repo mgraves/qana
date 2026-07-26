@@ -6,8 +6,8 @@
 //! language.
 
 use qana_engine::{IncSession, Line, LineEdit, LineTerm};
-use qana_rg::compile::{certify, compile};
-use qana_rg::{compile_source, RgToolchain};
+use qana_lang::compile::{certify, compile};
+use qana_lang::{compile_source, RgToolchain};
 use std::time::{Duration, Instant};
 
 fn time<R>(f: impl FnOnce() -> R) -> (R, Duration) {

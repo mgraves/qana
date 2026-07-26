@@ -1,6 +1,6 @@
 //! Type-tier infrastructure numbers: memoized per-item checking.
 //!
-//!   cargo run --release -p qana-rg --bin p8bench
+//!   cargo run --release -p qana-lang --bin p8bench
 //!
 //! Scenarios over an N-item document: cold derivation, a BODY edit
 //! (types unchanged — the keystroke case), and a SIGNATURE edit (a
@@ -8,8 +8,8 @@
 //! counters that prove which path ran.
 
 use qana_engine::{IncSession, Line, LineEdit};
-use qana_rg::compile::certify;
-use qana_rg::{compile_source, RgToolchain};
+use qana_lang::compile::certify;
+use qana_lang::{compile_source, RgToolchain};
 use qana_sem::SemDb;
 use std::time::Instant;
 

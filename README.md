@@ -418,7 +418,7 @@ next granularity); `names_in_scope` is demo-grade positional.
 
 ## P5 — increment 1 (shipped): the `.rg` textual grammar surface, self-hosted
 
-`crates/qana-rg` is the textual surface: a `.rg` file declares the
+`crates/qana-lang` is the textual surface: a `.rg` file declares the
 ENTIRE language — tokens (`/regex/` or `"literal"` patterns), modes,
 `keywords` (specialization), bracket `pair`s, `prec` lines, labeled
 productions, and the editor annotations (`@style`, `@def/@ref/@scope`,
@@ -521,7 +521,7 @@ cheaper); text → certified pipeline still under 2 ms.
 
 ## P5 — increment 3 (shipped): tree-sitter grammar emission
 
-`qana_rg::tsgen` + the `rg2ts` binary emit a tree-sitter
+`qana_lang::tsgen` + the `rg2ts` binary emit a tree-sitter
 `grammar.js` and `queries/highlights.scm` from any envelope-certified
 grammar — the "derived artifact" of the original feasibility report:
 one definition also reaches every tree-sitter-native surface (Neovim,
@@ -1548,7 +1548,7 @@ The protocol now lives in its own ZERO-DEPENDENCY crate, `limn` (to
 limn: to illuminate a manuscript) — types, modifier bits, wire form,
 and the `Limner` trait an editor widget is generic over. The
 dependency shape is the point: an editor depends on `limn` alone;
-this project depends on `limn` and implements it (`qana_rg::live::
+this project depends on `limn` and implements it (`qana_lang::live::
 LiveDoc` — the whole certified pipeline behind one trait object); the
 two meet only at the trait. The first consumer is Synkro's
 `RichCodeArea<L: Limner>` (in the Synkro workspace), whose exerciser

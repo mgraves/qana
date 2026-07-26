@@ -15,10 +15,10 @@ use qana_engine::{IncSession, Line, LineEdit, LineTerm};
 use qana_grammar::demo::{demo_grammar, demo_syn_grammar};
 use qana_grammar::green::semantic_eq;
 use qana_grammar::{build_lr, CompiledLexer};
-use qana_rg::compile::{
+use qana_lang::compile::{
     certify, dump_binding, dump_lex, dump_outline, dump_styles, dump_syn, dump_tables,
 };
-use qana_rg::{
+use qana_lang::{
     compile_source, rg_binding_config, rg_outline_config, rg_styles, RgToolchain,
 };
 use qana_sem::{demo_binding_config, SemDb};
@@ -35,7 +35,7 @@ fn self_host_fixed_point() {
     assert!(out.diags.is_empty(), "rg.rg compiles cleanly: {:?}", out.diags);
 
     // The grammar rg.rg describes IS the bootstrap that parsed it.
-    let (boot_lex, boot_ids) = qana_rg::bootstrap::rg_lex_grammar();
+    let (boot_lex, boot_ids) = qana_lang::bootstrap::rg_lex_grammar();
     assert_eq!(dump_lex(&out.def.lex), dump_lex(&boot_lex), "lexical fixed point");
     assert_eq!(dump_syn(&out.def.sg), dump_syn(&tc.sg), "syntactic fixed point");
     assert_eq!(out.def.lex, boot_lex, "structural equality, not just dump equality");
@@ -244,8 +244,8 @@ fn sugar_equals_handwritten_desugaring() {
         assert!(a.diags.is_empty(), "{:?}", a.diags);
         assert!(b.diags.is_empty(), "{:?}", b.diags);
         assert_eq!(
-            qana_rg::compile::dump_syn(&a.def.sg),
-            qana_rg::compile::dump_syn(&b.def.sg),
+            qana_lang::compile::dump_syn(&a.def.sg),
+            qana_lang::compile::dump_syn(&b.def.sg),
             "sugar ≡ hand-written desugaring"
         );
         let (_, ta) = certify(&a.def).unwrap();

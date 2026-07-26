@@ -4,8 +4,8 @@
 //! committed demo parses losslessly with every reference resolving.
 
 use qana_engine::IncSession;
-use qana_rg::compile::certify;
-use qana_rg::{compile_source, RgToolchain};
+use qana_lang::compile::certify;
+use qana_lang::{compile_source, RgToolchain};
 use qana_sem::SemDb;
 
 const C_RG: &str = include_str!("../../../examples/c/c.rg");
@@ -435,7 +435,7 @@ int use_it(void) { return LIMIT; }\n";
     assert_eq!(unres, ["TWICE"], "fn-like names await the meta tier");
 }
 
-use qana_rg::expand::expand_document;
+use qana_lang::expand::expand_document;
 
 /// The META tier reaches C: object-like #define is a declared macro
 /// (`@macro(body)` on PpDefine), and code references OPEN at @splice

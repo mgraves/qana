@@ -1,7 +1,7 @@
 // rg.rg — the .rg grammar surface, described in itself.
 //
 // This file is the self-hosting fixed point: parsed by the bootstrap
-// grammar (crates/qana-rg/src/bootstrap.rs) and compiled, it must
+// grammar (crates/qana-lang/src/bootstrap.rs) and compiled, it must
 // reproduce that bootstrap EXACTLY — token for token, production for
 // production, table for table (gated in tests/rg_e2e.rs). Declaration
 // order here is the source of truth the bootstrap mirrors.

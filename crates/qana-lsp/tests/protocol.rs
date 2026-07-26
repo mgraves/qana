@@ -244,7 +244,7 @@ fn filetime_touch(path: &std::path::Path) {
     std::fs::write(path, &content).unwrap();
 }
 
-const CHARTLANG_RG: &str = include_str!("../../qana-rg/chartlang.rg");
+const CHARTLANG_RG: &str = include_str!("../../qana-lang/chartlang.rg");
 
 /// `.rg` documents are served by the grammar surface's OWN pipeline:
 /// highlighting (including the regexp class), outline of rules and

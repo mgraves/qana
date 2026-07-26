@@ -5,8 +5,8 @@
 //! compile time with spans — the envelope pattern extended to types.
 
 use qana_engine::IncSession;
-use qana_rg::compile::certify;
-use qana_rg::{compile_source, RgToolchain};
+use qana_lang::compile::certify;
+use qana_lang::{compile_source, RgToolchain};
 use qana_sem::SemDb;
 
 const TY_LANG: &str = r#"
@@ -641,7 +641,7 @@ fn edit_line(
 
 /// The differential that anchors everything: a memoized report must be
 /// IDENTICAL to one computed by a fresh SemDb over the same tree.
-fn assert_fresh_equal(db: &mut SemDb, cfg: &qana_rg::compile::LangDef, uri: &str, tree: &std::sync::Arc<qana_grammar::GreenNode>) {
+fn assert_fresh_equal(db: &mut SemDb, cfg: &qana_lang::compile::LangDef, uri: &str, tree: &std::sync::Arc<qana_grammar::GreenNode>) {
     // Global TypeIds are history-dependent (stable for the session);
     // MEANINGS are not. Compare display-canonically.
     let canon = |r: &qana_sem::TypeReport| {

@@ -13,8 +13,8 @@ use crate::config::{
 };
 use qana_engine::{split_lines, IncSession, Line, LineEdit};
 use qana_grammar::green::ancestor_spans;
-use qana_rg::compile::{certify, compile, RgDiag};
-use qana_rg::RgToolchain;
+use qana_lang::compile::{certify, compile, RgDiag};
+use qana_lang::RgToolchain;
 use qana_sem::SemDb;
 use qana_services::{
     completion_at, diagnostics, folding_ranges, outline, semantic_tokens_full, FoldKind,

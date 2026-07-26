@@ -430,7 +430,7 @@ Editors are not the only host. `EmbeddedLang` compiles a grammar and
 hands back a ready pipeline, in process, with no LSP hop:
 
 ```rust
-use qana_rg::EmbeddedLang;
+use qana_lang::EmbeddedLang;
 
 let lang = EmbeddedLang::from_rg_source(include_str!("mylang.rg"))?;
 let mut session = lang.session("let x = 1;\n");

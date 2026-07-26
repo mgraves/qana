@@ -2,11 +2,11 @@
 //! file: full two-wave paint, per-keystroke deltas (wave 0 alone and
 //! both waves), and hover facts. Release mode is the honest run:
 //!
-//!     cargo run -p qana-rg --release --bin paintbench
+//!     cargo run -p qana-lang --release --bin paintbench
 
 use qana_engine::{IncSession, Line, LineEdit};
-use qana_rg::compile::certify;
-use qana_rg::{compile_source, RgToolchain};
+use qana_lang::compile::certify;
+use qana_lang::{compile_source, RgToolchain};
 use qana_sem::SemDb;
 use qana_services::paint::{facts_at, Painter};
 use std::time::Instant;

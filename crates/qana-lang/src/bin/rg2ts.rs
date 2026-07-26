@@ -1,13 +1,13 @@
 //! Emit a tree-sitter grammar from a `.rg` grammar file:
-//!   cargo run -p qana-rg --bin rg2ts -- <grammar.rg> <outdir>
+//!   cargo run -p qana-lang --bin rg2ts -- <grammar.rg> <outdir>
 //!
 //! Writes `<outdir>/grammar.js` and `<outdir>/queries/highlights.scm`.
 //! The grammar is envelope-certified first — out-of-envelope grammars
 //! emit nothing but their refusal diagnostics.
 
-use qana_rg::compile::certify;
-use qana_rg::tsgen::emit_tree_sitter;
-use qana_rg::{compile_source, RgToolchain};
+use qana_lang::compile::certify;
+use qana_lang::tsgen::emit_tree_sitter;
+use qana_lang::{compile_source, RgToolchain};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

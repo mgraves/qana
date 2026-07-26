@@ -8,14 +8,14 @@
 //! validated manually via npx: both grammars generate cleanly and the
 //! generated rg parser parses rg.rg and chartlang.rg with zero errors).
 
-use qana_rg::compile::certify;
-use qana_rg::tsgen::emit_tree_sitter;
-use qana_rg::{compile_source, RgToolchain};
+use qana_lang::compile::certify;
+use qana_lang::tsgen::emit_tree_sitter;
+use qana_lang::{compile_source, RgToolchain};
 
 const RG_RG: &str = include_str!("../rg.rg");
 const CHARTLANG_RG: &str = include_str!("../chartlang.rg");
 
-fn emit(src: &str) -> qana_rg::tsgen::TsOutput {
+fn emit(src: &str) -> qana_lang::tsgen::TsOutput {
     let tc = RgToolchain::new();
     let out = compile_source(&tc, src);
     assert!(out.diags.is_empty(), "{:?}", out.diags);
@@ -30,7 +30,7 @@ fn emitted_artifacts_are_current() {
     assert_eq!(
         include_str!("../../../tree-sitter/chartlang/grammar.js"),
         ts.grammar_js,
-        "regenerate: cargo run -p qana-rg --bin rg2ts -- crates/qana-rg/chartlang.rg tree-sitter/chartlang"
+        "regenerate: cargo run -p qana-lang --bin rg2ts -- crates/qana-lang/chartlang.rg tree-sitter/chartlang"
     );
     assert_eq!(
         include_str!("../../../tree-sitter/chartlang/queries/highlights.scm"),
@@ -40,7 +40,7 @@ fn emitted_artifacts_are_current() {
     assert_eq!(
         include_str!("../../../tree-sitter/rg/grammar.js"),
         ts.grammar_js,
-        "regenerate: cargo run -p qana-rg --bin rg2ts -- crates/qana-rg/rg.rg tree-sitter/rg"
+        "regenerate: cargo run -p qana-lang --bin rg2ts -- crates/qana-lang/rg.rg tree-sitter/rg"
     );
     assert_eq!(include_str!("../../../tree-sitter/rg/queries/highlights.scm"), ts.highlights_scm);
 }

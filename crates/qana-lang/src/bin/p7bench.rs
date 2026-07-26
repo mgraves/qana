@@ -6,7 +6,7 @@
 //! product like any other envelope language.
 
 use qana_engine::{IncSession, Line, LineEdit, LineTerm};
-use qana_rg::chartlang_with_rg_islands;
+use qana_lang::chartlang_with_rg_islands;
 use std::time::{Duration, Instant};
 
 fn time<R>(f: impl FnOnce() -> R) -> (R, Duration) {

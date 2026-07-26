@@ -3,7 +3,7 @@
 //!
 //! * `chartlang.rg` (preferred): the FULL textual grammar surface —
 //!   tokens, modes, keywords, precedence, productions, binding and
-//!   style annotations — compiled by qana-rg and certified by the
+//!   style annotations — compiled by qana-lang and certified by the
 //!   envelope. Refusals carry source spans.
 //! * `chartlang.toml` (legacy fallback): keywords + operator precedence
 //!   parameterizing the built-in demo grammar.
@@ -14,8 +14,8 @@
 
 use qana_grammar::demo::{demo_grammar_with_keywords, demo_syn_grammar_prec};
 use qana_grammar::{build_lr, Assoc, CompiledLexer, LrTables, SynGrammar, TokenId};
-use qana_rg::compile::{certify, RgDiag};
-use qana_rg::{compile_source, rg_binding_config, rg_outline_config, rg_styles, RgToolchain};
+use qana_lang::compile::{certify, RgDiag};
+use qana_lang::{compile_source, rg_binding_config, rg_outline_config, rg_styles, RgToolchain};
 use qana_sem::{demo_binding_config, BindingConfig};
 use qana_services::demo_glue::{demo_outline_config, demo_styles};
 use qana_services::{OutlineConfig, Styles};

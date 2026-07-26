@@ -3,8 +3,8 @@
 //! This is the seam Synkro's RichCodeArea holds.
 
 use limn::{LineEdit, Limner, MOD_DEF, MOD_TYPED, MOD_UNRESOLVED};
-use qana_rg::live::LiveDoc;
-use qana_rg::EmbeddedLang;
+use qana_lang::live::LiveDoc;
+use qana_lang::EmbeddedLang;
 use std::sync::Arc;
 
 const SL_RG: &str = include_str!("../../../examples/structs/structlang.rg");

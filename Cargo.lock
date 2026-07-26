@@ -33,7 +33,7 @@ version = "0.0.1"
 dependencies = [
  "qana-engine",
  "qana-grammar",
- "qana-rg",
+ "qana-lang",
  "qana-sem",
  "qana-services",
 ]
@@ -51,6 +51,17 @@ name = "qana-grammar"
 version = "0.0.1"
 
 [[package]]
+name = "qana-lang"
+version = "0.0.1"
+dependencies = [
+ "limn",
+ "qana-engine",
+ "qana-grammar",
+ "qana-sem",
+ "qana-services",
+]
+
+[[package]]
 name = "qana-lex"
 version = "0.0.1"
 
@@ -60,21 +71,10 @@ version = "0.0.1"
 dependencies = [
  "qana-engine",
  "qana-grammar",
- "qana-rg",
+ "qana-lang",
  "qana-sem",
  "qana-services",
  "serde_json",
-]
-
-[[package]]
-name = "qana-rg"
-version = "0.0.1"
-dependencies = [
- "limn",
- "qana-engine",
- "qana-grammar",
- "qana-sem",
- "qana-services",
 ]
 
 [[package]]

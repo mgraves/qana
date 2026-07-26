@@ -10,7 +10,7 @@ qana-grammar = { path = "../qana-grammar" }
 qana-engine = { path = "../qana-engine" }
 qana-services = { path = "../qana-services" }
 qana-sem = { path = "../qana-sem" }
-qana-rg = { path = "../qana-rg" }
+qana-lang = { path = "../qana-lang" }
 serde_json = "1"
 
 [[bin]]

@@ -9,6 +9,7 @@
 pub mod bootstrap;
 pub mod compile;
 pub mod expand;
+pub mod live;
 pub mod pat_parse;
 pub mod rg_ast;
 pub mod tsgen;
@@ -71,6 +72,9 @@ pub struct EmbeddedLang {
     pub binding: rantlr_sem::BindingConfig,
     /// The declared type tier (empty when the grammar declares none).
     pub types: rantlr_sem::TypeConfig,
+    /// The declared meta tier (macro bodies are type-exempt; live
+    /// documents need to know where they are).
+    pub macros: rantlr_sem::macros::MacroConfig,
 }
 
 impl EmbeddedLang {
@@ -99,6 +103,7 @@ impl EmbeddedLang {
             outline: out.def.outline,
             binding: out.def.binding,
             types: out.def.types,
+            macros: out.def.macros,
         })
     }
 

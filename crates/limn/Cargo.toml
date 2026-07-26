@@ -1,0 +1,6 @@
+[package]
+name = "limn"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "The limn protocol: line-keyed, two-wave code paint and facts — engine-neutral types and the Limner trait binding language intelligence to editors"

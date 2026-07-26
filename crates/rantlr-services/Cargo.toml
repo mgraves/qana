@@ -9,3 +9,4 @@ description = "P3: grammar-derived editor services — semantic tokens (full + L
 rantlr-grammar = { path = "../rantlr-grammar" }
 rantlr-engine = { path = "../rantlr-engine" }
 rantlr-sem = { path = "../rantlr-sem" }
+limn = { path = "../limn" }

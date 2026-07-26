@@ -237,7 +237,7 @@ fn facts_and_hints_answer_from_warm_tiers() {
     assert!(!hints.is_empty());
     let width_line = SL_DEMO[..w_at].matches('\n').count() as u32;
     assert!(
-        hints.iter().any(|(l, _, h)| *l == width_line && h == ": Num"),
+        hints.iter().any(|h| h.line == width_line && h.text == ": Num"),
         "inline `: Num` hint on the width line: {hints:?}"
     );
 

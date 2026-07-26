@@ -10,3 +10,4 @@ rantlr-grammar = { path = "../rantlr-grammar" }
 rantlr-engine = { path = "../rantlr-engine" }
 rantlr-services = { path = "../rantlr-services" }
 rantlr-sem = { path = "../rantlr-sem" }
+limn = { path = "../limn" }

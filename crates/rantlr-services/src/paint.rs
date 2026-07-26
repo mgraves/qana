@@ -34,57 +34,14 @@ use rantlr_engine::{DamageReport, IncSession, LexedBuffer};
 use rantlr_grammar::CompiledLexer;
 use rantlr_sem::{RefKind, SemDb, Target};
 
-/// This run's bytes are a definition's name.
-pub const MOD_DEF: u8 = 1 << 0;
-/// A reference that RESOLVES (navigation will land somewhere).
-pub const MOD_REF: u8 = 1 << 1;
-/// A reference that does not resolve — including "exists but is not
-/// exported" and broken qualified paths (the squiggle substrate).
-pub const MOD_UNRESOLVED: u8 = 1 << 2;
-/// The definition is `@export`ed (the module tier's `pub`).
-pub const MOD_PUBLIC: u8 = 1 << 3;
-/// The reference resolves into ANOTHER file.
-pub const MOD_FOREIGN: u8 = 1 << 4;
-/// The name carries a known type (the type tier has a fact here).
-pub const MOD_TYPED: u8 = 1 << 5;
-
-/// `style` value for bytes with no declared class (trivia, plain).
-pub const STYLE_NONE: u8 = 0xFF;
-
-/// One horizontal span of identically-painted bytes. Four bytes, by
-/// design: a 200-column line of dense code is a handful of cache
-/// lines, and a whole 10k-line buffer's paint fits in ~KBs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Run {
-    pub len: u16,
-    /// Index into [`crate::LEGEND`], or [`STYLE_NONE`].
-    pub style: u8,
-    /// `MOD_*` bits (wave 1; zero after wave 0).
-    pub mods: u8,
-}
-
-/// A full paint of a buffer: per-line runs, tiling each line exactly
-/// (text plus terminator), tagged with the revision they describe.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Paint {
-    pub rev: u64,
-    pub lines: Vec<Vec<Run>>,
-}
-
-/// What one edit changed, and nothing else: the damaged window is
-/// REPLACED (old line range → new lines), and any line OUTSIDE the
-/// window whose semantic overlay changed is re-emitted by number.
-/// Lines that only shifted appear nowhere.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PaintDelta {
-    pub rev: u64,
-    /// (old_lo, old_hi) replaced by `replacement` (new-line runs).
-    pub splice: Option<((u32, u32), Vec<Vec<Run>>)>,
-    /// (new line index, runs) — semantic-only repaints (wave 1 bits
-    /// moved: a rename changed which references resolve, an edit
-    /// changed a type). This IS the blast radius, made visible.
-    pub repaints: Vec<(u32, Vec<Run>)>,
-}
+// The protocol TYPES live in the engine-neutral `limn` crate — this
+// module is rantlr's IMPLEMENTATION of them (the Painter, the facts
+// assembly). Editors depend on `limn`; rantlr depends on `limn`;
+// neither depends on the other.
+pub use limn::{
+    decode_lines, encode_lines, FactCard, Hint, Paint, PaintDelta, Run, MOD_DEF, MOD_FOREIGN,
+    MOD_PUBLIC, MOD_REF, MOD_TYPED, MOD_UNRESOLVED, STYLE_NONE,
+};
 
 // ---------------------------------------------------------------------------
 // Wave 0: lexical runs, straight off the line lexer
@@ -345,77 +302,8 @@ impl Painter {
 }
 
 // ---------------------------------------------------------------------------
-// Wire form: the memory layout, little-endian
-// ---------------------------------------------------------------------------
-
-/// `[rev u64][n u32]` then per line `[line u32][nruns u32][runs…]`,
-/// each run `[len u16][style u8][mods u8]`. A full paint is the same
-/// encoding with lines 0..n. Decoding is bounds checks.
-pub fn encode_lines(rev: u64, items: &[(u32, &[Run])]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&rev.to_le_bytes());
-    out.extend_from_slice(&(items.len() as u32).to_le_bytes());
-    for (line, runs) in items {
-        out.extend_from_slice(&line.to_le_bytes());
-        out.extend_from_slice(&(runs.len() as u32).to_le_bytes());
-        for r in *runs {
-            out.extend_from_slice(&r.len.to_le_bytes());
-            out.push(r.style);
-            out.push(r.mods);
-        }
-    }
-    out
-}
-
-pub fn decode_lines(bytes: &[u8]) -> Option<(u64, Vec<(u32, Vec<Run>)>)> {
-    let mut at = 0usize;
-    let take = |at: &mut usize, n: usize| -> Option<&[u8]> {
-        let s = bytes.get(*at..*at + n)?;
-        *at += n;
-        Some(s)
-    };
-    let rev = u64::from_le_bytes(take(&mut at, 8)?.try_into().ok()?);
-    let n = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?);
-    let mut items = Vec::with_capacity(n as usize);
-    for _ in 0..n {
-        let line = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?);
-        let nruns = u32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?);
-        let mut runs = Vec::with_capacity(nruns as usize);
-        for _ in 0..nruns {
-            let len = u16::from_le_bytes(take(&mut at, 2)?.try_into().ok()?);
-            let style = *take(&mut at, 1)?.first()?;
-            let mods = *take(&mut at, 1)?.first()?;
-            runs.push(Run { len, style, mods });
-        }
-        items.push((line, runs));
-    }
-    (at == bytes.len()).then_some((rev, items))
-}
-
-// ---------------------------------------------------------------------------
 // Facts: the hover card, assembled from queries that are already warm
 // ---------------------------------------------------------------------------
-
-/// What a name at some offset IS — everything the tiers know, in one
-/// record, no transport. `text` is the caller's buffer (lossless
-/// trees make it reproducible, but the editor already has it).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FactCard {
-    /// The name's own span and text.
-    pub span: (u32, u32),
-    pub name: String,
-    /// True at a definition site (else it is a reference).
-    pub is_def: bool,
-    pub exported: bool,
-    /// Where navigation lands: (uri, span) — for a def, itself.
-    pub def_site: Option<(String, (u32, u32))>,
-    /// "cannot find", "not exported", or similar when unresolved.
-    pub problem: Option<String>,
-    /// The display type, when the type tier knows one.
-    pub ty: Option<String>,
-    /// The declared namespace, when not the default (`tag`, `label`).
-    pub ns: Option<String>,
-}
 
 pub fn facts_at(db: &mut SemDb, uri: &str, text: &str, offset: u32) -> Option<FactCard> {
     let syms = db.symbols(uri);
@@ -470,7 +358,7 @@ pub fn facts_at(db: &mut SemDb, uri: &str, text: &str, offset: u32) -> Option<Fa
 /// Inline TYPE HINTS: one `(line, col, text)` per typed definition —
 /// the decoration plane, derived from the same report the diagnostics
 /// use. Empty when the grammar declares no type tier.
-pub fn type_hints(db: &mut SemDb, uri: &str, text: &str) -> Vec<(u32, u32, String)> {
+pub fn type_hints(db: &mut SemDb, uri: &str, text: &str) -> Vec<Hint> {
     let report = db.types(uri);
     if report.def_types.is_empty() {
         return Vec::new();
@@ -489,9 +377,9 @@ pub fn type_hints(db: &mut SemDb, uri: &str, text: &str) -> Vec<(u32, u32, Strin
             Err(i) => i - 1,
         };
         if let Some(name) = report.atoms.get(tid as usize) {
-            out.push((li as u32, end - starts[li], format!(": {name}")));
+            out.push(Hint { line: li as u32, col: end - starts[li], text: format!(": {name}") });
         }
     }
-    out.sort();
+    out.sort_by_key(|h| (h.line, h.col));
     out
 }

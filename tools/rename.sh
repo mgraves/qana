@@ -169,8 +169,14 @@ DIRSENT=$'\001RENAME_DIR_SENTINEL\001'
 
 build_perl_program() {
   cat <<PERL
-    # -- 0. stash cross-repo path deps behind a sentinel -------------------
-    s{\Q$OLD\E/crates/}{${DIRSENT}/crates/}g;
+    # -- 0. stash cross-repo path references behind a sentinel -------------
+    #    Any `../<old>/` is a reference to the DIRECTORY this repo lives
+    #    in, which is a separate choice from the project name (--keep-dir).
+    #    Matching only `<old>/crates/` was too narrow: Synkro's exerciser
+    #    reaches in via `../../../../../<old>/examples/` for an
+    #    include_str!, and that path is invisible to `cargo metadata`, so
+    #    a manifest-only check will not catch it.
+    s{\.\./\Q$OLD\E/}{../${DIRSENT}/}g;
 
     # -- 1. compound forms, longest-separator-first ------------------------
     s{\bsynkro_\Q$OLD\E\b}{synkro_${SNAKE}}g;
@@ -421,7 +427,7 @@ audit_repo() { # $1 = repo, $2 = label
   # name, so Synkro's cross-repo path deps must keep pointing there. Those
   # are the one legitimate survivor; everything else still has to go.
   if [ "$KEEP_DIR" = 1 ]; then
-    content=$(printf '%s' "$content" | grep -v "$OLD/crates/" || true)
+    content=$(printf '%s' "$content" | grep -v "\.\./$OLD/" || true)
   fi
   if [ -n "$content" ]; then
     printf '\033[31m  %s: old name survives in file contents:\033[0m\n' "$label"

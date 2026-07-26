@@ -1,9 +1,9 @@
-# The `.rg` language reference
+# The `.qana` language reference
 
-A `.rg` file is a complete language definition: lexical structure,
+A `.qana` file is a complete language definition: lexical structure,
 syntax, precedence, highlighting, outline, and name binding. It is
 parsed and compiled by the same toolchain it describes — the surface is
-[self-hosted](../crates/qana-lang/rg.rg), and `rg.rg` compiled by the
+[self-hosted](../crates/qana-lang/qana.qana), and `qana.qana` compiled by the
 bootstrap must reproduce the bootstrap exactly.
 
 For the practical path, start with the [guide](GUIDE.md).
@@ -116,7 +116,7 @@ the base language's keyword. Reference mode-local tokens BY NAME in
 productions.
 
 Bare words and quoted strings are both accepted; quote a word when it
-collides with a `.rg` keyword (`language`, `max_stack`, `keywords`,
+collides with a `.qana` keyword (`language`, `max_stack`, `keywords`,
 `token`, `mode`, `pair`, `prec`, `left`, `right`, `start`, `rule`).
 
 ---
@@ -268,7 +268,7 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@splice(name[, args])` | Expansion may happen HERE: when `name`'s `@ref` resolves to a macro, this node is replaced by the substituted body (`args` is the argument-list child for parameterized macros). Refs without `@splice` never expand — C's `#ifdef X` stays closed while `return X;` opens. Run `qana expand` to materialize (deterministic `<stem>.exp.<ext>` + provenance sidecar, write-if-changed, `--check` = the read-only drift gate). Expansion is HYGIENIC: every reference that survives must resolve to the same definition afterwards as where it was written, and where it would not, the expander renames the binder that swallowed it (reported as a note) — falling back to a diagnostic when no name the grammar admits is available |
 | `@reflect(ty[, "sep"[, facet…]])` | REFLECTION, on a `@splice` alternative: the macro's parameters bind PER MEMBER of the type `ty` resolves to — one body per member, joined by `sep`. The parameters take the declared FACETS in order (default `name, type`; available: `name`, `type`, `owner`, `index`, `count`), and a facet/parameter count mismatch is diagnosed. `name`/`type`/`owner` are copies of the declaration, so provenance points at the field or the struct; `index`/`count` are computed. The member map is the type tier's own `deftype`/`def` declarations, in whichever file declared them: a type resolving into a sibling reflects its members from there. Macro bodies are type-EXEMPT at the definition (templates type per instantiation, in the materialized output) |
 
-Attribute names cannot be `.rg` reserved words, which is why the
+Attribute names cannot be `.qana` reserved words, which is why the
 precedence override is spelled `@precedence` rather than `@prec`. Use it
 for the classic unary-minus case:
 

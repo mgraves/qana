@@ -23,7 +23,7 @@ set -euo pipefail
 # The workspace as it stands. `limn` is deliberately absent — it is a
 # standalone protocol crate with its own name, independent of whatever
 # this project ends up called. Check it separately with --limn.
-SUFFIXES=(lex grammar engine services lsp sem rg cli)
+SUFFIXES=(lex grammar engine services lsp sem qana cli)
 
 UA="name-check (local availability check)"
 API="https://crates.io/api/v1/crates"

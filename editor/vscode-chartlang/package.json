@@ -1,7 +1,7 @@
 {
   "name": "chartlang",
   "displayName": "ChartLang (qana demo)",
-  "description": "Demo language served by the qana incremental toolchain: semantic highlighting with deltas, diagnostics from repair, outline, folding, completion, and live grammar hot-reload via chartlang.rg — with .rg grammar files themselves served by the same engine.",
+  "description": "Demo language served by the qana incremental toolchain: semantic highlighting with deltas, diagnostics from repair, outline, folding, completion, and live grammar hot-reload via chartlang.qana — with .qana grammar files themselves served by the same engine.",
   "version": "0.0.1",
   "publisher": "qana",
   "private": true,
@@ -18,7 +18,7 @@
       },
       {
         "id": "qana-grammar",
-        "extensions": [".rg"],
+        "extensions": [".qana"],
         "aliases": ["qana grammar"],
         "configuration": "./language-configuration.json"
       }
@@ -51,15 +51,15 @@
       {
         "language": "qana-grammar",
         "scopes": {
-          "keyword": ["keyword.control.rg"],
-          "variable": ["variable.other.rg"],
-          "number": ["constant.numeric.rg"],
-          "string": ["string.quoted.double.rg"],
-          "comment": ["comment.line.rg"],
-          "operator": ["keyword.operator.rg"],
-          "punctuation": ["punctuation.separator.rg"],
-          "bracket": ["punctuation.bracket.rg"],
-          "regexp": ["string.regexp.rg"]
+          "keyword": ["keyword.control.qana"],
+          "variable": ["variable.other.qana"],
+          "number": ["constant.numeric.qana"],
+          "string": ["string.quoted.double.qana"],
+          "comment": ["comment.line.qana"],
+          "operator": ["keyword.operator.qana"],
+          "punctuation": ["punctuation.separator.qana"],
+          "bracket": ["punctuation.bracket.qana"],
+          "regexp": ["string.regexp.qana"]
         }
       }
     ]

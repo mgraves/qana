@@ -1,12 +1,12 @@
-//! The `.rg` compiler: a green tree (from the bootstrap parser) in, the
+//! The `.qana` compiler: a green tree (from the bootstrap parser) in, the
 //! toolchain's grammar VALUES out — `LexGrammar`, `SynGrammar`,
 //! `BindingConfig`, `Styles`, `OutlineConfig` — plus span-carrying
 //! diagnostics. Certification (`certify`) then runs the same envelope
 //! gates every programmatic grammar passes, mapping lint witnesses and
-//! LR conflict counterexamples back to `.rg` source spans: the refusal
+//! LR conflict counterexamples back to `.qana` source spans: the refusal
 //! UX points at the construct that caused it.
 
-use crate::bootstrap::RgProds;
+use crate::bootstrap::QanaProds;
 use crate::pat_parse::parse_pattern;
 use qana_grammar::green::ERROR_NT;
 use qana_grammar::model::{BracketKind, LexGrammar, TokenDef, TokenId};
@@ -22,7 +22,7 @@ use std::collections::HashMap;
 pub const OUTLINE_KINDS: &[&str] = &["variable", "constant", "function", "struct", "module", "class"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RgDiag {
+pub struct QanaDiag {
     pub span: (u32, u32),
     pub msg: String,
     /// 1 = error, 2 = warning.
@@ -30,7 +30,7 @@ pub struct RgDiag {
 }
 
 /// A compiled language definition: pure values + the source-span maps
-/// that let certification report refusals against the `.rg` text.
+/// that let certification report refusals against the `.qana` text.
 pub struct LangDef {
     pub lex: LexGrammar,
     pub sg: SynGrammar,
@@ -247,7 +247,7 @@ fn unquote(text: &str) -> String {
     out
 }
 
-fn lower_attrs(cur: Cur<'_>, p: &RgProds) -> Vec<AttrIr> {
+fn lower_attrs(cur: Cur<'_>, p: &QanaProds) -> Vec<AttrIr> {
     // cur is an `attrs` LIST node.
     cur.items()
         .iter()
@@ -272,21 +272,21 @@ fn lower_attrs(cur: Cur<'_>, p: &RgProds) -> Vec<AttrIr> {
         .collect()
 }
 
-fn lower_tok_ref(cur: Cur<'_>, p: &RgProds) -> Option<TokRefIr> {
+fn lower_tok_ref(cur: Cur<'_>, p: &QanaProds) -> Option<TokRefIr> {
     let (t, span) = cur.tok(0)?;
     let is_string = cur.n.prod == p.tok_str as u16;
     let text = if is_string { unquote(&t.text) } else { t.text.clone() };
     Some(TokRefIr { text, span, is_string })
 }
 
-fn lower_elem(cur: Cur<'_>, p: &RgProds) -> Option<TokRefIr> {
+fn lower_elem(cur: Cur<'_>, p: &QanaProds) -> Option<TokRefIr> {
     let (t, span) = cur.tok(0)?;
     let is_string = cur.n.prod == p.elem_str as u16;
     let text = if is_string { unquote(&t.text) } else { t.text.clone() };
     Some(TokRefIr { text, span, is_string })
 }
 
-fn lower_token_def(cur: Cur<'_>, mode: u16, p: &RgProds) -> Option<TokenIr> {
+fn lower_token_def(cur: Cur<'_>, mode: u16, p: &QanaProds) -> Option<TokenIr> {
     let (name_tok, name_span) = cur.tok(1)?;
     let pat = cur.node(3)?;
     let (pat_tok, pat_span) = pat.tok(0)?;
@@ -309,7 +309,7 @@ fn lower_token_def(cur: Cur<'_>, mode: u16, p: &RgProds) -> Option<TokenIr> {
     })
 }
 
-fn lower(tree: &GreenNode, p: &RgProds, diags: &mut Vec<RgDiag>) -> FileIr {
+fn lower(tree: &GreenNode, p: &QanaProds, diags: &mut Vec<QanaDiag>) -> FileIr {
     let mut ir = FileIr::default();
     let root = Cur { n: tree, base: 0 };
     let Some(decls) = root.node(0) else { return ir };
@@ -319,7 +319,7 @@ fn lower(tree: &GreenNode, p: &RgProds, diags: &mut Vec<RgDiag>) -> FileIr {
         if d.n.prod == p.mode_decl as u16 {
             if let Some((t, s)) = d.tok(1) {
                 if ir.mode_names.iter().any(|(n, _)| *n == t.text) {
-                    diags.push(RgDiag {
+                    diags.push(QanaDiag {
                         span: s,
                         msg: format!("mode `{}` declared twice", t.text),
                         severity: 1,
@@ -335,7 +335,7 @@ fn lower(tree: &GreenNode, p: &RgProds, diags: &mut Vec<RgDiag>) -> FileIr {
         if prod == p.lang_decl {
             if let Some((t, s)) = d.tok(1) {
                 if ir.language.is_some() {
-                    diags.push(RgDiag { span: s, msg: "duplicate `language`".into(), severity: 1 });
+                    diags.push(QanaDiag { span: s, msg: "duplicate `language`".into(), severity: 1 });
                 } else {
                     ir.language = Some((t.text.clone(), s));
                 }
@@ -344,7 +344,7 @@ fn lower(tree: &GreenNode, p: &RgProds, diags: &mut Vec<RgDiag>) -> FileIr {
             if let Some((t, s)) = d.tok(1) {
                 match t.text.parse::<u8>() {
                     Ok(n) => ir.max_stack = Some((n, s)),
-                    Err(_) => diags.push(RgDiag {
+                    Err(_) => diags.push(QanaDiag {
                         span: s,
                         msg: "max_stack must fit in a u8".into(),
                         severity: 1,
@@ -406,7 +406,7 @@ fn lower(tree: &GreenNode, p: &RgProds, diags: &mut Vec<RgDiag>) -> FileIr {
         } else if prod == p.start_decl {
             if let Some((t, s)) = d.tok(1) {
                 if ir.start.is_some() {
-                    diags.push(RgDiag { span: s, msg: "duplicate `start`".into(), severity: 1 });
+                    diags.push(QanaDiag { span: s, msg: "duplicate `start`".into(), severity: 1 });
                 } else {
                     ir.start = Some((t.text.clone(), s));
                 }
@@ -491,12 +491,12 @@ fn lower(tree: &GreenNode, p: &RgProds, diags: &mut Vec<RgDiag>) -> FileIr {
 // Compilation passes
 // ---------------------------------------------------------------------------
 
-pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
+pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
     let mut diags = Vec::new();
     let ir = lower(tree, p, &mut diags);
     let d = &mut diags;
-    let error = |d: &mut Vec<RgDiag>, span: (u32, u32), msg: String| {
-        d.push(RgDiag { span, msg, severity: 1 })
+    let error = |d: &mut Vec<QanaDiag>, span: (u32, u32), msg: String| {
+        d.push(QanaDiag { span, msg, severity: 1 })
     };
 
     let lang_name = ir.language.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| "Lang".into());
@@ -570,7 +570,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
         let mut def = TokenDef::new(&t.name, t.mode, pat.clone());
         let mut classes: Vec<(String, (u32, u32))> = Vec::new();
         for a in &t.attrs {
-            let arity = |d: &mut Vec<RgDiag>, want: usize| {
+            let arity = |d: &mut Vec<QanaDiag>, want: usize| {
                 if a.args.len() != want {
                     error(
                         d,
@@ -689,7 +689,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
     // ---- brackets ----
     let resolve_tok = |r: &TokRefIr,
                        token_ids: &HashMap<String, TokenId>,
-                       d: &mut Vec<RgDiag>|
+                       d: &mut Vec<QanaDiag>|
      -> Option<TokenId> {
         if r.is_string {
             if let Some(&id) = lit_text.get(&r.text) {
@@ -808,11 +808,11 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
         nt_ids: &HashMap<String, u16>,
         lit_text: &HashMap<String, TokenId>,
         kw_text: &HashMap<String, TokenId>,
-        diags: Option<&mut Vec<RgDiag>>,
+        diags: Option<&mut Vec<QanaDiag>>,
     ) -> Option<Sym> {
-        let err = |diags: Option<&mut Vec<RgDiag>>, msg: String| {
+        let err = |diags: Option<&mut Vec<QanaDiag>>, msg: String| {
             if let Some(dd) = diags {
-                dd.push(RgDiag { span, msg, severity: 1 });
+                dd.push(QanaDiag { span, msg, severity: 1 });
             }
         };
         if is_string {
@@ -897,14 +897,14 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
         sg: &mut SynGrammar,
         labels_seen: &mut HashMap<String, ()>,
         prod_spans: &mut Vec<(u32, u32)>,
-        d: &mut Vec<RgDiag>,
+        d: &mut Vec<QanaDiag>,
         nt: u16,
         name: String,
         rhs: Vec<Sym>,
         span: (u32, u32),
     ) {
         if labels_seen.insert(name.clone(), ()).is_some() {
-            d.push(RgDiag {
+            d.push(QanaDiag {
                 span,
                 msg: format!("generated production name `{name}` collides with an existing label"),
                 severity: 1,
@@ -1028,7 +1028,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
             let mut pending_qualify: Option<usize> = None;
 
             for (ai, a) in alt.attrs.iter().enumerate() {
-                let pos_of = |d: &mut Vec<RgDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
+                let pos_of = |d: &mut Vec<QanaDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
                     match positions.get(arg.0.as_str()) {
                         Some(&k) => Some(k),
                         None => {
@@ -1448,7 +1448,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                 // into the grammar's own vocabulary), lowercase = local
                 // type variable (sig only). Strings/numbers are neither.
                 let term = |cfg: &mut TypeConfig,
-                            d: &mut Vec<RgDiag>,
+                            d: &mut Vec<QanaDiag>,
                             vars: &mut Vec<String>,
                             arg: &(String, (u32, u32), bool)|
                  -> Option<TyTerm> {
@@ -1476,7 +1476,7 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
                 };
                 // Label → symbol position, and the position must hold a
                 // RULE (types attach to nodes; tokens are untyped).
-                let rule_pos = |d: &mut Vec<RgDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
+                let rule_pos = |d: &mut Vec<QanaDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
                     let k = match positions.get(arg.0.as_str()) {
                         Some(&k) => k,
                         None => {
@@ -1728,14 +1728,14 @@ pub fn compile(tree: &GreenNode, p: &RgProds) -> (LangDef, Vec<RgDiag>) {
 /// Label → symbol position that must hold a RULE (shared by the module
 /// and type attribute arms).
 fn rule_pos_of(
-    d: &mut Vec<RgDiag>,
+    d: &mut Vec<QanaDiag>,
     positions: &HashMap<&str, usize>,
     sg: &SynGrammar,
     prod: u16,
     arg: &(String, (u32, u32), bool),
 ) -> Option<usize> {
-    let push = |d: &mut Vec<RgDiag>, span, msg: String| {
-        d.push(RgDiag { span, msg, severity: 1 })
+    let push = |d: &mut Vec<QanaDiag>, span, msg: String| {
+        d.push(QanaDiag { span, msg, severity: 1 })
     };
     let k = match positions.get(arg.0.as_str()) {
         Some(&k) => k,
@@ -1761,7 +1761,7 @@ fn rule_pos_of(
 /// span-carrying diagnostics: L1/L2 lint witnesses point at the token
 /// declaration, LR conflicts point at an involved production and carry
 /// the counterexample input.
-pub fn certify(def: &LangDef) -> Result<(CompiledLexer, LrTables), Vec<RgDiag>> {
+pub fn certify(def: &LangDef) -> Result<(CompiledLexer, LrTables), Vec<QanaDiag>> {
     let span_of_token = |name: &str| -> (u32, u32) {
         def.lex
             .tokens
@@ -1786,7 +1786,7 @@ pub fn certify(def: &LangDef) -> Result<(CompiledLexer, LrTables), Vec<RgDiag>> 
                 }
                 BuildError::Lint(_) => ((0, 0), format!("{e}")),
             };
-            return Err(vec![RgDiag { span, msg, severity: 1 }]);
+            return Err(vec![QanaDiag { span, msg, severity: 1 }]);
         }
     };
     let tables = build_lr(&def.sg);
@@ -1800,7 +1800,7 @@ pub fn certify(def: &LangDef) -> Result<(CompiledLexer, LrTables), Vec<RgDiag>> 
                     .first()
                     .and_then(|&p| def.prod_spans.get(p as usize).copied())
                     .unwrap_or((0, 0));
-                RgDiag {
+                QanaDiag {
                     span,
                     msg: format!(
                         "grammar conflict ({} on {}) — example input: {}\n  {}",

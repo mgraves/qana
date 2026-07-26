@@ -244,17 +244,17 @@ fn filetime_touch(path: &std::path::Path) {
     std::fs::write(path, &content).unwrap();
 }
 
-const CHARTLANG_RG: &str = include_str!("../../qana-lang/chartlang.rg");
+const CHARTLANG_RG: &str = include_str!("../../qana-lang/chartlang.qana");
 
-/// `.rg` documents are served by the grammar surface's OWN pipeline:
+/// `.qana` documents are served by the grammar surface's OWN pipeline:
 /// highlighting (including the regexp class), outline of rules and
 /// tokens, forward-reference navigation, and live envelope diagnostics
 /// with spans — the dogfood loop at the protocol level.
 #[test]
-fn rg_documents_get_grammar_services() {
+fn qana_documents_get_grammar_services() {
     let mut s = Server::new();
     init(&mut s);
-    let g_uri = "file:///g.rg";
+    let g_uri = "file:///g.qana";
     let text = "token A = /a+/ @style(number)\nrule file = File: items\nrule items =\n  | ItemsEmpty:\n  | ItemsMore: items A\n";
     s.handle(&json!({
         "jsonrpc": "2.0", "method": "textDocument/didOpen",
@@ -294,7 +294,7 @@ fn rg_documents_get_grammar_services() {
     assert_eq!(def[0]["result"]["range"]["start"]["line"], 2, "resolves FORWARD to the rule decl");
 
     // Break the grammar: a dangling-else conflict. The envelope refusal
-    // arrives as a live diagnostic on the .rg document, with a span.
+    // arrives as a live diagnostic on the .qana document, with a span.
     let out = s.handle(&json!({
         "jsonrpc": "2.0", "method": "textDocument/didChange",
         "params": {
@@ -314,15 +314,15 @@ fn rg_documents_get_grammar_services() {
     assert!(conflict["range"]["start"]["line"].as_u64().unwrap() > 0, "span points into the file");
 }
 
-/// Hot reload from `chartlang.rg`: the ENTIRE language definition is a
+/// Hot reload from `chartlang.qana`: the ENTIRE language definition is a
 /// live-editable grammar file. Good edits rebuild the pipeline; bad ones
 /// are refused with span-accurate counterexamples on the grammar file,
 /// and the old pipeline stays live.
 #[test]
 fn hot_reload_from_rg_grammar_file() {
-    let dir = std::env::temp_dir().join(format!("qana-lsp-rg-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("qana-lsp-qana-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("chartlang.rg");
+    let cfg = dir.join("chartlang.qana");
     std::fs::write(&cfg, CHARTLANG_RG).unwrap();
 
     let mut s = Server::new();
@@ -341,10 +341,10 @@ fn hot_reload_from_rg_grammar_file() {
     let out = s.check_reload();
     assert!(
         out.iter().any(|m| m["method"] == "workspace/semanticTokens/refresh"),
-        "good .rg reload must request token refresh"
+        "good .qana reload must request token refresh"
     );
     let (_, after) = tokens_full(&mut s);
-    assert_ne!(before, after, "adding a keyword via .rg must re-colorize `async`");
+    assert_ne!(before, after, "adding a keyword via .qana must re-colorize `async`");
 
     // BAD reload: drop the precedence declarations — the expression
     // grammar now has unresolved conflicts. Refused with the
@@ -358,7 +358,7 @@ fn hot_reload_from_rg_grammar_file() {
     let diag = out.iter()
         .find(|m| {
             m["method"] == "textDocument/publishDiagnostics"
-                && m.pointer("/params/uri").and_then(|u| u.as_str()).is_some_and(|u| u.ends_with("chartlang.rg"))
+                && m.pointer("/params/uri").and_then(|u| u.as_str()).is_some_and(|u| u.ends_with("chartlang.qana"))
                 && !m.pointer("/params/diagnostics").unwrap().as_array().unwrap().is_empty()
         })
         .expect("refusal diagnostics on the grammar file");
@@ -377,7 +377,7 @@ fn hot_reload_from_rg_grammar_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The declared type tier over the wire: a `.rg` grammar's `@type`
+/// The declared type tier over the wire: a `.qana` grammar's `@type`
 /// annotations become live diagnostics on target documents, and they
 /// heal when the document is fixed.
 #[test]
@@ -385,7 +385,7 @@ fn declared_type_errors_publish_and_heal() {
     let dir = std::env::temp_dir().join(format!("qana-lsp-types-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     // CHARTLANG_RG carries the type tier (Num/Str + sig/def/ref rules).
-    std::fs::write(dir.join("chartlang.rg"), CHARTLANG_RG).unwrap();
+    std::fs::write(dir.join("chartlang.qana"), CHARTLANG_RG).unwrap();
 
     let mut s = Server::new();
     s.root = Some(dir.clone());
@@ -433,8 +433,8 @@ fn declared_type_errors_publish_and_heal() {
 fn module_access_errors_publish() {
     let dir = std::env::temp_dir().join(format!("qana-lsp-mod-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    const MODLANG: &str = include_str!("../../../examples/modules/modlang.rg");
-    std::fs::write(dir.join("chartlang.rg"), MODLANG).unwrap();
+    const MODLANG: &str = include_str!("../../../examples/modules/modlang.qana");
+    std::fs::write(dir.join("chartlang.qana"), MODLANG).unwrap();
 
     let mut s = Server::new();
     s.root = Some(dir.clone());
@@ -463,13 +463,13 @@ fn module_access_errors_publish() {
 }
 
 /// Bring your own language: the grammar file does NOT have to be called
-/// `chartlang.rg`. Any single `.rg` in the workspace root is the
+/// `chartlang.qana`. Any single `.qana` in the workspace root is the
 /// language definition, and it hot-reloads under its own name.
 #[test]
 fn serves_a_grammar_under_any_name() {
     let dir = std::env::temp_dir().join(format!("qana-lsp-byo-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let cfg = dir.join("mylang.rg");
+    let cfg = dir.join("mylang.qana");
     std::fs::write(&cfg, CHARTLANG_RG).unwrap();
 
     let mut s = Server::new();
@@ -486,7 +486,7 @@ fn serves_a_grammar_under_any_name() {
     let out = s.check_reload();
     assert!(
         out.iter().any(|m| m["method"] == "workspace/semanticTokens/refresh"),
-        "a custom-named .rg must drive hot-reload"
+        "a custom-named .qana must drive hot-reload"
     );
     let (_, after) = tokens_full(&mut s);
     assert_ne!(before, after, "the custom-named grammar must be the live pipeline");

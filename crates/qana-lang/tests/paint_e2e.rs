@@ -6,21 +6,21 @@
 
 use qana_engine::{IncSession, Line, LineEdit};
 use qana_lang::compile::certify;
-use qana_lang::{compile_source, RgToolchain};
+use qana_lang::{compile_source, QanaToolchain};
 use qana_sem::SemDb;
 use qana_services::paint::{
     decode_lines, encode_lines, facts_at, type_hints, Painter, MOD_DEF, MOD_FOREIGN, MOD_PUBLIC,
     MOD_REF, MOD_TYPED, MOD_UNRESOLVED,
 };
 
-const C_RG: &str = include_str!("../../../examples/c/c.rg");
+const C_RG: &str = include_str!("../../../examples/c/c.qana");
 const C_DEMO: &str = include_str!("../../../examples/c/demo.c");
-const SL_RG: &str = include_str!("../../../examples/structs/structlang.rg");
+const SL_RG: &str = include_str!("../../../examples/structs/structlang.qana");
 const SL_DEMO: &str = include_str!("../../../examples/structs/demo.sl");
 
 fn c_world() -> (qana_grammar::CompiledLexer, qana_lang::compile::LangDef, qana_grammar::LrTables)
 {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
     let (lexer, tables) = certify(&out.def).unwrap();
     (lexer, out.def, tables)
@@ -219,7 +219,7 @@ fn facts_and_hints_answer_from_warm_tiers() {
     assert_eq!(card.problem.as_deref(), Some("cannot find `wrod`"));
 
     // Structlang: types on cards and as inline hints.
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let sl = compile_source(&tc, SL_RG);
     let (slex, stab) = certify(&sl.def).unwrap();
     let s3 = IncSession::new(&slex, &sl.def.sg, &stab, SL_DEMO).unwrap();
@@ -253,11 +253,11 @@ fn facts_and_hints_answer_from_warm_tiers() {
 /// neighbor paints FOREIGN — the module tier, visible in the colors.
 #[test]
 fn module_facts_paint_public_and_foreign()  {
-    let ml_rg = include_str!("../../../examples/modules/modlang.rg");
+    let ml_qana = include_str!("../../../examples/modules/modlang.qana");
     let lib = include_str!("../../../examples/modules/lib.ml");
     let app = include_str!("../../../examples/modules/app.ml");
-    let tc = RgToolchain::new();
-    let out = compile_source(&tc, ml_rg);
+    let tc = QanaToolchain::new();
+    let out = compile_source(&tc, ml_qana);
     let (lexer, tables) = certify(&out.def).unwrap();
     let ls = IncSession::new(&lexer, &out.def.sg, &tables, lib).unwrap();
     let as_ = IncSession::new(&lexer, &out.def.sg, &tables, app).unwrap();

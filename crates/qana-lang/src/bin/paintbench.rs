@@ -6,15 +6,15 @@
 
 use qana_engine::{IncSession, Line, LineEdit};
 use qana_lang::compile::certify;
-use qana_lang::{compile_source, RgToolchain};
+use qana_lang::{compile_source, QanaToolchain};
 use qana_sem::SemDb;
 use qana_services::paint::{facts_at, Painter};
 use std::time::Instant;
 
 fn main() {
-    let c_rg = std::fs::read_to_string("examples/c/c.rg").unwrap();
-    let tc = RgToolchain::new();
-    let out = compile_source(&tc, &c_rg);
+    let c_qana = std::fs::read_to_string("examples/c/c.qana").unwrap();
+    let tc = QanaToolchain::new();
+    let out = compile_source(&tc, &c_qana);
     let (lexer, tables) = certify(&out.def).unwrap();
 
     // 10k lines: 2000 functions of five lines each.

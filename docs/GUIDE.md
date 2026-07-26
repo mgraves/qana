@@ -1,6 +1,6 @@
 # qana — user guide
 
-You describe a language in one `.rg` file. qana checks that description
+You describe a language in one `.qana` file. qana checks that description
 against a fixed set of rules (the *envelope*), and if it passes, derives
 everything else: an incremental lexer, an LR(1) parser that never fails,
 syntax highlighting, folding, an outline, go-to-definition, rename, and
@@ -12,7 +12,7 @@ generators accept and then quietly mis-parse. In exchange, every language
 that passes gets incremental reparsing and editor intelligence for free,
 with the guarantees checked rather than assumed.
 
-New to the design? [`RG-REFERENCE.md`](RG-REFERENCE.md) is the language
+New to the design? [`QANA-REFERENCE.md`](QANA-REFERENCE.md) is the language
 reference; the [`README`](../README.md) is the engineering log with
 benchmarks and proofs. This guide is the practical path.
 
@@ -46,7 +46,7 @@ substitute `cargo run -q -p qana-cli --` for `qana`.
 qana new mylang --name Mylang --ext .my
 ```
 
-You get `mylang/mylang.rg` — a complete, commented, working grammar with
+You get `mylang/mylang.qana` — a complete, commented, working grammar with
 comments, strings, numbers, identifiers, keywords, bracket pairs,
 operator precedence, statements, blocks, and expressions — plus
 `mylang/example.my` to parse.
@@ -54,7 +54,7 @@ operator precedence, statements, blocks, and expressions — plus
 ### 2. Certify it
 
 ```bash
-qana check mylang/mylang.rg
+qana check mylang/mylang.qana
 ```
 
 ```text
@@ -91,7 +91,7 @@ will do with this language, derived from the same file.
 ### 3. Parse something
 
 ```bash
-qana parse mylang/mylang.rg mylang/example.my
+qana parse mylang/mylang.qana mylang/example.my
 ```
 
 ```text
@@ -136,7 +136,7 @@ blank while you are mid-keystroke.
 ### 5. See the semantics
 
 ```bash
-qana defs mylang/mylang.rg mylang/example.my
+qana defs mylang/mylang.qana mylang/example.my
 ```
 
 ```text
@@ -160,7 +160,7 @@ Delete `let width = 3;` and rerun: the references come back
 ### 6. Watch an edit stay cheap
 
 ```bash
-qana edit mylang/mylang.rg mylang/example.my --line 4 --text "let width  = 30;"
+qana edit mylang/mylang.qana mylang/example.my --line 4 --text "let width  = 30;"
 ```
 
 ```text
@@ -186,7 +186,7 @@ meaningless if the fast path can drift from the slow one.
 ## The loop: changing your language
 
 The point of a one-file language definition is that changing the
-language is an edit, not a rebuild. A few things to try in `mylang.rg`:
+language is an edit, not a rebuild. A few things to try in `mylang.qana`:
 
 **Add a keyword.** Put `while` in the `keywords IDENT = …` line, then
 add an alternative to `rule stmt`:
@@ -208,11 +208,11 @@ rule is now genuinely ambiguous and the toolchain refuses it:
 error: grammar conflict (shift/reduce on PLUS) — example input: KW_PRINT NUMBER PLUS NUMBER · PLUS
   [expr → expr PLUS expr · , PLUS]
   [expr → expr · PLUS expr , PLUS]
-  --> mylang/ambiguous.rg:77:5
+  --> mylang/ambiguous.qana:77:5
    |
 77 |   | AddExpr:   expr "+" expr
    |     ^^^^^^^
-refused: mylang/ambiguous.rg is outside the envelope
+refused: mylang/ambiguous.qana is outside the envelope
   note: L3 — the grammar must be deterministic LR(1). Add a `prec` line, or refactor the rule.
 ```
 
@@ -244,7 +244,7 @@ through every use, riding the same resolution that powers
 go-to-definition. One generic engine derives the rest:
 
 ```bash
-qana types mylang/mylang.rg mylang/example.my
+qana types mylang/mylang.qana mylang/example.my
 ```
 
 ```text
@@ -275,7 +275,7 @@ the grammar declared.
 
 And the vocabulary is not limited to what the grammar declares:
 `@type(deftype)` lets **documents** introduce types. In
-[examples/structs](../examples/structs/structlang.rg), each `struct`
+[examples/structs](../examples/structs/structlang.qana), each `struct`
 declaration creates a type, annotations and `new` expressions denote
 it, and mismatches name the document's own types:
 
@@ -346,7 +346,7 @@ list-shaped children stay untyped.
 ## The module tier: imports and exports, declared
 
 Like binding and types, the module system is declared, not predefined.
-[examples/modules](../examples/modules/modlang.rg) makes a
+[examples/modules](../examples/modules/modlang.qana) makes a
 Rust-flavored one from two annotations — `@export` (the `pub`
 productions) and `@import` (the `use` productions):
 
@@ -388,7 +388,7 @@ error: `tau_hidden` exists in the module but is not exported
 ## In an editor
 
 The VS Code extension is a thin client over `qana-lsp`. It serves two
-languages: your target language, and `.rg` grammar files themselves.
+languages: your target language, and `.qana` grammar files themselves.
 
 ```bash
 cargo build --release -p qana-lsp
@@ -400,8 +400,8 @@ Extension Development Host window that opens, open your language's
 folder (`mylang/`, or the bundled `examples/mini/` and
 `examples/playground/`).
 
-The server treats **any single `.rg` file in the workspace root** as the
-language definition, so `mylang.rg` works with no configuration. Editing
+The server treats **any single `.qana` file in the workspace root** as the
+language definition, so `mylang.qana` works with no configuration. Editing
 and saving it hot-reloads the pipeline: open documents re-colorize, and
 a grammar that leaves the envelope publishes its refusal as a diagnostic
 on the offending line while the last good pipeline stays live.
@@ -432,7 +432,7 @@ hands back a ready pipeline, in process, with no LSP hop:
 ```rust
 use qana_lang::EmbeddedLang;
 
-let lang = EmbeddedLang::from_rg_source(include_str!("mylang.rg"))?;
+let lang = EmbeddedLang::from_rg_source(include_str!("mylang.qana"))?;
 let mut session = lang.session("let x = 1;\n");
 let tree = session.tree().expect("parsing is total");
 ```
@@ -451,12 +451,12 @@ grammar-driven highlighting and folding.
 ## Exports
 
 ```bash
-qana ts mylang/mylang.rg tree-sitter/mylang   # tree-sitter grammar + highlight queries
-qana ast mylang/mylang.rg > src/ast.rs        # typed Rust AST over the green tree
+qana ts mylang/mylang.qana tree-sitter/mylang   # tree-sitter grammar + highlight queries
+qana ast mylang/mylang.qana > src/ast.rs        # typed Rust AST over the green tree
 ```
 
 The tree-sitter export gives you an escape hatch into the tree-sitter
-ecosystem (Neovim, GitHub, Zed). It is a one-way emit: edit the `.rg`
+ecosystem (Neovim, GitHub, Zed). It is a one-way emit: edit the `.qana`
 and re-emit, not the reverse.
 
 The typed AST is zero-copy accessors over the same green tree, with
@@ -475,12 +475,12 @@ of 2026-07-25 but unclaimed, so it stays free only until someone claims
 it. The VS Code extension is a development shell — it is not packaged as
 a `.vsix` or published to the marketplace.
 
-**Language features.** The `.rg` surface has no parenthesized groups
+**Language features.** The `.qana` surface has no parenthesized groups
 (`(a b)?`); repetition sugar is `*`, `+`, `?`, and `% separator`, and
 the repeated element must be a rule rather than a bare token. Composition
 (one language hosting another, like fenced code blocks) exists and is
 tested, but only through the Rust `compose()` API; there is no `island`
-declaration on the `.rg` surface yet.
+declaration on the `.qana` surface yet.
 
 **Semantics.** The semantic layer does binding, scoping, and the
 declared type tier described above — atoms, signatures, and name-flow,
@@ -506,14 +506,14 @@ memoized semantics, composition — are built and gated.
 | Command | What it shows |
 | --- | --- |
 | `qana new <dir> [--name L] [--ext .x]` | Scaffold a working grammar and sample document |
-| `qana check <g.rg>` | Certify; print the envelope report, or the refusal with a counterexample |
-| `qana tokens <g.rg> <file>` | The lex: every token, its style class, and each line's entry state |
-| `qana parse <g.rg> <file> [--trivia] [--depth N]` | The lossless tree, losslessness check, and any repairs |
-| `qana outline <g.rg> <file>` | Derived document symbols |
-| `qana defs <g.rg> <file>` | Derived binding: definitions, references, resolution |
-| `qana types <g.rg> <file> [--all]` | The declared type tier: typed definitions and mismatches |
-| `qana edit <g.rg> <file> --line N --text "…"` | Incremental reparse: reuse, timing, and the batch differential |
-| `qana ts <g.rg> <outdir>` | Emit a tree-sitter grammar and highlight queries |
-| `qana ast <g.rg>` | Emit a typed Rust AST to stdout |
+| `qana check <g.qana>` | Certify; print the envelope report, or the refusal with a counterexample |
+| `qana tokens <g.qana> <file>` | The lex: every token, its style class, and each line's entry state |
+| `qana parse <g.qana> <file> [--trivia] [--depth N]` | The lossless tree, losslessness check, and any repairs |
+| `qana outline <g.qana> <file>` | Derived document symbols |
+| `qana defs <g.qana> <file>` | Derived binding: definitions, references, resolution |
+| `qana types <g.qana> <file> [--all]` | The declared type tier: typed definitions and mismatches |
+| `qana edit <g.qana> <file> --line N --text "…"` | Incremental reparse: reuse, timing, and the batch differential |
+| `qana ts <g.qana> <outdir>` | Emit a tree-sitter grammar and highlight queries |
+| `qana ast <g.qana>` | Emit a typed Rust AST to stdout |
 
 Exit codes: `0` success, `1` refusal or error in the input, `2` usage.

@@ -6,7 +6,7 @@
 
 use qana_engine::IncSession;
 use qana_lang::compile::certify;
-use qana_lang::{compile_source, RgToolchain};
+use qana_lang::{compile_source, QanaToolchain};
 use qana_sem::SemDb;
 
 const TY_LANG: &str = r#"
@@ -49,7 +49,7 @@ rule expr =
 
 /// Compile + certify + parse + run the tier over `doc`.
 fn tier(doc: &str) -> (qana_sem::TypeReport, String) {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, TY_LANG);
     assert!(out.diags.is_empty(), "test grammar compiles: {:?}", out.diags);
     let (lexer, tables) = certify(&out.def).expect("in envelope");
@@ -121,7 +121,7 @@ fn unknown_and_error_regions_stay_silent() {
 /// A grammar that declares nothing HAS nothing: empty report, no rules.
 #[test]
 fn no_declarations_no_tier() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let stripped: String =
         TY_LANG.lines().map(|l| {
             let mut l = l.to_string();
@@ -148,7 +148,7 @@ fn no_declarations_no_tier() {
 /// the def/ref forms cross-checked against the binding annotations.
 #[test]
 fn malformed_type_declarations_are_refused_with_spans() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let refusal = |broken: &str, expect: &str| {
         let src = TY_LANG.replace("@type(sig, Num, Num, Num)", broken);
         assert_ne!(src, TY_LANG, "replacement applied: {broken}");
@@ -250,7 +250,7 @@ rule expr =
 "#;
 
 fn struct_tier(doc: &str) -> (qana_sem::TypeReport, String) {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, STRUCT_LANG);
     assert!(out.diags.is_empty(), "struct grammar compiles: {:?}", out.diags);
     let (lexer, tables) = certify(&out.def).expect("in envelope");
@@ -314,7 +314,7 @@ fn nominal_identity_is_the_declaration_site() {
 /// The new forms carry the same compile-time cross-checks as def/ref.
 #[test]
 fn deftype_and_named_require_their_binding_counterparts() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let src = STRUCT_LANG.replace("@def(name) @type(deftype)", "@type(deftype)");
     let out = compile_source(&tc, &src);
     assert!(
@@ -396,7 +396,7 @@ rule args = expr* % ","
 "#;
 
 fn app_tier(doc: &str) -> (qana_sem::TypeReport, String) {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, APP_LANG);
     assert!(out.diags.is_empty(), "app grammar compiles: {:?}", out.diags);
     let (lexer, tables) = certify(&out.def).expect("in envelope");
@@ -467,7 +467,7 @@ fn first_class_flow_and_recursion_converge() {
 /// The new forms carry compile-time cross-checks and arity like the rest.
 #[test]
 fn v2_forms_are_statically_checked() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let src = APP_LANG.replace("@ref(callee, call) @type(apply, a)", "@type(apply, a)");
     let out = compile_source(&tc, &src);
     assert!(out.diags.iter().any(|d| d.msg.contains("requires @ref")), "{:?}", out.diags);
@@ -532,7 +532,7 @@ rule expr =
 "#;
 
 fn mem_tier(doc: &str) -> (qana_sem::TypeReport, String) {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, MEM_LANG);
     assert!(out.diags.is_empty(), "mem grammar compiles: {:?}", out.diags);
     let (lexer, tables) = certify(&out.def).expect("in envelope");
@@ -596,7 +596,7 @@ fn member_failure_modes_and_unknown_fields_stay_silent() {
 /// and deftype's optional body label must exist.
 #[test]
 fn member_forms_are_statically_checked() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let src = MEM_LANG.replace("@type(member, b, m)", "@type(member, m, b)");
     let out = compile_source(&tc, &src);
     assert!(
@@ -665,7 +665,7 @@ fn assert_fresh_equal(db: &mut SemDb, cfg: &qana_lang::compile::LangDef, uri: &s
 /// stay identical to a from-scratch computation.
 #[test]
 fn memoization_body_edits_walk_one_item_signature_edits_ripple() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, APP_LANG);
     let (lexer, tables) = certify(&out.def).unwrap();
     let mut doc = String::from("fn add(a: Num, b: Num) -> Num { return a + b; }\n");
@@ -719,7 +719,7 @@ fn memoization_body_edits_walk_one_item_signature_edits_ripple() {
 /// query; mutual references terminate.
 #[test]
 fn cross_file_values_flow_staleness_and_cycles() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, APP_LANG);
     let (lexer, tables) = certify(&out.def).unwrap();
     let mut db = SemDb::new(out.def.binding.clone());
@@ -759,7 +759,7 @@ fn cross_file_values_flow_staleness_and_cycles() {
 /// mismatches name it.
 #[test]
 fn foreign_document_types_flow_globally() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, MEM_LANG);
     let (lexer, tables) = certify(&out.def).unwrap();
     let mut db = SemDb::new(out.def.binding.clone());
@@ -796,7 +796,7 @@ fn foreign_document_types_flow_globally() {
 /// and through a first-class binding.
 #[test]
 fn foreign_functions_flow_with_checking() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, APP_LANG);
     let (lexer, tables) = certify(&out.def).unwrap();
     let mut db = SemDb::new(out.def.binding.clone());

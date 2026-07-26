@@ -6,14 +6,14 @@
 //! neither keeps the open world — gated below.
 //!
 //! The grammar under test IS the committed example
-//! (examples/modules/modlang.rg), so the example drift-gates itself.
+//! (examples/modules/modlang.qana), so the example drift-gates itself.
 
 use qana_engine::{IncSession, Line, LineEdit};
 use qana_lang::compile::certify;
-use qana_lang::{compile_source, RgToolchain};
+use qana_lang::{compile_source, QanaToolchain};
 use qana_sem::SemDb;
 
-const MODLANG: &str = include_str!("../../../examples/modules/modlang.rg");
+const MODLANG: &str = include_str!("../../../examples/modules/modlang.qana");
 const LIB: &str = include_str!("../../../examples/modules/lib.ml");
 const APP: &str = include_str!("../../../examples/modules/app.ml");
 
@@ -25,7 +25,7 @@ struct World {
 }
 
 fn world() -> World {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, MODLANG);
     assert!(out.diags.is_empty(), "modlang compiles: {:?}", out.diags);
     assert!(out.def.binding.module_tier(), "modlang declares the module tier");
@@ -184,7 +184,7 @@ rule expr =
   | NumLit:  NUMBER @type(Num)
   | NameRef: name:IDENT @ref(name) @type(ref)
 "#;
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, OPEN);
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     assert!(!out.def.binding.module_tier());
@@ -202,7 +202,7 @@ rule expr =
 /// The new forms carry compile-time cross-checks.
 #[test]
 fn module_forms_are_statically_checked() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let refuse = |src: &str, expect: &str| {
         let out = compile_source(&tc, src);
         assert!(
@@ -303,7 +303,7 @@ rule path =
   | PathBase: name:IDENT @ref(name) @type(ref)
   | PathSeg:  base:path "::" name:IDENT @qualify(base, name) @type(ref, name)
 "#;
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, NESTED);
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     let (lexer, tables) = certify(&out.def).expect("in envelope");

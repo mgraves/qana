@@ -5,19 +5,19 @@
 use qana_engine::IncSession;
 use qana_lang::compile::certify;
 use qana_lang::expand::expand_document;
-use qana_lang::{compile_source, RgToolchain};
+use qana_lang::{compile_source, QanaToolchain};
 use qana_sem::macros::{tiles, SegKind};
 use qana_sem::SemDb;
 
-const MAC_RG: &str = include_str!("../../../examples/macrolang/mac.rg");
+const MAC_RG: &str = include_str!("../../../examples/macrolang/mac.qana");
 const DEMO: &str = include_str!("../../../examples/macrolang/demo.mac");
 
 fn world() -> (qana_grammar::CompiledLexer, qana_lang::compile::LangDef, qana_grammar::LrTables)
 {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, MAC_RG);
-    assert!(out.diags.is_empty(), "mac.rg compiles: {:?}", out.diags);
-    let (lexer, tables) = certify(&out.def).expect("mac.rg certifies");
+    assert!(out.diags.is_empty(), "mac.qana compiles: {:?}", out.diags);
+    let (lexer, tables) = certify(&out.def).expect("mac.qana certifies");
     (lexer, out.def, tables)
 }
 
@@ -138,18 +138,18 @@ fn committed_materializations_are_current() {
     let committed = include_str!("../../../examples/macrolang/demo.exp.mac");
     assert_eq!(committed, out.text, "demo.exp.mac drifted — rerun `qana expand`");
 
-    let c_rg = include_str!("../../../examples/c/c.rg");
+    let c_qana = include_str!("../../../examples/c/c.qana");
     let c_demo = include_str!("../../../examples/c/demo.c");
-    let tc = RgToolchain::new();
-    let cdef = compile_source(&tc, c_rg);
+    let tc = QanaToolchain::new();
+    let cdef = compile_source(&tc, c_qana);
     let (clexer, ctables) = certify(&cdef.def).unwrap();
     let cout = expand_document(&clexer, &cdef.def, &ctables, c_demo, &[], 8).unwrap();
     let ccommitted = include_str!("../../../examples/c/demo.exp.c");
     assert_eq!(ccommitted, cout.text, "demo.exp.c drifted — rerun `qana expand`");
 
-    let sl_rg = include_str!("../../../examples/structs/structlang.rg");
+    let sl_qana = include_str!("../../../examples/structs/structlang.qana");
     let sl_demo = include_str!("../../../examples/structs/demo.sl");
-    let sdef = compile_source(&tc, sl_rg);
+    let sdef = compile_source(&tc, sl_qana);
     let (slexer, stables) = certify(&sdef.def).unwrap();
     let sout = expand_document(&slexer, &sdef.def, &stables, sl_demo, &[], 8).unwrap();
     let scommitted = include_str!("../../../examples/structs/demo.exp.sl");
@@ -206,9 +206,9 @@ fn cross_file_macros_expand_with_foreign_provenance() {
 /// through the open world the binding tier already had.
 #[test]
 fn c_macros_cross_files_like_headers() {
-    let c_rg = include_str!("../../../examples/c/c.rg");
-    let tc = RgToolchain::new();
-    let cdef = compile_source(&tc, c_rg);
+    let c_qana = include_str!("../../../examples/c/c.qana");
+    let tc = QanaToolchain::new();
+    let cdef = compile_source(&tc, c_qana);
     let (clexer, ctables) = certify(&cdef.def).unwrap();
     let header = "#define SCALE 4\n";
     let main_c = "int f(int x) { return x * SCALE; }\n";
@@ -231,10 +231,10 @@ fn c_macros_cross_files_like_headers() {
 /// two annotations.
 #[test]
 fn reflection_iterates_declared_members() {
-    let sl_rg = include_str!("../../../examples/structs/structlang.rg");
+    let sl_qana = include_str!("../../../examples/structs/structlang.qana");
     let sl_demo = include_str!("../../../examples/structs/demo.sl");
-    let tc = RgToolchain::new();
-    let out = compile_source(&tc, sl_rg);
+    let tc = QanaToolchain::new();
+    let out = compile_source(&tc, sl_qana);
     assert!(out.diags.is_empty(), "structlang compiles: {:?}", out.diags);
     let (lexer, tables) = certify(&out.def).expect("structlang certifies");
 
@@ -317,9 +317,9 @@ fn reflection_iterates_declared_members() {
 /// written here follows a struct declared next door.
 #[test]
 fn reflection_crosses_files() {
-    let sl_rg = include_str!("../../../examples/structs/structlang.rg");
-    let tc = RgToolchain::new();
-    let out = compile_source(&tc, sl_rg);
+    let sl_qana = include_str!("../../../examples/structs/structlang.qana");
+    let tc = QanaToolchain::new();
+    let out = compile_source(&tc, sl_qana);
     let (lexer, tables) = certify(&out.def).unwrap();
 
     // lib declares the type AND the derive macro; app owns neither.
@@ -451,7 +451,7 @@ fn substitution_is_syntax_aware() {
     // silently changing the meaning.
     let no_parens = MAC_RG.replace("  | Paren:   \"(\" expr \")\"\n", "");
     assert_ne!(no_parens, MAC_RG, "probe edit took");
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let probe = compile_source(&tc, &no_parens);
     let (plexer, ptables) = certify(&probe.def).expect("the probe grammar certifies");
     let out6 = expand_document(
@@ -564,7 +564,7 @@ fn hygiene_repairs_capture_by_renaming() {
     // emitting something that does not lex.
     let letters = MAC_RG.replace("/[\\a_][\\w_]*/", "/[\\a]+/");
     assert_ne!(letters, MAC_RG, "probe edit took");
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let probe = compile_source(&tc, &letters);
     let (plexer, ptables) = certify(&probe.def).expect("the probe grammar certifies");
     let out3 = expand_document(&plexer, &probe.def, &ptables, doc, &[], 8).unwrap();
@@ -585,10 +585,10 @@ fn hygiene_repairs_capture_by_renaming() {
 /// refused, not emitted as nonsense.
 #[test]
 fn reflection_facets_and_name_positions() {
-    let sl_rg = include_str!("../../../examples/structs/structlang.rg");
+    let sl_qana = include_str!("../../../examples/structs/structlang.qana");
     let sl_demo = include_str!("../../../examples/structs/demo.sl");
-    let tc = RgToolchain::new();
-    let out = compile_source(&tc, sl_rg);
+    let tc = QanaToolchain::new();
+    let out = compile_source(&tc, sl_qana);
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     let (lexer, tables) = certify(&out.def).unwrap();
     let ex = |doc: &str| expand_document(&lexer, &out.def, &tables, doc, &[], 8).unwrap();

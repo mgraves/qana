@@ -1,5 +1,5 @@
 //! P7 benchmarks: the composition tier at scale. A 50k-line composed
-//! document (chartlang hosting `.rg` islands every ~100 lines) — the
+//! document (chartlang hosting `.qana` islands every ~100 lines) — the
 //! claims under test: composing + certifying the product costs
 //! milliseconds, and edits INSIDE an island or in the host around one
 //! keep the usual incremental budget, because the engine parses the
@@ -27,7 +27,7 @@ fn fmt_dur(d: Duration) -> String {
 }
 
 fn main() {
-    println!("qana P7 — composition tier (chartlang ⊃ rg islands)");
+    println!("qana P7 — composition tier (chartlang ⊃ qana islands)");
     println!("=====================================================");
 
     let (tc, d) = time(chartlang_with_rg_islands);
@@ -39,7 +39,7 @@ fn main() {
         tc.tables.n_states
     );
 
-    // 50k lines: blocks of 90 host statements + a 10-line rg island.
+    // 50k lines: blocks of 90 host statements + a 10-line qana island.
     let mut src = String::new();
     let mut island_lines: Vec<usize> = Vec::new();
     let mut line_no = 0usize;
@@ -48,7 +48,7 @@ fn main() {
             src.push_str(&format!("let b{block}_v{i} = {i};\n"));
             line_no += 1;
         }
-        src.push_str("```rg\n");
+        src.push_str("```qana\n");
         line_no += 1;
         island_lines.push(line_no); // first interior line
         for t in 0..7 {

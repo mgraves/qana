@@ -3,18 +3,18 @@
 //! stdio. Transport lives in main.rs.
 //!
 //! Two languages are served: the TARGET language (`.cl` documents,
-//! pipeline hot-reloaded from `chartlang.rg` — or legacy
-//! `chartlang.toml`), and the `.rg` grammar surface ITSELF (`.rg`
+//! pipeline hot-reloaded from `chartlang.qana` — or legacy
+//! `chartlang.toml`), and the `.qana` grammar surface ITSELF (`.qana`
 //! documents get qana-powered highlighting, outline, navigation, and
 //! live envelope diagnostics — the dogfood loop closed).
 
 use crate::config::{
-    build_pipeline, build_pipeline_rg, parse_config, rg_service_pipeline, LangConfig, Pipeline,
+    build_pipeline, build_pipeline_qana, parse_config, qana_service_pipeline, LangConfig, Pipeline,
 };
 use qana_engine::{split_lines, IncSession, Line, LineEdit};
 use qana_grammar::green::ancestor_spans;
-use qana_lang::compile::{certify, compile, RgDiag};
-use qana_lang::RgToolchain;
+use qana_lang::compile::{certify, compile, QanaDiag};
+use qana_lang::QanaToolchain;
 use qana_sem::SemDb;
 use qana_services::{
     completion_at, diagnostics, folding_ranges, outline, semantic_tokens_full, FoldKind,
@@ -29,8 +29,8 @@ use std::time::SystemTime;
 enum DocLang {
     /// The hot-reloadable target language.
     Target,
-    /// A `.rg` grammar file.
-    Rg,
+    /// A `.qana` grammar file.
+    Qana,
 }
 
 struct Doc {
@@ -44,11 +44,11 @@ struct Doc {
 
 pub struct Server {
     pub pipeline: Pipeline,
-    rg_pipe: Pipeline,
-    tc: &'static RgToolchain,
+    qana_pipe: Pipeline,
+    tc: &'static QanaToolchain,
     docs: HashMap<String, Doc>,
     sem: SemDb,
-    rg_sem: SemDb,
+    qana_sem: SemDb,
     pub root: Option<PathBuf>,
     config_mtime: Option<SystemTime>,
     next_server_req: i64,
@@ -57,17 +57,17 @@ pub struct Server {
 impl Server {
     pub fn new() -> Self {
         let pipeline = build_pipeline(&LangConfig::default()).expect("default config builds");
-        let tc: &'static RgToolchain = Box::leak(Box::new(RgToolchain::new()));
-        let rg_pipe = rg_service_pipeline(tc);
+        let tc: &'static QanaToolchain = Box::leak(Box::new(QanaToolchain::new()));
+        let qana_pipe = qana_service_pipeline(tc);
         let mut sem = SemDb::new(pipeline.binding.clone());
         sem.set_types(pipeline.types.clone());
-        let rg_sem = SemDb::new(rg_pipe.binding.clone());
+        let qana_sem = SemDb::new(qana_pipe.binding.clone());
         Server {
             pipeline,
-            rg_pipe,
+            qana_pipe,
             tc,
             sem,
-            rg_sem,
+            qana_sem,
             docs: HashMap::new(),
             root: None,
             config_mtime: None,
@@ -75,15 +75,15 @@ impl Server {
         }
     }
 
-    /// The language-definition file. `chartlang.rg` wins if present (the
-    /// demo and playground rely on it); otherwise ANY single `.rg` file
+    /// The language-definition file. `chartlang.qana` wins if present (the
+    /// demo and playground rely on it); otherwise ANY single `.qana` file
     /// in the workspace root is the language — so a folder holding your
-    /// own `mylang.rg` is served without renaming anything. Several
-    /// root `.rg` files are ambiguous, so the lowest name wins and the
+    /// own `mylang.qana` is served without renaming anything. Several
+    /// root `.qana` files are ambiguous, so the lowest name wins and the
     /// choice is deterministic rather than arbitrary.
     fn config_path(&self) -> Option<PathBuf> {
         let root = self.root.as_ref()?;
-        let named = root.join("chartlang.rg");
+        let named = root.join("chartlang.qana");
         if named.exists() {
             return Some(named);
         }
@@ -91,7 +91,7 @@ impl Server {
             .ok()?
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "rg") && p.is_file())
+            .filter(|p| p.extension().is_some_and(|e| e == "qana") && p.is_file())
             .collect();
         found.sort();
         found.into_iter().next().or_else(|| Some(root.join("chartlang.toml")))
@@ -100,7 +100,7 @@ impl Server {
     fn pipe_of(&self, lang: DocLang) -> &Pipeline {
         match lang {
             DocLang::Target => &self.pipeline,
-            DocLang::Rg => &self.rg_pipe,
+            DocLang::Qana => &self.qana_pipe,
         }
     }
 
@@ -111,7 +111,7 @@ impl Server {
     fn sem_of(&mut self, lang: DocLang) -> &mut SemDb {
         match lang {
             DocLang::Target => &mut self.sem,
-            DocLang::Rg => &mut self.rg_sem,
+            DocLang::Qana => &mut self.qana_sem,
         }
     }
 
@@ -160,8 +160,8 @@ impl Server {
                 let uri = str_at(&params, "/textDocument/uri");
                 let text = str_at(&params, "/textDocument/text");
                 let lang_id = str_at(&params, "/textDocument/languageId");
-                let lang = if lang_id == "qana-grammar" || uri.ends_with(".rg") {
-                    DocLang::Rg
+                let lang = if lang_id == "qana-grammar" || uri.ends_with(".qana") {
+                    DocLang::Qana
                 } else {
                     DocLang::Target
                 };
@@ -189,7 +189,7 @@ impl Server {
                             let lang = self.doc_lang(&uri);
                             let pipe = match lang {
                                 DocLang::Target => &self.pipeline,
-                                DocLang::Rg => &self.rg_pipe,
+                                DocLang::Qana => &self.qana_pipe,
                             };
                             if let Some(doc) = self.docs.get_mut(&uri) {
                                 let edit = range_to_line_edit(doc, range, &text);
@@ -476,7 +476,7 @@ impl Server {
                     }));
                 }
             }
-            DocLang::Rg => {
+            DocLang::Qana => {
                 // Live grammar authoring: compile the CURRENT tree and,
                 // when it compiles, run the envelope. Refusals point at
                 // the offending construct while you type.
@@ -509,7 +509,7 @@ impl Server {
     /// The hot-reload heartbeat: if the language definition changed,
     /// rebuild the WHOLE pipeline. Bad definitions are refused with the
     /// tool's own counterexamples as diagnostics on the definition file
-    /// (span-accurate for `.rg`); good ones rebuild every open target
+    /// (span-accurate for `.qana`); good ones rebuild every open target
     /// document and ask the client to re-request semantic tokens.
     pub fn check_reload(&mut self) -> Vec<Value> {
         let Some(path) = self.config_path() else { return Vec::new() };
@@ -522,13 +522,13 @@ impl Server {
         let config_uri = format!("file://{}", path.display());
         let config_open = self.docs.contains_key(&config_uri);
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let is_rg = path.extension().is_some_and(|e| e == "rg");
-        let built: Result<Pipeline, Vec<RgDiag>> = if is_rg {
-            build_pipeline_rg(self.tc, &text)
+        let is_qana = path.extension().is_some_and(|e| e == "qana");
+        let built: Result<Pipeline, Vec<QanaDiag>> = if is_qana {
+            build_pipeline_qana(self.tc, &text)
         } else {
             parse_config(&text)
                 .and_then(|cfg| build_pipeline(&cfg).map_err(|e| e))
-                .map_err(|msg| vec![RgDiag { span: (0, 1), msg, severity: 1 }])
+                .map_err(|msg| vec![QanaDiag { span: (0, 1), msg, severity: 1 }])
         };
         match built {
             Err(diags) => {

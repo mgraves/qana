@@ -2,7 +2,7 @@
 //! [`limn::Limner`]. This is what an editor widget holds — through
 //! the trait, never through this crate — to get keystroke-synchronous
 //! paint, semantic modifier bits, hover facts, and inline hints from
-//! a single `.rg` grammar.
+//! a single `.qana` grammar.
 //!
 //! Layering (the point of the exercise): the editor depends on `limn`
 //! alone; this crate depends on `limn` and implements it. The two

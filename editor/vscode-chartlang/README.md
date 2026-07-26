@@ -5,8 +5,8 @@
 3. Open this directory in VS Code and press F5 (Extension Development
    Host), then open `examples/playground/` from the repo.
 
-The playground: open `demo.cl` and `chartlang.rg` side by side. The
-`.rg` file is the ENTIRE language definition — tokens, keywords, modes,
+The playground: open `demo.cl` and `chartlang.qana` side by side. The
+`.qana` file is the ENTIRE language definition — tokens, keywords, modes,
 precedence, productions, binding and style annotations — and it is
 itself served by qana (highlighting, outline of rules and tokens,
 go-to-definition on rule names including forward references, live
@@ -18,4 +18,4 @@ appears as an error ON THE OFFENDING PRODUCTION while the last good
 language stays live.
 
 Legacy `chartlang.toml` configs (keywords + precedence only) are still
-supported when no `chartlang.rg` is present.
+supported when no `chartlang.qana` is present.

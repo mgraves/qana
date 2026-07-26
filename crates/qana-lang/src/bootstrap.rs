@@ -1,19 +1,19 @@
-//! The bootstrap grammar for `.rg` — the textual grammar surface —
+//! The bootstrap grammar for `.qana` — the textual grammar surface —
 //! expressed as grammar VALUES on the same certified toolchain every
 //! target language uses. This is self-hosting stage 0: these values
-//! parse `rg.rg` (the `.rg` grammar written in `.rg`), and the fixed-
-//! point gate proves that compiling `rg.rg` reproduces exactly what is
+//! parse `qana.qana` (the `.qana` grammar written in `.qana`), and the fixed-
+//! point gate proves that compiling `qana.qana` reproduces exactly what is
 //! written here.
 //!
 //! Declaration order here is the single source of truth for token and
-//! nonterminal ids; `rg.rg` mirrors it line for line.
+//! nonterminal ids; `qana.qana` mirrors it line for line.
 
 use qana_grammar::model::{BracketKind, LexGrammar, TokenDef, TokenId};
 use qana_grammar::pat::{ClassSet, Pat};
 use qana_grammar::syn::{Sym, SynGrammar};
 use qana_grammar::Vocab;
 
-/// The `.rg` language's reserved words, in declaration order. (`pair`
+/// The `.qana` language's reserved words, in declaration order. (`pair`
 /// declares bracket pairs — NOT `bracket`, which would collide with the
 /// style class of the same name in attribute arguments.)
 pub const RG_KEYWORDS: &[&str] = &[
@@ -21,7 +21,7 @@ pub const RG_KEYWORDS: &[&str] = &[
     "start", "rule",
 ];
 
-pub struct RgIds {
+pub struct QanaIds {
     pub ws: TokenId,
     pub line_comment: TokenId,
     pub name: TokenId,
@@ -47,9 +47,9 @@ pub struct RgIds {
     pub kw: Vec<TokenId>,
 }
 
-impl RgIds {
+impl QanaIds {
     pub fn kw_id(&self, word: &str) -> TokenId {
-        let idx = RG_KEYWORDS.iter().position(|k| *k == word).expect("known rg keyword");
+        let idx = RG_KEYWORDS.iter().position(|k| *k == word).expect("known qana keyword");
         self.kw[idx]
     }
 }
@@ -59,8 +59,8 @@ fn esc() -> Pat {
     Pat::seq([Pat::lit("\\"), Pat::Class(ClassSet::any())])
 }
 
-pub fn rg_lex_grammar() -> (LexGrammar, RgIds) {
-    let mut g = LexGrammar::new("Rg", &["DEFAULT"]);
+pub fn qana_lex_grammar() -> (LexGrammar, QanaIds) {
+    let mut g = LexGrammar::new("Qana", &["DEFAULT"]);
     const DEFAULT: u16 = 0;
 
     let ws = g.add(TokenDef::new("WS", DEFAULT, Pat::plus(Pat::Class(ClassSet::line_ws()))).trivia());
@@ -157,7 +157,7 @@ pub fn rg_lex_grammar() -> (LexGrammar, RgIds) {
 
     (
         g,
-        RgIds {
+        QanaIds {
             ws,
             line_comment,
             name,
@@ -184,9 +184,9 @@ pub fn rg_lex_grammar() -> (LexGrammar, RgIds) {
     )
 }
 
-/// Production indices of the `.rg` syntax grammar — the compiler's match
-/// targets when walking `.rg` trees.
-pub struct RgProds {
+/// Production indices of the `.qana` syntax grammar — the compiler's match
+/// targets when walking `.qana` trees.
+pub struct QanaProds {
     pub file: usize,
     pub decls_empty: usize,
     pub decls_more: usize,
@@ -235,8 +235,8 @@ pub struct RgProds {
     pub rep_sep_some: usize,
 }
 
-pub fn rg_syn_grammar(ids: &RgIds, vocab: &Vocab) -> (SynGrammar, RgProds) {
-    let mut sg = SynGrammar::new("RgSyn", vocab.names.clone());
+pub fn qana_syn_grammar(ids: &QanaIds, vocab: &Vocab) -> (SynGrammar, QanaProds) {
+    let mut sg = SynGrammar::new("QanaSyn", vocab.names.clone());
     let t = |id: TokenId| Sym::T(id);
     let k = |w: &str| Sym::T(ids.kw_id(w));
 
@@ -372,7 +372,7 @@ pub fn rg_syn_grammar(ids: &RgIds, vocab: &Vocab) -> (SynGrammar, RgProds) {
     let p_rep_sep_some =
         sg.prod_named(rep_sep, "RepSepSome", vec![t(ids.percent), n(elem)]);
 
-    let prods = RgProds {
+    let prods = QanaProds {
         file: p_file,
         decls_empty: p_decls_empty,
         decls_more: p_decls_more,

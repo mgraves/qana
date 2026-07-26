@@ -1,4 +1,4 @@
-/* demo.c — served by the C-subset grammar in c.rg.
+/* demo.c — served by the C-subset grammar in c.qana.
    Block comments, // line comments, directives-as-syntax, structs,
    enums, nested declarators, and the full expression grammar —
    including the wall-3 doors: pointered typedef locals, casts,

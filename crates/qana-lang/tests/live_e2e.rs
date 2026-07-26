@@ -7,7 +7,7 @@ use qana_lang::live::LiveDoc;
 use qana_lang::EmbeddedLang;
 use std::sync::Arc;
 
-const SL_RG: &str = include_str!("../../../examples/structs/structlang.rg");
+const SL_RG: &str = include_str!("../../../examples/structs/structlang.qana");
 const SL_DEMO: &str = include_str!("../../../examples/structs/demo.sl");
 
 fn limner() -> Box<dyn Limner> {

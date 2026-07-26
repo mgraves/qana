@@ -1,4 +1,4 @@
-//! @generated typed AST for the `RgSyn` grammar. DO NOT EDIT.
+//! @generated typed AST for the `QanaSyn` grammar. DO NOT EDIT.
 //! Regenerate with the grammar's astgen binary (drift-gated).
 #![allow(dead_code)]
 

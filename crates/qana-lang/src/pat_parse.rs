@@ -1,7 +1,7 @@
 //! The `/.../` pattern sub-language: a compact regular-expression
 //! surface compiled to [`Pat`] values at grammar-compile time. This is
 //! data-inside-a-token (like digits inside a number literal), so parsing
-//! it here — not in the `.rg` syntax grammar — keeps the parse pure
+//! it here — not in the `.qana` syntax grammar — keeps the parse pure
 //! (envelope L5) while the L1 lint still certifies the compiled result.
 //!
 //! Envelope by construction: there is NO way to write a line terminator.

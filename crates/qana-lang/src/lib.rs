@@ -1,5 +1,5 @@
-//! P5: the `.rg` textual grammar surface, self-hosted on the qana
-//! engine. A `.rg` file is parsed by the same certified incremental
+//! P5: the `.qana` textual grammar surface, self-hosted on the qana
+//! engine. A `.qana` file is parsed by the same certified incremental
 //! toolchain every target language uses (the bootstrap grammar in
 //! [`bootstrap`]), compiled by [`compile`] into the toolchain's value
 //! types, and refused — with source-span diagnostics carrying the
@@ -11,55 +11,55 @@ pub mod compile;
 pub mod expand;
 pub mod live;
 pub mod pat_parse;
-pub mod rg_ast;
+pub mod qana_ast;
 pub mod tsgen;
 
-use bootstrap::{rg_lex_grammar, rg_syn_grammar, RgIds, RgProds};
-use compile::{compile, RgDiag};
+use bootstrap::{qana_lex_grammar, qana_syn_grammar, QanaIds, QanaProds};
+use compile::{compile, QanaDiag};
 use qana_engine::IncSession;
 use qana_grammar::incremental::Repair;
 use qana_grammar::{build_lr, CompiledLexer, GreenNode, LrTables, SynGrammar};
 use std::sync::Arc;
 
-/// The bootstrap toolchain for `.rg` files themselves: certified lexer,
+/// The bootstrap toolchain for `.qana` files themselves: certified lexer,
 /// LR tables, and production indices — everything needed to parse and
 /// compile grammar files with the same engine target languages use.
-pub struct RgToolchain {
+pub struct QanaToolchain {
     pub lexer: CompiledLexer,
     pub sg: SynGrammar,
     pub tables: LrTables,
-    pub ids: RgIds,
-    pub prods: RgProds,
+    pub ids: QanaIds,
+    pub prods: QanaProds,
 }
 
-impl RgToolchain {
+impl QanaToolchain {
     pub fn new() -> Self {
-        let (g, ids) = rg_lex_grammar();
+        let (g, ids) = qana_lex_grammar();
         let lexer = CompiledLexer::build(&g).expect("bootstrap grammar is in envelope");
-        let (sg, prods) = rg_syn_grammar(&ids, &lexer.vocab);
+        let (sg, prods) = qana_syn_grammar(&ids, &lexer.vocab);
         let tables = build_lr(&sg);
         assert!(tables.conflicts.is_empty(), "bootstrap grammar is conflict-free");
-        RgToolchain { lexer, sg, tables, ids, prods }
+        QanaToolchain { lexer, sg, tables, ids, prods }
     }
 }
 
-impl Default for RgToolchain {
+impl Default for QanaToolchain {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Everything one `.rg` source produces: the (total, lossless) parse and
+/// Everything one `.qana` source produces: the (total, lossless) parse and
 /// the compiled language definition with its diagnostics.
-pub struct RgOutcome {
+pub struct QanaOutcome {
     pub tree: Arc<GreenNode>,
     pub repairs: Vec<Repair>,
     pub def: compile::LangDef,
-    pub diags: Vec<RgDiag>,
+    pub diags: Vec<QanaDiag>,
 }
 
 /// An embeddable language pipeline for GUI/editor hosts: everything a
-/// text widget needs to serve a `.rg`-defined language IN PROCESS — no
+/// text widget needs to serve a `.qana`-defined language IN PROCESS — no
 /// LSP hop. Owns its certified pipeline with `'static` lifetimes (one
 /// bounded leak per grammar load, the same deliberate pattern the LSP
 /// server uses; grammar loads are rare and small).
@@ -79,14 +79,14 @@ pub struct EmbeddedLang {
 }
 
 impl EmbeddedLang {
-    /// Compile + certify a `.rg` grammar source. Refusals come back as
+    /// Compile + certify a `.qana` grammar source. Refusals come back as
     /// span-carrying diagnostics against the grammar text.
-    pub fn from_rg_source(src: &str) -> Result<Self, Vec<RgDiag>> {
-        let tc = RgToolchain::new();
+    pub fn from_rg_source(src: &str) -> Result<Self, Vec<QanaDiag>> {
+        let tc = QanaToolchain::new();
         let out = compile_source(&tc, src);
         let mut diags = out.diags.clone();
         if !out.repairs.is_empty() {
-            diags.push(RgDiag {
+            diags.push(QanaDiag {
                 span: (0, 1),
                 msg: format!("{} parse repair(s) in the grammar source", out.repairs.len()),
                 severity: 1,
@@ -114,26 +114,26 @@ impl EmbeddedLang {
     }
 }
 
-/// Parse + compile a `.rg` source. Total: broken sources still yield a
+/// Parse + compile a `.qana` source. Total: broken sources still yield a
 /// tree (with repairs) and a best-effort definition (with diagnostics).
-pub fn compile_source(tc: &RgToolchain, src: &str) -> RgOutcome {
+pub fn compile_source(tc: &QanaToolchain, src: &str) -> QanaOutcome {
     let session = IncSession::new(&tc.lexer, &tc.sg, &tc.tables, src)
         .expect("total parsing under recovery");
     let tree = session.tree().expect("total").clone();
     let repairs = session.last_repairs.clone();
     let (def, diags) = compile(&tree, &tc.prods);
-    RgOutcome { tree, repairs, def, diags }
+    QanaOutcome { tree, repairs, def, diags }
 }
 
 // ---------------------------------------------------------------------------
-// Composition (Part III tier 1): chartlang hosting `.rg` islands —
+// Composition (Part III tier 1): chartlang hosting `.qana` islands —
 // code files carrying grammar definitions in fenced blocks. Built with
 // the GENERIC compose() operator over the two envelope grammars this
 // workspace already certifies, then re-certified as one product.
 // ---------------------------------------------------------------------------
 
-/// The composed chartlang⊃rg pipeline: `` ```rg `` … `` ``` `` fenced
-/// islands are statements; island interiors are full `.rg` — lexing,
+/// The composed chartlang⊃qana pipeline: `` ```qana `` … `` ``` `` fenced
+/// islands are statements; island interiors are full `.qana` — lexing,
 /// parsing, balancing, recovery, highlighting all from the ONE product
 /// grammar.
 pub struct ComposedToolchain {
@@ -150,9 +150,9 @@ pub fn chartlang_with_rg_islands() -> ComposedToolchain {
     let (host_lex, host_ids) = demo_grammar();
     let host_lexer = CompiledLexer::build(&host_lex).expect("host in envelope");
     let host_sg = demo_syn_grammar(&host_ids, &host_lexer.vocab);
-    let (guest_lex, guest_ids) = rg_lex_grammar();
+    let (guest_lex, guest_ids) = qana_lex_grammar();
     let guest_lexer = CompiledLexer::build(&guest_lex).expect("guest in envelope");
-    let (guest_sg, _) = rg_syn_grammar(&guest_ids, &guest_lexer.vocab);
+    let (guest_sg, _) = qana_syn_grammar(&guest_ids, &guest_lexer.vocab);
 
     let (lex, sg, map) = qana_grammar::compose(
         &host_lex,
@@ -160,11 +160,11 @@ pub fn chartlang_with_rg_islands() -> ComposedToolchain {
         &guest_lex,
         &guest_sg,
         &[qana_grammar::IslandSpec {
-            open_text: "```rg".into(),
+            open_text: "```qana".into(),
             close_text: "```".into(),
             host_mode: 0,
             attach_to: "stmt".into(),
-            name: "rg".into(),
+            name: "qana".into(),
         }],
     )
     .expect("compositional checks pass");
@@ -184,7 +184,7 @@ pub fn chartlang_with_rg_islands() -> ComposedToolchain {
             styles.set(id, host_styles.legend[c as usize]);
         }
     }
-    let guest_styles = rg_styles(&guest_ids);
+    let guest_styles = qana_styles(&guest_ids);
     for id in 0..guest_lex.tokens.len() as qana_grammar::TokenId {
         if let Some(c) = guest_styles.class_of(id) {
             styles.set(id + map.guest_token_offset, guest_styles.legend[c as usize]);
@@ -201,7 +201,7 @@ pub fn chartlang_with_rg_islands() -> ComposedToolchain {
     // forward-resolving, and sealed in both directions.
     let binding = qana_sem::compose_binding(
         &qana_sem::demo_binding_config(&sg),
-        &rg_binding_config(&guest_sg),
+        &qana_binding_config(&guest_sg),
         &sg,
         &map,
     );
@@ -210,12 +210,12 @@ pub fn chartlang_with_rg_islands() -> ComposedToolchain {
 }
 
 // ---------------------------------------------------------------------------
-// Editor-service glue for `.rg` files themselves (the dogfood loop:
+// Editor-service glue for `.qana` files themselves (the dogfood loop:
 // grammar files get qana-powered highlighting, outline, navigation).
-// These mirror what compiling `rg.rg` produces — gated in rg_e2e.
+// These mirror what compiling `qana.qana` produces — gated in qana_e2e.
 // ---------------------------------------------------------------------------
 
-pub fn rg_styles(ids: &RgIds) -> qana_services::Styles {
+pub fn qana_styles(ids: &QanaIds) -> qana_services::Styles {
     let mut s = qana_services::Styles::new(qana_services::LEGEND.to_vec());
     for &kw in &ids.kw {
         s.set(kw, "keyword");
@@ -242,7 +242,7 @@ pub fn rg_styles(ids: &RgIds) -> qana_services::Styles {
     s
 }
 
-pub fn rg_outline_config(sg: &SynGrammar) -> qana_services::OutlineConfig {
+pub fn qana_outline_config(sg: &SynGrammar) -> qana_services::OutlineConfig {
     let mut cfg = qana_services::OutlineConfig::default();
     for i in 0..sg.prods.len() {
         let (nt, prod) = (sg.prods[i].lhs, i as u16);
@@ -262,7 +262,7 @@ pub fn rg_outline_config(sg: &SynGrammar) -> qana_services::OutlineConfig {
 /// Binding for grammar files: token/rule/mode declarations define names,
 /// RHS symbol references read them — one flat, UNORDERED namespace
 /// (forward references are the normal case in grammars).
-pub fn rg_binding_config(sg: &SynGrammar) -> qana_sem::BindingConfig {
+pub fn qana_binding_config(sg: &SynGrammar) -> qana_sem::BindingConfig {
     let mut cfg = qana_sem::BindingConfig { unordered: true, ..Default::default() };
     for i in 0..sg.prods.len() {
         let (nt, prod) = (sg.prods[i].lhs, i as u16);
@@ -283,18 +283,18 @@ pub fn rg_binding_config(sg: &SynGrammar) -> qana_sem::BindingConfig {
 
 #[cfg(test)]
 mod bootstrap_tests {
-    use crate::bootstrap::{rg_lex_grammar, rg_syn_grammar};
+    use crate::bootstrap::{qana_lex_grammar, qana_syn_grammar};
     use qana_grammar::{build_lr, CompiledLexer};
 
     #[test]
     fn bootstrap_is_in_envelope_and_conflict_free() {
-        let (g, ids) = rg_lex_grammar();
-        let lexer = CompiledLexer::build(&g).expect("rg lexical grammar passes its own lints");
-        let (sg, _) = rg_syn_grammar(&ids, &lexer.vocab);
+        let (g, ids) = qana_lex_grammar();
+        let lexer = CompiledLexer::build(&g).expect("qana lexical grammar passes its own lints");
+        let (sg, _) = qana_syn_grammar(&ids, &lexer.vocab);
         let tables = build_lr(&sg);
         assert!(
             tables.conflicts.is_empty(),
-            "rg syntax grammar must be conflict-free:\n{}",
+            "qana syntax grammar must be conflict-free:\n{}",
             tables
                 .conflicts
                 .iter()
@@ -302,6 +302,6 @@ mod bootstrap_tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        assert!(!tables.lists.is_empty(), "rg grammar's lists are L4-detected");
+        assert!(!tables.lists.is_empty(), "qana grammar's lists are L4-detected");
     }
 }

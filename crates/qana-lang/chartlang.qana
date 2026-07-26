@@ -1,23 +1,10 @@
-// chartlang.rg — the ENTIRE language definition, live-editable.
+// chartlang.qana — the demo language, as text.
 //
-// Open demo.cl next to this file and edit anything here: tokens,
-// keywords, operators, precedence, whole productions. On save, the
-// qana pipeline (envelope lints, LR tables, styles, binding) rebuilds
-// in milliseconds and open documents re-colorize. This file is ALSO
-// served by qana itself — highlighting, outline, go-to-definition on
-// rule names, and live envelope diagnostics as you type.
-//
-// Things to try:
-//   * Add a keyword (say `async`) to the `keywords` line.
-//   * Add an operator: declare `token CARET = "^" @style(operator)`,
-//     give it a precedence line, and add
-//     `| PowExpr: expr "^" expr` to `rule expr`.
-//   * Delete the `prec` lines — the envelope REFUSES the now-ambiguous
-//     expression grammar, pointing at a production with a concrete
-//     counterexample input. Undo, and the language comes back.
-//   * Type `let x = 1 + "one";` in demo.cl — the DECLARED type tier
-//     (the @type annotations below) reports the mismatch on the exact
-//     operand, live. `Num`/`Str` are this grammar's own vocabulary.
+// Compiling this file must reproduce the programmatic demo grammar
+// (crates/qana-grammar/src/demo.rs) EXACTLY: lexical grammar, syntax
+// grammar, LR tables, styles, outline, and binding config all compare
+// equal, and both pipelines parse the demo corpus into semantically
+// identical trees (gated in tests/qana_e2e.rs).
 
 language Demo
 max_stack 8
@@ -65,8 +52,6 @@ start file
 
 rule file = File: stmts
 
-// EBNF sugar: `stmt*` desugars to a left-recursive, auto-balanced list
-// (StmtsEmpty/StmtsMore). `expr* % ","` below is a comma-separated one.
 rule stmts = stmt*
 
 rule stmt =
@@ -90,4 +75,6 @@ rule expr =
   | ParenExpr: "(" e:expr ")" @type(of, e)
   | ListExpr: "[" args "]"
 
+// `expr* % ","` — possibly-empty comma-separated list: desugars to the
+// wrapper (ArgsNone/ArgsSome) plus a nonempty inner rule `args_ne`.
 rule args = expr* % ","

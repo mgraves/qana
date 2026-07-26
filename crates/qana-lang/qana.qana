@@ -1,9 +1,9 @@
-// rg.rg — the .rg grammar surface, described in itself.
+// qana.qana — the .qana grammar surface, described in itself.
 //
 // This file is the self-hosting fixed point: parsed by the bootstrap
 // grammar (crates/qana-lang/src/bootstrap.rs) and compiled, it must
 // reproduce that bootstrap EXACTLY — token for token, production for
-// production, table for table (gated in tests/rg_e2e.rs). Declaration
+// production, table for table (gated in tests/qana_e2e.rs). Declaration
 // order here is the source of truth the bootstrap mirrors.
 //
 // Since P5 increment 2 the surface uses its OWN EBNF sugar: the list
@@ -11,7 +11,7 @@
 // the bootstrap declares by hand (naming convention: Empty/More for
 // `x*`, First/More for `x+`, None/Some for `x?`).
 
-language Rg
+language Qana
 
 token WS = /\s+/ @trivia
 token LINE_COMMENT = /\/\/.*/ @trivia @style(comment)
@@ -35,7 +35,7 @@ token PLUS = "+" @style(operator)
 token QMARK = "?" @style(operator)
 token PERCENT = "%" @style(operator)
 
-// The surface's own reserved words (quoted: they ARE .rg keywords).
+// The surface's own reserved words (quoted: they ARE .qana keywords).
 keywords NAME = "language" "max_stack" "keywords" "token" "mode" "pair" "prec" "left" "right" "start" "rule"
 
 pair LPAREN RPAREN

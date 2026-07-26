@@ -1,22 +1,22 @@
 //! Tree-sitter emission gates.
 //!
-//! The checked-in `tree-sitter/{chartlang,rg}/` artifacts are
+//! The checked-in `tree-sitter/{chartlang,qana}/` artifacts are
 //! drift-gated against fresh emission; the emitted JS is structurally
 //! validated (every `$.rule` reference defined, no empty-matching rule
 //! bodies); refusals explain themselves. When the `tree-sitter` CLI is
 //! on PATH the real `generate` runs too (soft-skipped otherwise —
 //! validated manually via npx: both grammars generate cleanly and the
-//! generated rg parser parses rg.rg and chartlang.rg with zero errors).
+//! generated qana parser parses qana.qana and chartlang.qana with zero errors).
 
 use qana_lang::compile::certify;
 use qana_lang::tsgen::emit_tree_sitter;
-use qana_lang::{compile_source, RgToolchain};
+use qana_lang::{compile_source, QanaToolchain};
 
-const RG_RG: &str = include_str!("../rg.rg");
-const CHARTLANG_RG: &str = include_str!("../chartlang.rg");
+const RG_RG: &str = include_str!("../qana.qana");
+const CHARTLANG_RG: &str = include_str!("../chartlang.qana");
 
 fn emit(src: &str) -> qana_lang::tsgen::TsOutput {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, src);
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     let (_, tables) = certify(&out.def).unwrap();
@@ -30,7 +30,7 @@ fn emitted_artifacts_are_current() {
     assert_eq!(
         include_str!("../../../tree-sitter/chartlang/grammar.js"),
         ts.grammar_js,
-        "regenerate: cargo run -p qana-lang --bin rg2ts -- crates/qana-lang/chartlang.rg tree-sitter/chartlang"
+        "regenerate: cargo run -p qana-lang --bin qana2ts -- crates/qana-lang/chartlang.qana tree-sitter/chartlang"
     );
     assert_eq!(
         include_str!("../../../tree-sitter/chartlang/queries/highlights.scm"),
@@ -38,11 +38,11 @@ fn emitted_artifacts_are_current() {
     );
     let ts = emit(RG_RG);
     assert_eq!(
-        include_str!("../../../tree-sitter/rg/grammar.js"),
+        include_str!("../../../tree-sitter/qana/grammar.js"),
         ts.grammar_js,
-        "regenerate: cargo run -p qana-lang --bin rg2ts -- crates/qana-lang/rg.rg tree-sitter/rg"
+        "regenerate: cargo run -p qana-lang --bin qana2ts -- crates/qana-lang/qana.qana tree-sitter/qana"
     );
-    assert_eq!(include_str!("../../../tree-sitter/rg/queries/highlights.scm"), ts.highlights_scm);
+    assert_eq!(include_str!("../../../tree-sitter/qana/queries/highlights.scm"), ts.highlights_scm);
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn emitted_js_is_structurally_sound() {
 
 #[test]
 fn non_trivia_modes_are_refused_with_explanation() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     // A string-interpolation-style mode: non-trivia content.
     let src = "\
 token A = \"a\"\ntoken OPEN = \"<\" @push(INNER)\n\
@@ -111,7 +111,7 @@ fn tree_sitter_generate_accepts_the_emission() {
         eprintln!("tree-sitter CLI not on PATH — skipping live generate check");
         return;
     };
-    for (name, src) in [("chartlang", CHARTLANG_RG), ("rg", RG_RG)] {
+    for (name, src) in [("chartlang", CHARTLANG_RG), ("qana", RG_RG)] {
         let dir = std::env::temp_dir().join(format!("qana-tsgen-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ts = emit(src);

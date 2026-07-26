@@ -1,4 +1,4 @@
-//! P7 gates: the composition tier. chartlang hosting `.rg` fenced
+//! P7 gates: the composition tier. chartlang hosting `.qana` fenced
 //! islands, built by the generic compose() operator and re-certified as
 //! ONE product grammar — then every existing guarantee is exercised ON
 //! composed documents: losslessness, incremental ≡ batch across island
@@ -15,7 +15,7 @@ fn doc() -> String {
     let mut s = String::new();
     s.push_str("let grammar_version = 3;\n");
     s.push_str("emit(grammar_version, 1);\n");
-    s.push_str("```rg\n");
+    s.push_str("```qana\n");
     s.push_str("language Embedded\n");
     s.push_str("token A = /a+/ @style(number)\n");
     s.push_str("token SEMI = \";\"\n");
@@ -24,7 +24,7 @@ fn doc() -> String {
     s.push_str("```\n");
     s.push_str("let after = grammar_version + 1;\n");
     s.push_str("emit(after, 2);\n");
-    s.push_str("```rg\n");
+    s.push_str("```qana\n");
     s.push_str("token B = \"b\"\n");
     s.push_str("rule file2 = File2: B?\n");
     s.push_str("```\n");
@@ -57,27 +57,27 @@ fn product_certifies_and_parses_composed_documents_losslessly() {
     let tree = s.tree().unwrap();
     assert_eq!(tree.text(), src, "lossless through the island boundary");
 
-    // The island production exists and CONTAINS a full .rg parse: a
+    // The island production exists and CONTAINS a full .qana parse: a
     // guest TokenDef and a guest sugar rule, as guest nonterminals.
     let island_prod = tc.map.islands[0].2;
     let island = find_prod(tree, island_prod).expect("island node");
     assert!(island.text().contains("language Embedded"));
-    let rg_token_def = (0..tc.sg.prods.len())
-        .find(|&i| tc.sg.prod_name(i) == "RgTokenDef")
+    let qana_token_def = (0..tc.sg.prods.len())
+        .find(|&i| tc.sg.prod_name(i) == "QanaTokenDef")
         .unwrap() as u16;
     assert!(
-        find_prod(island, rg_token_def).is_some(),
+        find_prod(island, qana_token_def).is_some(),
         "guest TokenDef parsed inside the island"
     );
-    let rg_sym_star = (0..tc.sg.prods.len())
-        .find(|&i| tc.sg.prod_name(i) == "RgSymNameStar")
+    let qana_sym_star = (0..tc.sg.prods.len())
+        .find(|&i| tc.sg.prod_name(i) == "QanaSymNameStar")
         .unwrap() as u16;
     assert!(
-        find_prod(island, rg_sym_star).is_some(),
+        find_prod(island, qana_sym_star).is_some(),
         "guest EBNF sugar parsed inside the island"
     );
 
-    // Product highlighting: chartlang keyword class outside, rg regexp
+    // Product highlighting: chartlang keyword class outside, qana regexp
     // class inside — one legend, one pass.
     let toks = qana_services::semantic_tokens_full(&tc.lexer, &s.buf, &tc.styles);
     let classes: Vec<u32> = toks.data.chunks(5).map(|q| q[3]).collect();
@@ -96,7 +96,7 @@ fn island_edits_hold_the_gate_and_reuse_the_host() {
     for i in 0..120 {
         src.push_str(&format!("let h{i} = {i};\n"));
     }
-    src.push_str("```rg\n");
+    src.push_str("```qana\n");
     for i in 0..60 {
         src.push_str(&format!("token T{i} = \"t{i}\"\n"));
     }
@@ -182,7 +182,7 @@ fn fence_damage_recovers_and_heals() {
 fn host_semantics_flow_around_islands_even_broken_ones() {
     let tc = chartlang_with_rg_islands();
     // Garbage INSIDE the island; host defs before and after.
-    let src = "let before = 1;\n```rg\n%%% utter garbage (((\n```\nlet after = before;\nemit(after, 1);\n";
+    let src = "let before = 1;\n```qana\n%%% utter garbage (((\n```\nlet after = before;\nemit(after, 1);\n";
     let s = IncSession::new(&tc.lexer, &tc.sg, &tc.tables, src).unwrap();
     assert_eq!(s.tree().unwrap().text(), src, "lossless around a broken island");
 
@@ -195,7 +195,7 @@ fn host_semantics_flow_around_islands_even_broken_ones() {
     assert_eq!(&src[span.0 as usize..span.1 as usize], "before");
     // Unresolved diagnostics stay CONTAINED: the island garbage is
     // diagnosed (as sealed guest refs), host names never are.
-    let island_start = src.find("```rg").unwrap() as u32;
+    let island_start = src.find("```qana").unwrap() as u32;
     let island_end = src.find("\n```\n").unwrap() as u32 + 4;
     for (name, span) in db.unresolved("a") {
         assert!(
@@ -214,14 +214,14 @@ fn island_intellisense_resolves_within_and_never_across() {
     let tc = chartlang_with_rg_islands();
     let src = "\
 let shared = 1;\n\
-```rg\n\
+```qana\n\
 rule file = File: widget*\n\
 rule widget = Widget: A \"x\"\n\
 token A = /a+/\n\
 token X = \"x\"\n\
 ```\n\
 let out = shared;\n\
-```rg\n\
+```qana\n\
 rule widget = W2: B\n\
 token B = \"b\"\n\
 ```\n\
@@ -274,7 +274,7 @@ emit(missing_host, 1);\n";
 #[test]
 fn guest_refs_never_leak_to_host_bindings() {
     let tc = chartlang_with_rg_islands();
-    let src = "let tempting = 1;\n```rg\nrule file = File: tempting\n```\n";
+    let src = "let tempting = 1;\n```qana\nrule file = File: tempting\n```\n";
     let s = IncSession::new(&tc.lexer, &tc.sg, &tc.tables, src).unwrap();
     assert!(s.last_repairs.is_empty());
     let mut db = SemDb::new(tc.binding.clone());
@@ -294,11 +294,11 @@ fn guest_refs_never_leak_to_host_bindings() {
 
 /// Keyword specialization is PER-OWNER: a host keyword is an ordinary
 /// identifier inside a guest island. `let` — a chartlang keyword — is a
-/// perfectly good rule name in embedded .rg.
+/// perfectly good rule name in embedded .qana.
 #[test]
 fn keyword_spaces_stay_separate_across_the_boundary() {
     let tc = chartlang_with_rg_islands();
-    let src = "let x = 1;\n```rg\ntoken A = \"a\"\nrule let = IfRule: A\n```\nlet y = x;\n";
+    let src = "let x = 1;\n```qana\ntoken A = \"a\"\nrule let = IfRule: A\n```\nlet y = x;\n";
     let s = IncSession::new(&tc.lexer, &tc.sg, &tc.tables, src).unwrap();
     assert!(
         s.last_repairs.is_empty(),

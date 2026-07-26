@@ -135,7 +135,7 @@ fn single_edit_reuses_bulk_of_tree() {
     assert!(out.stats.splices >= 1);
 }
 
-/// REGRESSION (found by the P5 `.rg` dogfood): balanced-list RUN chunks
+/// REGRESSION (found by the P5 `.qana` dogfood): balanced-list RUN chunks
 /// are arbitrary ≤MAX_RUN cuts, so an intact reused run can end with a
 /// dangling separator. Blind associative absorption then leaves the LR
 /// state one shift behind the tree, and the next item triggers a
@@ -171,7 +171,7 @@ fn multiline_separator_list_run_boundaries_hold_the_gate() {
     }
 }
 
-/// REGRESSION (found by the P5 `.rg` dogfood): Wagner right breakdown.
+/// REGRESSION (found by the P5 `.qana` dogfood): Wagner right breakdown.
 /// A reused subtree's right-spine reductions assumed the OLD following
 /// lookahead. Appending an `else` branch after an existing `if` must
 /// UN-SPLICE the reused IfStmt and re-derive it as IfElseStmt — without

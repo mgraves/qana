@@ -17,11 +17,11 @@ report (artifact link in the project notes).
 cargo build --release
 cargo install --path crates/qana-cli    # puts `qana` on your PATH
 qana new mylang --name Mylang --ext .my
-qana check mylang/mylang.rg
-qana parse mylang/mylang.rg mylang/example.my
+qana check mylang/mylang.qana
+qana parse mylang/mylang.qana mylang/example.my
 ```
 
-One `.rg` file is the whole language: tokens, keywords, precedence,
+One `.qana` file is the whole language: tokens, keywords, precedence,
 syntax, highlighting, outline, and name binding. `check` certifies it
 against the envelope and prints the certificate — or refuses it with a
 counterexample. Everything else is derived.
@@ -29,7 +29,7 @@ counterexample. Everything else is derived.
 * **[docs/GUIDE.md](docs/GUIDE.md)** — the user guide: your own language in
   ten minutes, the editor path, embedding, and an honest list of what is
   not built yet.
-* **[docs/RG-REFERENCE.md](docs/RG-REFERENCE.md)** — the `.rg` language
+* **[docs/QANA-REFERENCE.md](docs/QANA-REFERENCE.md)** — the `.qana` language
   reference: every declaration, annotation, and envelope rule.
 
 The rest of this file is the engineering log: what each increment
@@ -416,26 +416,26 @@ name-indexing fixed it, 620×). Deliberate scope notes: resolution
 recomputes whole-file on any tree change (per-item memoization is the
 next granularity); `names_in_scope` is demo-grade positional.
 
-## P5 — increment 1 (shipped): the `.rg` textual grammar surface, self-hosted
+## P5 — increment 1 (shipped): the `.qana` textual grammar surface, self-hosted
 
-`crates/qana-lang` is the textual surface: a `.rg` file declares the
+`crates/qana-lang` is the textual surface: a `.qana` file declares the
 ENTIRE language — tokens (`/regex/` or `"literal"` patterns), modes,
 `keywords` (specialization), bracket `pair`s, `prec` lines, labeled
 productions, and the editor annotations (`@style`, `@def/@ref/@scope`,
 `@outline`) — and compiles to exactly the grammar VALUES the rest of the
-toolchain runs on. `.rg` lives inside its own envelope: line terminators
+toolchain runs on. `.qana` lives inside its own envelope: line terminators
 are unwritable in patterns (negated classes and `.` exclude them by
 construction), alternatives carry mandatory labels (which name the typed
 AST — and keep the grammar LR(1)), and the whole surface is newline-
 insensitive.
 
-**Self-hosting, proven as a fixed point:** `rg.rg` — the `.rg` grammar
-written in `.rg` — is parsed by the bootstrap grammar (the same
+**Self-hosting, proven as a fixed point:** `qana.qana` — the `.qana` grammar
+written in `.qana` — is parsed by the bootstrap grammar (the same
 declarations as Rust values) and compiled; the result must reproduce the
 bootstrap EXACTLY: lexical grammar (structural equality), syntax
 grammar, LR tables, styles, outline, and binding config — and
 generation 1 re-parses its own source into the bootstrap's tree.
-Likewise `chartlang.rg` compiles to the programmatic demo grammar
+Likewise `chartlang.qana` compiles to the programmatic demo grammar
 value-for-value and table-for-table, with a corpus differential on top.
 Envelope refusals are **span-mapped**: an unknown name, a bad pattern, an
 L1/L2 witness, or an LR conflict counterexample each point at the
@@ -462,29 +462,29 @@ regressions:
   lookahead — repair is the fallback, not the first answer.
 
 **The editor loop, closed:** the LSP now serves TWO languages — the
-target language (pipeline hot-reloaded from `chartlang.rg`, with
-`chartlang.toml` as legacy fallback) and `.rg` files themselves
+target language (pipeline hot-reloaded from `chartlang.qana`, with
+`chartlang.toml` as legacy fallback) and `.qana` files themselves
 (highlighting incl. a `regexp` class, outline of rules/tokens/modes with
 LSP kinds, forward-reference go-to-definition via the new UNORDERED
 binding mode in qana-sem, and live envelope diagnostics as you type —
 conflicts pointing at productions). The playground's config is now the
-full grammar file. Protocol tests cover both (.rg services + .rg
+full grammar file. Protocol tests cover both (.qana services + .qana
 hot-reload with span-accurate refusal).
 
-Numbers (M-series, release): bootstrap toolchain 1.78 ms; `rg.rg`
-parse+compile 637 µs + certify 1.58 ms; `chartlang.rg` 457 µs + 3.24 ms
+Numbers (M-series, release): bootstrap toolchain 1.78 ms; `qana.qana`
+parse+compile 637 µs + certify 1.58 ms; `chartlang.qana` 457 µs + 3.24 ms
 (the whole language, text → certified pipeline, under 4 ms); a
 1302-line synthetic grammar (300 tokens, 800 prods) compiles in 4.67 ms
 of which the compile pass is 474 µs — the text surface is noise next to
 the table build. A keystroke edit in that grammar file reparses in
 **21 µs** (99.9% reuse) vs 1.80 ms batch. Deliberate scope notes: BNF
 only (EBNF sugar desugars later), literals must be declared (no silent
-keyword auto-derivation), `pair` brackets fixed to `()[]{}`, and .rg's
+keyword auto-derivation), `pair` brackets fixed to `()[]{}`, and .qana's
 reserved words are unusable as bare names in argument positions (quote
 them) — the `bracket`-vs-`@style(bracket)` collision that forced the
 `pair` keyword was itself caught by the fixed-point gate.
 
-## P5 — increment 2 (shipped): EBNF sugar on the `.rg` surface
+## P5 — increment 2 (shipped): EBNF sugar on the `.qana` surface
 
 Rule-level repetition forms — `rule stmts = stmt*`, `rule kw_list =
 kw_item+`, `rule args = expr* % ","` (raku-lineage `%` for separators),
@@ -500,10 +500,10 @@ hand-written grammar. Proven literally: the sugar gate compiles sugared
 and hand-desugared sources and asserts identical grammar values AND
 identical LR tables, with every generated repetition L4-detected.
 
-The self-hosting story deepens: `rg.rg` now uses its own sugar (eight
+The self-hosting story deepens: `qana.qana` now uses its own sugar (eight
 list rules became one-liners; the bootstrap hand-writes the desugared
 productions under the same names, and the fixed point still holds
-exactly), and `chartlang.rg`'s `stmt*` / `expr* % ","` reproduce the
+exactly), and `chartlang.qana`'s `stmt*` / `expr* % ","` reproduce the
 demo grammar value-for-value (demo production names adopted the
 convention: `ArgsNone`/`ArgsNeFirst`/`ArgsNeMore` — the rename rippled
 through the drift-gated typed AST, exercising ramification once more).
@@ -515,13 +515,13 @@ caught a genuinely ambiguous grammar in this increment's own test
 suite — a possibly-empty separated list adjacent to a bare repetition —
 with a minimal counterexample (`B A · A`).
 
-Numbers hold: the sugared `chartlang.rg` is 80 lines compiling in
+Numbers hold: the sugared `chartlang.qana` is 80 lines compiling in
 235 µs (was 86 lines / 457 µs — sugar makes grammars smaller AND
 cheaper); text → certified pipeline still under 2 ms.
 
 ## P5 — increment 3 (shipped): tree-sitter grammar emission
 
-`qana_lang::tsgen` + the `rg2ts` binary emit a tree-sitter
+`qana_lang::tsgen` + the `qana2ts` binary emit a tree-sitter
 `grammar.js` and `queries/highlights.scm` from any envelope-certified
 grammar — the "derived artifact" of the original feasibility report:
 one definition also reaches every tree-sitter-native surface (Neovim,
@@ -549,9 +549,9 @@ Validated against the real thing: `tree-sitter generate` (v0.25)
 accepts both emitted grammars — our canonical-LR(1) discipline held
 under tree-sitter's weaker LALR(1) — and the generated parsers parse
 the corpus with **zero errors**: the chartlang parser reads `demo.cl`,
-and the rg parser reads `rg.rg` and `chartlang.rg` — a tree-sitter
+and the qana parser reads `qana.qana` and `chartlang.qana` — a tree-sitter
 parser, emitted from a self-hosted grammar, parsing that grammar's own
-source. Checked-in artifacts under `tree-sitter/{chartlang,rg}/` are
+source. Checked-in artifacts under `tree-sitter/{chartlang,qana}/` are
 drift-gated; emitted JS is structurally validated (all `$.rule`
 references defined, deterministic output); the live `generate` gate
 soft-skips when the CLI is absent.
@@ -620,8 +620,8 @@ Wagner splicing, recovery, L4 balancing, per-item memoization, product
 highlighting — applies to island content verbatim, because the engine
 never learns there were two languages.
 
-The dogfood instance: **chartlang hosting `.rg` fenced islands**
-(`` ```rg `` … `` ``` ``) — code files carrying grammar definitions,
+The dogfood instance: **chartlang hosting `.qana` fenced islands**
+(`` ```qana `` … `` ``` ``) — code files carrying grammar definitions,
 the seed of the macro tier's declared argument grammars. Gates: the
 product certifies; composed documents parse losslessly with full guest
 structure inside islands (a guest `TokenDef` and EBNF sugar, as typed
@@ -636,9 +636,9 @@ Composing honestly surfaced two real bugs, both fixed with gates:
 * **Keyword specialization was global** — the guest's identifier token
   specialized `let` into the HOST's keyword id inside islands. Keywords
   now carry their OWNER (the @specialize token they belong to) through
-  the model, the `.rg` compiler, and the lexer: per-owner
+  the model, the `.qana` compiler, and the lexer: per-owner
   specialization keeps composed keyword spaces separate — `rule let =`
-  is valid `.rg` inside a chartlang island.
+  is valid `.qana` inside a chartlang island.
 * **Right breakdown dead-ended at emptied list builders**: unwinding a
   reused list's pieces left the automaton in the after-list state with
   an empty builder, so recovery fabricated separators for valid text.
@@ -656,7 +656,7 @@ Deliberate scope notes: guest binding configs are not composed yet
 and highlighting; guest-side IntelliSense inside islands is next),
 island extent is lexical (unterminated guest modes extend it, like any
 unclosed delimiter), and foreign guests (Markdown via pulldown-cmark)
-plus the `.rg` `island` declaration surface are the tier's remaining
+plus the `.qana` `island` declaration surface are the tier's remaining
 increments.
 
 ## P7 — increment 2 (shipped): guest binding composition
@@ -674,7 +674,7 @@ cross-language jump), and island names are invisible to the host and
 to other islands. `qana_sem::compose_binding(host, guest, sg, map)`
 composes the configs mechanically: host entries unchanged (ids
 preserved by composition), guest entries offset, each island a barrier
-scope carrying the guest's root ordering. The `.rg` surface gained
+scope carrying the guest's root ordering. The `.qana` surface gained
 `@scope(unordered)` for declaration-language scopes.
 
 Because islands attach as statements, island content lives entirely
@@ -720,7 +720,7 @@ reparse of the same final text and fails if they differ.
   now works — gated on `- 2 * 3` grouping as `(-2) * 3`.
 * **`@scope(unordered)` on the start rule did nothing.** Per-scope
   ordering only governs one item; whole-file ordering reads a global
-  flag with no `.rg` surface, so declaring the root unordered silently
+  flag with no `.qana` surface, so declaring the root unordered silently
   failed and forward references at top level went unresolved *without*
   being reported unresolved. The root annotation now lifts to the file.
 * **The tree printer crashed on synthetic node ids.** L4 LIST/RUN nodes
@@ -728,18 +728,18 @@ reparse of the same final text and fails if they differ.
   printer now names them (and shows the balanced-list shape, which makes
   L4 visible rather than merely claimed).
 
-The grammar file also no longer has to be called `chartlang.rg`: the LSP
-takes any single `.rg` in the workspace root as the language definition,
+The grammar file also no longer has to be called `chartlang.qana`: the LSP
+takes any single `.qana` in the workspace root as the language definition,
 gated by `serves_a_grammar_under_any_name`.
 
 Gates: six CLI integration tests drive the shipped binary end to end
 (scaffold certifies/parses/resolves; ambiguity refused with a
 counterexample; unknown escapes refused; broken documents stay lossless;
-incremental equals batch; exports write files), plus the two `.rg`
-regressions above. The self-hosting fixed point and the `chartlang.rg ≡
+incremental equals batch; exports write files), plus the two `.qana`
+regressions above. The self-hosting fixed point and the `chartlang.qana ≡
 demo` differential both still hold across the pattern-parser change.
 Docs: [docs/GUIDE.md](docs/GUIDE.md) and
-[docs/RG-REFERENCE.md](docs/RG-REFERENCE.md), every command in them run
+[docs/QANA-REFERENCE.md](docs/QANA-REFERENCE.md), every command in them run
 against a fresh scaffold before shipping.
 
 ## The declared type tier (shipped): types as grammar-author data
@@ -1567,9 +1567,9 @@ language is defined in itself, parsed by its own engine, and its files
 get the same editor intelligence as the languages it defines** — and it
 is now drivable from a command line and documented for someone who has
 never seen the codebase.
-Remaining roadmap (per the feasibility report): the `.rg` `island`
+Remaining roadmap (per the feasibility report): the `.qana` `island`
 declaration surface + foreign guests (Markdown) + composed pipelines
-served over LSP, grouping on the `.rg` surface, per-name semantic
+served over LSP, grouping on the `.qana` surface, per-name semantic
 dependency tracking / real salsa swap-in, and the macro tier (declared
 argument grammars over the island machinery). Nearer-term gaps the guide
 records honestly: nothing is published anywhere, the VS Code extension is

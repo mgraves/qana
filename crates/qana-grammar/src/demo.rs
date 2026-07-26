@@ -304,7 +304,7 @@ pub fn demo_syn_grammar_prec(
     sg.prod_named(expr, "ParenExpr", vec![t(ids.lparen), n(expr), t(ids.rparen)]);
     sg.prod_named(expr, "ListExpr", vec![t(ids.lbracket), n(args), t(ids.rbracket)]);
 
-    // Named to match what the .rg surface's `expr* % ","` sugar
+    // Named to match what the .qana surface's `expr* % ","` sugar
     // generates (the text≡code gate compares production names too).
     sg.prod_named(args, "ArgsNone", vec![]);
     sg.prod_named(args, "ArgsSome", vec![n(args_ne)]);

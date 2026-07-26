@@ -37,7 +37,7 @@ fn scaffold(dir: &Path) -> (String, String) {
     let out = run(&["new", dir.to_str().unwrap(), "--name", "Mylang", "--ext", ".my"]);
     assert!(out.status.success(), "scaffold failed: {}", stderr(&out));
     (
-        dir.join("mylang.rg").to_str().unwrap().to_string(),
+        dir.join("mylang.qana").to_str().unwrap().to_string(),
         dir.join("example.my").to_str().unwrap().to_string(),
     )
 }
@@ -83,7 +83,7 @@ fn ambiguous_grammar_is_refused_with_a_counterexample() {
     let src = std::fs::read_to_string(&g).unwrap();
     let ambiguous: String =
         src.lines().filter(|l| !l.starts_with("prec ")).collect::<Vec<_>>().join("\n");
-    let bad = dir.join("ambiguous.rg");
+    let bad = dir.join("ambiguous.qana");
     std::fs::write(&bad, ambiguous).unwrap();
 
     let out = run(&["check", bad.to_str().unwrap()]);
@@ -102,7 +102,7 @@ fn unknown_pattern_escapes_are_refused_not_silently_literal() {
     let dir = scratch("escape");
     let (g, _) = scaffold(&dir);
     let src = std::fs::read_to_string(&g).unwrap();
-    let bad = dir.join("escape.rg");
+    let bad = dir.join("escape.qana");
     std::fs::write(&bad, src.replace("/#.*/", "/#[\\s\\S]*/")).unwrap();
 
     let out = run(&["check", bad.to_str().unwrap()]);
@@ -206,7 +206,7 @@ fn tree_sitter_and_ast_exports_produce_output() {
 #[test]
 fn structs_example_serves_document_level_types() {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-    let g = format!("{root}/examples/structs/structlang.rg");
+    let g = format!("{root}/examples/structs/structlang.qana");
     let doc = format!("{root}/examples/structs/demo.sl");
     let out = run(&["types", &g, &doc]);
     assert!(out.status.success(), "example types clean: {}", stderr(&out));
@@ -225,9 +225,9 @@ fn structs_example_serves_document_level_types() {
 fn expand_materializes_and_the_drift_gate_bites() {
     let dir = scratch("expand");
     std::fs::create_dir_all(&dir).unwrap();
-    let g = dir.join("m.rg");
+    let g = dir.join("m.qana");
     let d = dir.join("doc.m");
-    std::fs::copy("../../examples/macrolang/mac.rg", &g).unwrap();
+    std::fs::copy("../../examples/macrolang/mac.qana", &g).unwrap();
     std::fs::write(&d, "macro twice(x) => { x + x }\nlet a = twice!(21);\n").unwrap();
     let (g, d) = (g.to_str().unwrap().to_string(), d.to_str().unwrap().to_string());
 
@@ -266,8 +266,8 @@ fn expand_materializes_and_the_drift_gate_bites() {
 fn expand_reflects_a_struct_declared_next_door() {
     let dir = scratch("reflect");
     std::fs::create_dir_all(&dir).unwrap();
-    let g = dir.join("s.rg");
-    std::fs::copy("../../examples/structs/structlang.rg", &g).unwrap();
+    let g = dir.join("s.qana");
+    std::fs::copy("../../examples/structs/structlang.qana", &g).unwrap();
     std::fs::write(
         dir.join("lib.sl"),
         "struct Vec3 {\n  x: Num,\n  y: Num,\n  z: Num\n}\n",

@@ -1,6 +1,6 @@
 //! `qana` — the command-line front door to the toolchain.
 //!
-//! One `.rg` grammar file defines a language. Each subcommand shows one
+//! One `.qana` grammar file defines a language. Each subcommand shows one
 //! layer of what the toolchain derives from it, in the order you'd meet
 //! them building a language:
 //!
@@ -24,9 +24,9 @@ use render::{bold, cyan, dim, green, red, Src, TreeOpts};
 use qana_engine::{IncSession, Line, LineEdit};
 use qana_grammar::astgen::generate_with_paths;
 use qana_grammar::{CompiledLexer, LrTables};
-use qana_lang::compile::{certify, compile, LangDef, RgDiag};
+use qana_lang::compile::{certify, compile, LangDef, QanaDiag};
 use qana_lang::tsgen::emit_tree_sitter;
-use qana_lang::RgToolchain;
+use qana_lang::QanaToolchain;
 use qana_sem::SemDb;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Instant;
@@ -40,28 +40,28 @@ USAGE
 COMMANDS
     new <dir> [--name Lang] [--ext .ext]
                             scaffold a grammar + sample document
-    check <grammar.rg>      certify the grammar; print the envelope report
-    tokens <grammar.rg> <file>
+    check <grammar.qana>      certify the grammar; print the envelope report
+    tokens <grammar.qana> <file>
                             show the lex, token by token
-    parse <grammar.rg> <file> [--trivia] [--depth N]
+    parse <grammar.qana> <file> [--trivia] [--depth N]
                             show the lossless parse tree and any repairs
-    outline <grammar.rg> <file>
+    outline <grammar.qana> <file>
                             derived document symbols
-    defs <grammar.rg> <file>
+    defs <grammar.qana> <file>
                             derived binding: defs, refs, unresolved
-    types <grammar.rg> <file> [--all]
+    types <grammar.qana> <file> [--all]
                             the declared type tier: typed defs, errors
-    expand <grammar.rg> <file> [--check] [--print] [--depth N]
+    expand <grammar.qana> <file> [--check] [--print] [--depth N]
                             the declared META tier: materialize macro
                             expansion as <file-stem>.exp.<ext> plus a
                             provenance sidecar (write-if-changed);
                             --check verifies the materialized pair is
                             current (the read-only drift gate)
-    edit <grammar.rg> <file> --line N --text \"...\"
+    edit <grammar.qana> <file> --line N --text \"...\"
                             reparse incrementally; report reuse and timing
-    ts <grammar.rg> <outdir>
+    ts <grammar.qana> <outdir>
                             emit a tree-sitter grammar + highlight queries
-    ast <grammar.rg>        emit a typed Rust AST to stdout
+    ast <grammar.qana>        emit a typed Rust AST to stdout
 
 Every command reads the grammar through the same certification the
 editor path uses: an out-of-envelope grammar produces a refusal with a
@@ -170,7 +170,7 @@ struct Lang {
 fn load(path: &str) -> Lang {
     let src = read_file(path);
     let s = Src::new(path, &src);
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
 
     // Parse the grammar file itself (total: a broken grammar still
     // yields a tree, so we can report every error at once).
@@ -206,7 +206,7 @@ fn load(path: &str) -> Lang {
 /// Point at the envelope rule behind a refusal. The diagnostics already
 /// carry witnesses; this adds the "why does this rule exist" line that
 /// turns a rejection into something actionable.
-fn explain(diags: &[RgDiag]) {
+fn explain(diags: &[QanaDiag]) {
     let mut seen = BTreeSet::new();
     for d in diags {
         let hint = if d.msg.contains("newline") || d.msg.contains("L1") {
@@ -254,7 +254,7 @@ fn load_siblings(lang: &Lang, db: &mut SemDb, doc_path: &str) {
 // new — scaffold
 // ---------------------------------------------------------------------------
 
-const STARTER_RG: &str = include_str!("starter/starter.rg");
+const STARTER_RG: &str = include_str!("starter/starter.qana");
 const STARTER_DOC: &str = include_str!("starter/starter.doc");
 
 fn cmd_new(args: &Args) {
@@ -279,7 +279,7 @@ fn cmd_new(args: &Args) {
     // `chartlang`; this association points YOUR extension at it.
     let settings = format!("{{\n  \"files.associations\": {{ \"*.{ext}\": \"chartlang\" }}\n}}\n");
 
-    let g_path = root.join(format!("{slug}.rg"));
+    let g_path = root.join(format!("{slug}.qana"));
     let d_path = root.join(format!("example.{ext}"));
     write_file(&g_path, &grammar);
     write_file(&d_path, &doc);
@@ -307,7 +307,7 @@ fn write_file(path: &std::path::Path, body: &str) {
 // ---------------------------------------------------------------------------
 
 fn cmd_check(args: &Args) {
-    let path = args.at(0, "grammar.rg");
+    let path = args.at(0, "grammar.qana");
     let lang = load(path);
     let (def, lexer, tables) = (&lang.def, &lang.lexer, &lang.tables);
 
@@ -413,7 +413,7 @@ fn row(label: &str, value: &str) {
 // ---------------------------------------------------------------------------
 
 fn cmd_tokens(args: &Args) {
-    let lang = load(args.at(0, "grammar.rg"));
+    let lang = load(args.at(0, "grammar.qana"));
     let doc_path = args.at(1, "file");
     let text = read_file(doc_path);
     let session = session_for(&lang, &text);
@@ -461,7 +461,7 @@ fn cmd_tokens(args: &Args) {
 // ---------------------------------------------------------------------------
 
 fn cmd_parse(args: &Args) {
-    let lang = load(args.at(0, "grammar.rg"));
+    let lang = load(args.at(0, "grammar.qana"));
     let doc_path = args.at(1, "file");
     let text = read_file(doc_path);
     let session = session_for(&lang, &text);
@@ -512,7 +512,7 @@ fn cmd_parse(args: &Args) {
 // ---------------------------------------------------------------------------
 
 fn cmd_outline(args: &Args) {
-    let lang = load(args.at(0, "grammar.rg"));
+    let lang = load(args.at(0, "grammar.qana"));
     let doc_path = args.at(1, "file");
     let text = read_file(doc_path);
     let session = session_for(&lang, &text);
@@ -530,7 +530,7 @@ fn cmd_outline(args: &Args) {
 }
 
 fn cmd_defs(args: &Args) {
-    let lang = load(args.at(0, "grammar.rg"));
+    let lang = load(args.at(0, "grammar.qana"));
     let doc_path = args.at(1, "file");
     let text = read_file(doc_path);
     let session = session_for(&lang, &text);
@@ -627,7 +627,7 @@ fn cmd_defs(args: &Args) {
 // ---------------------------------------------------------------------------
 
 fn cmd_expand(args: &Args) {
-    let grammar_path = args.at(0, "grammar.rg");
+    let grammar_path = args.at(0, "grammar.qana");
     let doc_path = args.at(1, "file");
     let lang = load(grammar_path);
     if !lang.def.macros.declared() {
@@ -749,7 +749,7 @@ fn cmd_expand(args: &Args) {
 // ---------------------------------------------------------------------------
 
 fn cmd_types(args: &Args) {
-    let lang = load(args.at(0, "grammar.rg"));
+    let lang = load(args.at(0, "grammar.qana"));
     let doc_path = args.at(1, "file");
     let text = read_file(doc_path);
     let session = session_for(&lang, &text);
@@ -832,7 +832,7 @@ fn cmd_types(args: &Args) {
 // ---------------------------------------------------------------------------
 
 fn cmd_edit(args: &Args) {
-    let lang = load(args.at(0, "grammar.rg"));
+    let lang = load(args.at(0, "grammar.qana"));
     let doc_path = args.at(1, "file");
     let text = read_file(doc_path);
     let line_no: usize = args
@@ -913,7 +913,7 @@ fn cmd_edit(args: &Args) {
 // ---------------------------------------------------------------------------
 
 fn cmd_ts(args: &Args) {
-    let lang = load(args.at(0, "grammar.rg"));
+    let lang = load(args.at(0, "grammar.qana"));
     let outdir = args.at(1, "outdir");
     let out = match emit_tree_sitter(
         &lang.def.lex,
@@ -944,6 +944,6 @@ fn cmd_ts(args: &Args) {
 }
 
 fn cmd_ast(args: &Args) {
-    let lang = load(args.at(0, "grammar.rg"));
+    let lang = load(args.at(0, "grammar.qana"));
     print!("{}", generate_with_paths(&lang.def.sg, &lang.tables, "qana_grammar"));
 }

@@ -9,7 +9,7 @@
 
 use qana_engine::{IncSession, Line, LineEdit};
 use qana_lang::compile::certify;
-use qana_lang::{compile_source, RgToolchain};
+use qana_lang::{compile_source, QanaToolchain};
 use qana_sem::SemDb;
 use std::time::Instant;
 
@@ -63,7 +63,7 @@ rule args = expr* % ","
 
 fn main() {
     let n: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(2000);
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, LANG);
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     let (lexer, tables) = certify(&out.def).expect("in envelope");

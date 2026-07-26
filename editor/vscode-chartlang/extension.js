@@ -28,10 +28,10 @@ function activate(context) {
     {
       documentSelector: [{ language: "chartlang" }, { language: "qana-grammar" }],
       // Let the server see language-definition saves quickly (it also
-      // polls). Any `.rg` in the workspace root can be the language
+      // polls). Any `.qana` in the workspace root can be the language
       // definition, so watch them all rather than one fixed name.
       synchronize: {
-        fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{rg,toml}"),
+        fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{qana,toml}"),
       },
     }
   );

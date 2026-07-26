@@ -5,17 +5,17 @@
 
 use qana_engine::IncSession;
 use qana_lang::compile::certify;
-use qana_lang::{compile_source, RgToolchain};
+use qana_lang::{compile_source, QanaToolchain};
 use qana_sem::SemDb;
 
-const C_RG: &str = include_str!("../../../examples/c/c.rg");
+const C_RG: &str = include_str!("../../../examples/c/c.qana");
 const DEMO: &str = include_str!("../../../examples/c/demo.c");
 
 #[test]
 fn c_subset_certifies_and_serves_the_demo() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
-    assert!(out.diags.is_empty(), "c.rg compiles: {:?}", out.diags);
+    assert!(out.diags.is_empty(), "c.qana compiles: {:?}", out.diags);
     let (lexer, tables) = certify(&out.def).expect("C subset is in the envelope");
     assert!(
         tables.n_states < 1000,
@@ -51,7 +51,7 @@ use qana_engine::{Line, LineEdit};
 /// directive line damages exactly that line.
 #[test]
 fn directives_are_line_bounded_and_define() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
     let (lexer, tables) = certify(&out.def).unwrap();
     let doc = "#include <stdio.h>\n#define LIMIT 100\nint use_it(void) { return LIMIT; }\n";
@@ -95,7 +95,7 @@ fn directives_are_line_bounded_and_define() {
 /// its slot.)
 #[test]
 fn deleting_a_block_comment_relexes_one_line() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
     let (lexer, tables) = certify(&out.def).unwrap();
     let mut doc = String::from("int a;\n/* c */\n");
@@ -124,7 +124,7 @@ fn deleting_a_block_comment_relexes_one_line() {
 /// the statement-expression tier surrendered the `IDENT *` prefix.
 #[test]
 fn typedef_heads_resolve_without_lexer_feedback() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
     let (lexer, tables) = certify(&out.def).unwrap();
     let doc = "\
@@ -184,7 +184,7 @@ int main(void) {\n\
 /// convergent spellings dodge is proved by the certifier itself.
 #[test]
 fn expression_tier_split_opens_four_doors() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
     let (lexer, tables) = certify(&out.def).expect("the split certifies");
 
@@ -264,7 +264,7 @@ int f(void) {\n\
 /// the ordering; the engine derives the rest.
 #[test]
 fn struct_tags_are_forward_declarable() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
     let (lexer, tables) = certify(&out.def).unwrap();
 
@@ -325,7 +325,7 @@ int len(node_t *n) { return node + n->val; }\n";
 /// cannot jump INTO a nested block — pinned below.
 #[test]
 fn labels_and_goto_navigate() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
     let (lexer, tables) = certify(&out.def).unwrap();
 
@@ -390,7 +390,7 @@ done:\n\
 /// meta tier's job, which owns macro objects wholesale).
 #[test]
 fn macro_adjacency_is_a_lexer_fact() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
     let (lexer, tables) = certify(&out.def).unwrap();
 
@@ -445,7 +445,7 @@ use qana_lang::expand::expand_document;
 /// token, so they do not expand.
 #[test]
 fn object_like_defines_expand_in_code_only() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
     let (lexer, tables) = certify(&out.def).unwrap();
     assert!(out.def.macros.declared(), "C declares its macro tier");
@@ -484,7 +484,7 @@ fn object_like_defines_expand_in_code_only() {
 /// consequence of the declaration, and it is pinned here.
 #[test]
 fn c_macro_bodies_are_token_soup_so_splicing_stays_textual() {
-    let tc = RgToolchain::new();
+    let tc = QanaToolchain::new();
     let out = compile_source(&tc, C_RG);
     let (lexer, tables) = certify(&out.def).unwrap();
     let doc = "#define ADD 1 + 2\nint f(int x) { return x * ADD; }\n";

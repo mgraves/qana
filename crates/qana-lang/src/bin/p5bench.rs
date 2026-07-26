@@ -1,13 +1,13 @@
 //! P5 benchmarks: what the textual grammar surface costs.
 //!
-//! The claim under test: `.rg` is a SURFACE — parsing and compiling the
+//! The claim under test: `.qana` is a SURFACE — parsing and compiling the
 //! text is noise next to the table build both paths share, and grammar
 //! files enjoy the same incremental editing budget as any hosted
 //! language.
 
 use qana_engine::{IncSession, Line, LineEdit, LineTerm};
 use qana_lang::compile::{certify, compile};
-use qana_lang::{compile_source, RgToolchain};
+use qana_lang::{compile_source, QanaToolchain};
 use std::time::{Duration, Instant};
 
 fn time<R>(f: impl FnOnce() -> R) -> (R, Duration) {
@@ -27,27 +27,27 @@ fn fmt_dur(d: Duration) -> String {
     }
 }
 
-const RG_RG: &str = include_str!("../../rg.rg");
-const CHARTLANG_RG: &str = include_str!("../../chartlang.rg");
+const RG_RG: &str = include_str!("../../qana.qana");
+const CHARTLANG_RG: &str = include_str!("../../chartlang.qana");
 
 fn main() {
-    println!("qana P5 — the .rg textual grammar surface");
+    println!("qana P5 — the .qana textual grammar surface");
     println!("===========================================");
 
-    let (tc, d) = time(RgToolchain::new);
+    let (tc, d) = time(QanaToolchain::new);
     println!("bootstrap toolchain (lex DFA + LR tables): {:>10}", fmt_dur(d));
 
     // Self-hosting round trip.
     let (out, d_parse) = time(|| compile_source(&tc, RG_RG));
     let (cert, d_cert) = time(|| certify(&out.def).expect("in envelope"));
-    println!("\nrg.rg ({} lines):", RG_RG.lines().count());
+    println!("\nrg.qana ({} lines):", RG_RG.lines().count());
     println!("  parse + compile to values:               {:>10}", fmt_dur(d_parse));
     println!("  certify (lints + LR build):              {:>10}", fmt_dur(d_cert));
     drop(cert);
 
     let (out, d_parse) = time(|| compile_source(&tc, CHARTLANG_RG));
     let (_cert, d_cert) = time(|| certify(&out.def).expect("in envelope"));
-    println!("chartlang.rg ({} lines):", CHARTLANG_RG.lines().count());
+    println!("chartlang.qana ({} lines):", CHARTLANG_RG.lines().count());
     println!("  parse + compile to values:               {:>10}", fmt_dur(d_parse));
     println!("  certify (lints + LR build):              {:>10}", fmt_dur(d_cert));
 
@@ -98,7 +98,7 @@ fn main() {
             }])
             .unwrap()
     });
-    println!("\nkeystroke edit in the synthetic .rg:");
+    println!("\nkeystroke edit in the synthetic .qana:");
     println!(
         "  incremental reparse:                     {:>10}   (reuse {:.1}%, {} splices)",
         fmt_dur(d_edit),

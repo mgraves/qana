@@ -1,6 +1,6 @@
 //! Terminal rendering: source-anchored diagnostics and green-tree dumps.
 //!
-//! The toolchain's refusals all carry byte spans into the `.rg` text (or
+//! The toolchain's refusals all carry byte spans into the `.qana` text (or
 //! into a target document). This module is the only thing that turns a
 //! span into something a person reads: `file:line:col`, the source line,
 //! and a caret under the offending run.
@@ -100,7 +100,7 @@ impl<'a> Src<'a> {
 ///
 /// ```text
 /// error: no rule named `stmts`
-///   --> mylang.rg:14:12
+///   --> mylang.qana:14:12
 ///    |
 /// 14 | rule file = File: stmts
 ///    |                   ^^^^^

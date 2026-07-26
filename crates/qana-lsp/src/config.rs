@@ -1,7 +1,7 @@
 //! The hot-reloadable language definition. Two sources, one certified
 //! pipeline:
 //!
-//! * `chartlang.rg` (preferred): the FULL textual grammar surface —
+//! * `chartlang.qana` (preferred): the FULL textual grammar surface —
 //!   tokens, modes, keywords, precedence, productions, binding and
 //!   style annotations — compiled by qana-lang and certified by the
 //!   envelope. Refusals carry source spans.
@@ -14,8 +14,8 @@
 
 use qana_grammar::demo::{demo_grammar_with_keywords, demo_syn_grammar_prec};
 use qana_grammar::{build_lr, Assoc, CompiledLexer, LrTables, SynGrammar, TokenId};
-use qana_lang::compile::{certify, RgDiag};
-use qana_lang::{compile_source, rg_binding_config, rg_outline_config, rg_styles, RgToolchain};
+use qana_lang::compile::{certify, QanaDiag};
+use qana_lang::{compile_source, qana_binding_config, qana_outline_config, qana_styles, QanaToolchain};
 use qana_sem::{demo_binding_config, BindingConfig};
 use qana_services::demo_glue::{demo_outline_config, demo_styles};
 use qana_services::{OutlineConfig, Styles};
@@ -114,7 +114,7 @@ pub struct Pipeline {
     pub outline_cfg: OutlineConfig,
     pub binding: BindingConfig,
     /// The declared type tier (empty for languages that declare none —
-    /// the legacy toml config and the `.rg` surface itself).
+    /// the legacy toml config and the `.qana` surface itself).
     pub types: qana_sem::TypeConfig,
 }
 
@@ -159,12 +159,12 @@ pub fn build_pipeline(cfg: &LangConfig) -> Result<Pipeline, String> {
     })
 }
 
-/// Build the target-language pipeline from a `.rg` grammar source. Parse
+/// Build the target-language pipeline from a `.qana` grammar source. Parse
 /// repairs, compile errors, and envelope refusals all come back as
 /// span-carrying diagnostics for the grammar file.
-pub fn build_pipeline_rg(tc: &RgToolchain, text: &str) -> Result<Pipeline, Vec<RgDiag>> {
+pub fn build_pipeline_qana(tc: &QanaToolchain, text: &str) -> Result<Pipeline, Vec<QanaDiag>> {
     let out = compile_source(tc, text);
-    let mut diags: Vec<RgDiag> = rg_parse_diags(tc, text, &out.repairs);
+    let mut diags: Vec<QanaDiag> = qana_parse_diags(tc, text, &out.repairs);
     diags.extend(out.diags.iter().cloned());
     if !diags.is_empty() {
         return Err(diags);
@@ -181,32 +181,32 @@ pub fn build_pipeline_rg(tc: &RgToolchain, text: &str) -> Result<Pipeline, Vec<R
     })
 }
 
-/// Parse repairs of a `.rg` text as span diagnostics (helper shared by
+/// Parse repairs of a `.qana` text as span diagnostics (helper shared by
 /// the reload path and the live-editing path).
-pub fn rg_parse_diags(
-    tc: &RgToolchain,
+pub fn qana_parse_diags(
+    tc: &QanaToolchain,
     text: &str,
     repairs: &[qana_grammar::Repair],
-) -> Vec<RgDiag> {
+) -> Vec<QanaDiag> {
     use qana_engine::LexedBuffer;
     let buf = LexedBuffer::new(&tc.lexer, text);
     qana_services::diagnostics(&tc.lexer, &buf, &tc.sg, repairs)
         .into_iter()
-        .map(|d| RgDiag { span: d.span, msg: d.message, severity: 1 })
+        .map(|d| QanaDiag { span: d.span, msg: d.message, severity: 1 })
         .collect()
 }
 
-/// The static pipeline for serving `.rg` documents THEMSELVES — the
+/// The static pipeline for serving `.qana` documents THEMSELVES — the
 /// dogfood loop: grammar files get qana-powered highlighting, outline,
 /// navigation, and live envelope diagnostics.
-pub fn rg_service_pipeline(tc: &'static RgToolchain) -> Pipeline {
+pub fn qana_service_pipeline(tc: &'static QanaToolchain) -> Pipeline {
     Pipeline {
         lexer: &tc.lexer,
         sg: &tc.sg,
         tables: &tc.tables,
-        styles: rg_styles(&tc.ids),
-        outline_cfg: rg_outline_config(&tc.sg),
-        binding: rg_binding_config(&tc.sg),
+        styles: qana_styles(&tc.ids),
+        outline_cfg: qana_outline_config(&tc.sg),
+        binding: qana_binding_config(&tc.sg),
         types: qana_sem::TypeConfig::default(),
     }
 }

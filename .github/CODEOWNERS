@@ -1,0 +1,11 @@
+# qana code owners
+#
+# These users own everything in the repository by default and are
+# automatically requested for review on every pull request. GitHub
+# enforces this via the "Require review from Code Owners" branch
+# protection rule on `main`.
+#
+# Add more granular rules above the catch-all as the maintainer
+# circle grows — most-specific match wins.
+
+* @mgraves

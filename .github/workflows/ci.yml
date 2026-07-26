@@ -57,3 +57,36 @@ jobs:
         env:
           RUSTFLAGS: ""
         run: cargo clippy --workspace --all-targets
+
+  # Licence / advisory / source policy over the dependency graph. qana's
+  # graph is deliberately tiny — the toolchain crates have zero external
+  # dependencies — and this is what keeps it that way rather than merely
+  # hoping. Config in deny.toml.
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # Contributions are DCO sign-off only, no CLA (see CONTRIBUTING.md), so
+  # the sign-off trailer is the only record that a contributor asserted the
+  # right to submit under MIT OR Apache-2.0. It has to be enforced.
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: tim-actions/get-pr-commits@v1.3.1
+        id: get-pr-commits
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: tim-actions/dco@v1.1.0
+        with:
+          commits: ${{ steps.get-pr-commits.outputs.commits }}

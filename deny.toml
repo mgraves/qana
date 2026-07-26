@@ -1,0 +1,75 @@
+# cargo-deny configuration — used by .github/workflows/ci.yml
+#
+# Run locally with:
+#   cargo install cargo-deny
+#   cargo deny check
+#
+# Four checks: advisories, licenses, bans, sources.
+#
+# qana's dependency graph is deliberately tiny — the toolchain crates carry
+# ZERO external dependencies, and `serde_json` in qana-lsp is the only one in
+# the whole workspace. That is a property worth keeping, and this file is
+# where it is enforced rather than merely hoped for.
+
+[graph]
+all-features = true
+
+# ---------------------------------------------------------------------------
+# Advisories — known-vulnerable / yanked crates per the RustSec database.
+# ---------------------------------------------------------------------------
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# CVEs and unmaintained-crate advisories are CI failures. `ignore` is the
+# escape hatch for cases where a vulnerability does not affect qana's usage
+# of the crate; document each entry with a comment.
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Licenses — every dependency must use an OSI-approved permissive licence
+# compatible with MIT OR Apache-2.0 outbound.
+# ---------------------------------------------------------------------------
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+# ---------------------------------------------------------------------------
+# Bans — restrict the dependency graph.
+# ---------------------------------------------------------------------------
+
+[bans]
+# Duplicate versions are common in transitive deps; warn so they stay
+# visible without blocking PRs on incidental churn.
+multiple-versions = "warn"
+# Wildcard `version = "*"` dependencies are forbidden — they make the build
+# non-reproducible.
+wildcards = "deny"
+# Crates that must not enter the graph. Empty for now.
+deny = []
+allow-wildcards = []
+
+# ---------------------------------------------------------------------------
+# Sources — restrict where dependencies may come from.
+# ---------------------------------------------------------------------------
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

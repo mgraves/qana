@@ -1,0 +1,19 @@
+# Direct issue submitters to the right channel.
+#
+# Blank issues are disabled — every issue should pick a template
+# (bug or feature) so triage knows immediately what kind of work
+# the report is. Larger discussions, "should X be done?" questions,
+# and design conversations go to Discussions instead.
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Question / discussion
+    url: https://github.com/mgraves/qana/discussions
+    about: For questions, design discussions, or "should we do X?" conversations, please use Discussions.
+  - name: My grammar was refused
+    url: https://github.com/mgraves/qana/discussions
+    about: A refusal is usually the envelope working as designed. Start a Discussion with the grammar and the counterexample qana printed — if the envelope is drawn in the wrong place, that is worth talking through.
+  - name: Security vulnerability
+    url: https://github.com/mgraves/qana/security/advisories/new
+    about: Report security issues privately via GitHub Security Advisory (see SECURITY.md).

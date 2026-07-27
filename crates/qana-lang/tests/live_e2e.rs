@@ -79,3 +79,56 @@ fn the_trait_carries_the_whole_experience() {
     assert!(delta.splice.is_some());
     assert_eq!(l.text().lines().count(), n_before + 1);
 }
+
+/// The canonical-form clause: an edit that REACHES THE DOCUMENT'S END
+/// changes which line is final, and only the final line goes without a
+/// terminator. These are the exact batches an editor's Return and
+/// Backspace produce at EOF — the first shipped LiveDoc reused
+/// terminators positionally, so a Return splitting the final line
+/// copied its `None` onto an interior line and padded the new final
+/// line with `Lf`, tripping the engine's invariant assert on the very
+/// first Return pressed at EOF in a real editor.
+#[test]
+fn edits_reaching_the_document_end_keep_terms_canonical() {
+    let mut l = limner();
+    let n = l.open(SL_DEMO).lines.len() as u32; // canonical line count
+    let before = l.text();
+
+    // Return on the (empty, term-less) final line: 1 line → 2.
+    let delta = l.edit(&LineEdit {
+        start: n - 1,
+        end: n,
+        lines: vec![String::new(), String::new()],
+    });
+    assert!(delta.splice.is_some());
+    assert_eq!(l.text(), format!("{before}\n"), "Return at EOF appends one newline");
+
+    // Backspace joining at EOF: 2 lines → 1 restores the original.
+    let delta = l.edit(&LineEdit {
+        start: n - 1,
+        end: n + 1,
+        lines: vec![String::new()],
+    });
+    assert!(delta.splice.is_some());
+    assert_eq!(l.text(), before, "the join restores the original");
+
+    // A document whose final line carries TEXT (no trailing newline):
+    // Return after its last character splits that line in two.
+    let trimmed = SL_DEMO.strip_suffix('\n').expect("demo ends with newline");
+    l.open(trimmed);
+    let n = trimmed.matches('\n').count() as u32 + 1;
+    let last = trimmed.rsplit_once('\n').expect("multi-line").1;
+    let delta = l.edit(&LineEdit {
+        start: n - 1,
+        end: n,
+        lines: vec![last.to_string(), String::new()],
+    });
+    assert!(delta.splice.is_some());
+    assert_eq!(l.text(), format!("{trimmed}\n"), "split after the last char");
+
+    // Pure tail deletion (empty replacement reaching EOF): the line
+    // BEFORE the deleted tail becomes final and must shed its term.
+    let delta = l.edit(&LineEdit { start: n, end: n + 1, lines: vec![] });
+    assert!(delta.splice.is_some());
+    assert_eq!(l.text(), trimmed, "tail deletion re-terminates the new final line");
+}

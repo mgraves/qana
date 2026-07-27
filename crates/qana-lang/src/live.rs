@@ -55,9 +55,18 @@ impl Limner for LiveDoc {
     }
 
     fn edit(&mut self, edit: &LineEdit) -> PaintDelta {
-        // Terminators: keep the replaced lines' own, positionally;
+        // Terminators: interior replacement lines keep the replaced
+        // lines' own, positionally (CRLF fidelity in mixed files);
         // extras get the document's prevailing flavor (the protocol
-        // stays out of newline politics).
+        // stays out of newline politics). THE CANONICAL-FORM CLAUSE:
+        // when the edit reaches the document's end, the replacement's
+        // last line becomes the new final line and must carry `None` —
+        // and a positionally-reused `None` must never land anywhere
+        // else. (Blind positional reuse turned a Return that split the
+        // final line into two invariant violations at once: the old
+        // final line's `None` landed on the now-interior left half,
+        // and the new final line was padded with `Lf`.)
+        let old_len = self.session.buf.lines.len();
         let prevailing = self
             .session
             .buf
@@ -66,23 +75,42 @@ impl Limner for LiveDoc {
             .map(|l| l.term)
             .filter(|t| !matches!(t, LineTerm::None))
             .unwrap_or(LineTerm::Lf);
-        let (start, end) = (edit.start as usize, edit.end as usize);
-        let replacement: Vec<Line> = edit
+        let (mut start, end) = (edit.start as usize, edit.end as usize);
+        let reaches_end = end >= old_len;
+        let n = edit.lines.len();
+        let mut replacement: Vec<Line> = edit
             .lines
             .iter()
             .enumerate()
             .map(|(i, text)| {
-                let term = self
-                    .session
-                    .buf
-                    .lines
-                    .get(start + i)
-                    .filter(|_| start + i < end)
-                    .map(|l| l.term)
-                    .unwrap_or(prevailing);
+                let term = if reaches_end && i + 1 == n {
+                    LineTerm::None
+                } else {
+                    self.session
+                        .buf
+                        .lines
+                        .get(start + i)
+                        .filter(|_| start + i < end)
+                        .map(|l| l.term)
+                        .filter(|t| !matches!(t, LineTerm::None))
+                        .unwrap_or(prevailing)
+                };
                 Line::new(text.clone(), term)
             })
             .collect();
+        // A pure tail deletion would leave an old, terminated line as
+        // the new final line; widen the batch by one line so the same
+        // edit re-terminates it. (An emptied document keeps canonical
+        // form as a single term-less empty line.)
+        if reaches_end && replacement.is_empty() {
+            if start > 0 {
+                start -= 1;
+                let kept = self.session.buf.lines[start].text.clone();
+                replacement.push(Line::new(kept, LineTerm::None));
+            } else {
+                replacement.push(Line::new(String::new(), LineTerm::None));
+            }
+        }
         let outcome = self
             .session
             .edit(self.lang.sg, self.lang.tables, &[qana_engine::LineEdit {

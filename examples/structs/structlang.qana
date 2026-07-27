@@ -32,7 +32,7 @@ token FATARROW = "=>" @style(operator)
 // `Num` and `Str` are KEYWORDS of Structlang: the closed part of its
 // type vocabulary maps 1:1 onto grammar atoms. Struct names are the
 // OPEN part — and that is where v0 will go silent.
-keywords IDENT = struct fn let return new macro Num Str
+keywords IDENT = struct fn let return new macro mod Num Str
 
 pair LPAREN RPAREN
 pair LBRACE RBRACE
@@ -48,6 +48,10 @@ rule file = File: decls @scope(unordered)
 rule decls = decl*
 
 rule decl =
+  // Modules exist to give documents NESTED structure: scopes for the
+  // binding tier and depth for every outline consumer (breadcrumbs,
+  // structure views, folding).
+  | ModDecl:    "mod" name:IDENT "{" ds:decls "}" @def(name) @outline(name, module) @scope(unordered)
   | StructDecl: "struct" name:IDENT b:struct_body @def(name) @outline(name, struct) @type(deftype, b)
   | FnDecl:     "fn" name:IDENT t:fn_tail @def(name) @outline(name, function) @type(def, t)
   | LetDecl:    "let" name:IDENT ti:typed_init ";" @def(name) @outline(name) @type(def, ti)

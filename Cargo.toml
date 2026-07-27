@@ -36,5 +36,5 @@ qana-grammar = { path = "crates/qana-grammar", version = "0.0.2" }
 qana-engine = { path = "crates/qana-engine", version = "0.0.2" }
 qana-sem = { path = "crates/qana-sem", version = "0.0.2" }
 qana-services = { path = "crates/qana-services", version = "0.0.2" }
-qana-lang = { path = "crates/qana-lang", version = "0.0.2" }
+qana-lang = { path = "crates/qana-lang", version = "0.0.3" }
 qana-lex = { path = "crates/qana-lex" }

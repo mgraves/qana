@@ -1,6 +1,9 @@
 [package]
 name = "qana-lang"
-version.workspace = true
+# Versioned independently of the workspace line (the linework
+# precedent): 0.0.3 carries the LiveDoc canonical-line-term fix while
+# the rest of the family stays 0.0.2.
+version = "0.0.3"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

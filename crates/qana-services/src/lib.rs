@@ -339,7 +339,15 @@ pub fn outline(tree: &GreenNode, cfg: &OutlineConfig) -> Vec<Symbol> {
                             out.push(Symbol {
                                 name: t.text.clone(),
                                 kind: e.kind,
-                                span: (base, base + n.width),
+                                // The construct's SIGNIFICANT span, not
+                                // its trivia-padded node span: leading
+                                // comments attach inside the following
+                                // node, and outline consumers (folding,
+                                // breadcrumbs, documentSymbol ranges)
+                                // want the construct, not its gutter of
+                                // trivia.
+                                span: significant_span(n, base)
+                                    .unwrap_or((base, base + n.width)),
                                 selection: (off, off + w),
                             });
                         }
@@ -357,6 +365,32 @@ pub fn outline(tree: &GreenNode, cfg: &OutlineConfig) -> Vec<Symbol> {
             }
             off += c.width();
         }
+    }
+
+    /// `[first, last)` byte span of a node's significant content —
+    /// trivia and missing tokens trimmed from BOTH ends, recursively
+    /// (a first/last child that is itself a node starts/ends with its
+    /// own attached trivia). `None` for an all-trivia node.
+    fn significant_span(n: &GreenNode, base: u32) -> Option<(u32, u32)> {
+        let mut first: Option<u32> = None;
+        let mut last: Option<u32> = None;
+        let mut off = base;
+        for c in &n.children {
+            let w = c.width();
+            let sub = match c {
+                GreenChild::Token(t) if !t.trivia && !t.is_missing() => Some((off, off + w)),
+                GreenChild::Node(m) => significant_span(m, off),
+                _ => None,
+            };
+            if let Some((s, e)) = sub {
+                if first.is_none() {
+                    first = Some(s);
+                }
+                last = Some(e);
+            }
+            off += w;
+        }
+        Some((first?, last?))
     }
 }
 

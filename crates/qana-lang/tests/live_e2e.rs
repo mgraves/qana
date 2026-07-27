@@ -162,11 +162,16 @@ fn enclosing_chain_walks_nested_scopes() {
     let at = src.find("r:Num").unwrap() as u32;
     let chain = l.enclosing(at);
     let labels: Vec<&str> = chain.iter().map(|m| m.name.as_str()).collect();
-    assert_eq!(labels, vec!["colors", "RGBA"], "root-at-left, leaf-at-right");
+    assert_eq!(
+        labels,
+        vec!["colors", "RGBA", "r"],
+        "root-at-left, leaf-at-right — fields are chain LEAVES"
+    );
 
     let legend = l.mark_legend();
     assert_eq!(legend[chain[0].category as usize], "module");
     assert_eq!(legend[chain[1].category as usize], "struct");
+    assert_eq!(legend[chain[2].category as usize], "field");
 }
 
 /// The canonical-form clause: an edit that REACHES THE DOCUMENT'S END

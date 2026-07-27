@@ -18,8 +18,11 @@ use qana_services::{OutlineConfig, OutlineEntry, Styles, LEGEND};
 use std::collections::HashMap;
 
 /// Outline kinds a grammar may declare (closed set, `&'static` for the
-/// services layer).
-pub const OUTLINE_KINDS: &[&str] = &["variable", "constant", "function", "struct", "module", "class"];
+/// services layer). `field` covers struct/class members — outline
+/// LEAVES, present in every structure view and breadcrumb chain (LSP's
+/// SymbolKind has it for the same reason).
+pub const OUTLINE_KINDS: &[&str] =
+    &["variable", "constant", "function", "struct", "module", "class", "field"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QanaDiag {

@@ -67,8 +67,10 @@ rule struct_body = StructBody: "{" fields "}" @scope
 
 rule fields = field* % ","
 
-// Fields are typed definitions in the struct's own scope.
-rule field = Field: name:IDENT ":" t:ty @def(name) @type(def, t)
+// Fields are typed definitions in the struct's own scope — and
+// outline LEAVES: a cursor on a field breadcrumbs down to the member
+// (colors ▸ RGBA ▸ r), the way every structure view lists fields.
+rule field = Field: name:IDENT ":" t:ty @def(name) @outline(name, field) @type(def, t)
 
 // The fn's params + return + body share one scope: params are visible
 // in the block and sealed from the top level. `@type(fn, p, rt)` gives

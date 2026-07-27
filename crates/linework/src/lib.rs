@@ -219,6 +219,35 @@ pub struct Hint {
 }
 
 // ---------------------------------------------------------------------------
+// Marks (document structure: outline, breadcrumbs, folding, sticky context)
+// ---------------------------------------------------------------------------
+
+/// One identified, categorized span of document STRUCTURE — the sparse
+/// counterpart to the dense paint runs. Marks arrive flat, in document
+/// order, with well-nested spans, so containment IS the hierarchy: an
+/// ancestor precedes and encloses its descendants, and an editor can
+/// rebuild the tree — or just walk a chain — without parent pointers on
+/// the wire. One channel feeds breadcrumbs, structure views, sticky
+/// context, and folding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mark {
+    /// Index into [`Limner::mark_legend`] — an engine-neutral category
+    /// name ("struct", "fn", …). Editors map legend names onto their own
+    /// taxonomies (outline icons, fold rules, layer styles), exactly as
+    /// themes map [`Limner::legend`] style names.
+    pub category: u8,
+    /// Byte span of the whole construct: start inclusive, end exclusive.
+    pub start: u32,
+    pub end: u32,
+    /// Byte span of the construct's NAME token — the navigation target
+    /// (where a breadcrumb click lands the cursor).
+    pub name_start: u32,
+    pub name_end: u32,
+    /// Display label (the name token's text; may be empty).
+    pub name: String,
+}
+
+// ---------------------------------------------------------------------------
 // The trait: what an editor is generic over
 // ---------------------------------------------------------------------------
 
@@ -245,6 +274,28 @@ pub trait Limner {
     /// The document as the limner sees it (lossless engines reproduce
     /// it; useful for differential checks and byte↔char conversion).
     fn text(&mut self) -> String;
+
+    /// The document's structural [`Mark`]s: flat, document-ordered,
+    /// containment-nested. Engines without structure keep the default
+    /// (empty — editors treat an empty [`Limner::mark_legend`] as "no
+    /// structure channel").
+    fn marks(&mut self) -> Vec<Mark> {
+        Vec::new()
+    }
+
+    /// The chain of marks enclosing `offset` (half-open spans:
+    /// `start <= offset < end`), OUTERMOST FIRST — the breadcrumb /
+    /// sticky-context query, expected cheap enough to run per cursor
+    /// move.
+    fn enclosing(&mut self, offset: u32) -> Vec<Mark> {
+        let _ = offset;
+        Vec::new()
+    }
+
+    /// Legend of mark category names, indexed by [`Mark::category`].
+    fn mark_legend(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------

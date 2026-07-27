@@ -9,7 +9,7 @@
 //! meet only at the trait.
 
 use crate::EmbeddedLang;
-use linework::{FactCard, Hint, LineEdit, Limner, Paint, PaintDelta};
+use linework::{FactCard, Hint, LineEdit, Limner, Mark, Paint, PaintDelta};
 use qana_engine::{IncSession, Line, LineTerm};
 use qana_sem::SemDb;
 use qana_services::paint::{facts_at, type_hints, Painter};
@@ -145,4 +145,48 @@ impl Limner for LiveDoc {
     fn text(&mut self) -> String {
         self.session.buf.reproduce()
     }
+
+    fn marks(&mut self) -> Vec<Mark> {
+        let kinds = mark_kinds(&self.lang.outline);
+        let tree = self.session.tree().expect("total");
+        qana_services::outline(tree, &self.lang.outline)
+            .into_iter()
+            .map(|s| Mark {
+                category: kinds.iter().position(|k| *k == s.kind).unwrap_or(0) as u8,
+                start: s.span.0,
+                end: s.span.1,
+                name_start: s.selection.0,
+                name_end: s.selection.1,
+                name: s.name,
+            })
+            .collect()
+    }
+
+    fn enclosing(&mut self, offset: u32) -> Vec<Mark> {
+        // Containment filter over the outline walk. Document order is
+        // pre-order, so the surviving chain is outermost-first for
+        // free. (A targeted tree descent is the documented fast path if
+        // a giant document ever makes this cursor-move query warm.)
+        self.marks()
+            .into_iter()
+            .filter(|m| m.start <= offset && offset < m.end)
+            .collect()
+    }
+
+    fn mark_legend(&self) -> Vec<String> {
+        mark_kinds(&self.lang.outline).iter().map(|k| k.to_string()).collect()
+    }
+}
+
+/// Mark categories = the outline config's kinds, deduped in first-use
+/// order. `marks` and `mark_legend` both derive from this so category
+/// indices always agree.
+fn mark_kinds(cfg: &qana_services::OutlineConfig) -> Vec<&'static str> {
+    let mut kinds: Vec<&'static str> = Vec::new();
+    for e in &cfg.entries {
+        if !kinds.contains(&e.kind) {
+            kinds.push(e.kind);
+        }
+    }
+    kinds
 }

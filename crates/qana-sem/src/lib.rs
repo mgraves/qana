@@ -243,6 +243,10 @@ enum LocalRes {
 
 #[derive(Debug)]
 struct Fragment {
+    /// Process-unique identity, never reused: equal uids mean the SAME
+    /// fragment value (Arc reuse can recycle addresses; uids cannot).
+    /// This is what lets a painter cache per-item work by identity.
+    uid: u64,
     /// Spans item-relative; scopes fragment-local (0 = the file's root
     /// scope); order fragment-local (1..).
     defs: Vec<Def>,
@@ -310,8 +314,17 @@ impl Fragment {
     }
 }
 
+/// Process-unique ids for paint-identity (fragments and resolutions).
+/// Monotone, never reused — see `Fragment::uid`.
+fn next_paint_uid() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
     let mut f = Fragment {
+        uid: next_paint_uid(),
         defs: Vec::new(),
         refs: Vec::new(),
         scope_parents: vec![0],
@@ -577,7 +590,7 @@ struct ItemSlot {
     /// (env fp, foreign fp, resolutions) — carried ACROSS revisions by
     /// the positional diff in set_tree, validated by fingerprint
     /// compare (two u64s, no hashing) in ensure_resolved.
-    res: Option<(u64, u64, Arc<ItemRes>)>,
+    res: Option<(u64, u64, u64, Arc<ItemRes>)>,
 }
 
 struct FileEntry {
@@ -940,7 +953,7 @@ impl SemDb {
             let env_fp = env_fps[k];
             let hit = matches!(
                 &slot.res,
-                Some((ef, ff, _)) if *ef == env_fp && *ff == foreign_fp
+                Some((ef, ff, _, _)) if *ef == env_fp && *ff == foreign_fp
             );
             if !hit {
                 let mut targets = Vec::with_capacity(slot.frag.refs.len());
@@ -1016,7 +1029,7 @@ impl SemDb {
         let e = self.files.get_mut(uri).unwrap();
         for (k, res) in computed {
             let env_fp = env_fps[k];
-            e.items[k].res = Some((env_fp, foreign_fp, res));
+            e.items[k].res = Some((env_fp, foreign_fp, next_paint_uid(), res));
         }
         e.env_fps = Some(env_fps);
         e.resolved_under = Some(foreign_fp);
@@ -1108,7 +1121,7 @@ impl SemDb {
         let ri = slot.frag.refs.iter().position(|r| r.span.0 <= rel && rel < r.span.1)?;
         let name = slot.frag.refs[ri].name.clone();
         let ns = slot.frag.refs[ri].ns.clone();
-        let (_, _, res) = slot.res.as_ref()?;
+        let (_, _, _, res) = slot.res.as_ref()?;
         match res.targets[ri].clone() {
             Classified::Qualified => self.resolve_qualified(uri, k, ri as u32).ok(),
             Classified::Local(d) => Some((uri.to_string(), self.abs_def_span(uri, k, d))),
@@ -1159,7 +1172,7 @@ impl SemDb {
                     let (name, ns, span, target) = {
                         let slot = &self.files[u].items[k as usize];
                         let r = &slot.frag.refs[ri];
-                        let res = &slot.res.as_ref().unwrap().2;
+                        let res = &slot.res.as_ref().unwrap().3;
                         (
                             r.name.clone(),
                             r.ns.clone(),
@@ -1226,7 +1239,7 @@ impl SemDb {
         let e = &self.files[uri];
         let mut out = Vec::new();
         for slot in &e.items {
-            let res = &slot.res.as_ref().unwrap().2;
+            let res = &slot.res.as_ref().unwrap().3;
             for &ri in &res.unresolved {
                 let r = &slot.frag.refs[ri as usize];
                 out.push((
@@ -1407,7 +1420,7 @@ impl SemDb {
         let e = &self.files[uri];
         let mut out = Vec::new();
         for slot in &e.items {
-            let res = &slot.res.as_ref().unwrap().2;
+            let res = &slot.res.as_ref().unwrap().3;
             for &ri in &res.private {
                 let r = &slot.frag.refs[ri as usize];
                 out.push((
@@ -1518,7 +1531,7 @@ impl SemDb {
             for ri in 0..n_refs {
                 let (name, ns, target) = {
                     let slot = &self.files[uri].items[k as usize];
-                    let res = &slot.res.as_ref().unwrap().2;
+                    let res = &slot.res.as_ref().unwrap().3;
                     (
                         slot.frag.refs[ri].name.clone(),
                         slot.frag.refs[ri].ns.clone(),
@@ -1591,6 +1604,137 @@ impl SemDb {
         }
         Arc::new(out)
     }
+
+    /// Is a type tier declared? (Painters use the answer to pick the
+    /// identity-cached overlay path — the type report has no per-item
+    /// identity yet, so typed grammars keep the composed-view path.)
+    pub fn has_types(&self) -> bool {
+        self.type_cfg.is_some()
+    }
+
+    /// The identity-keyed paint view: one key per item, in document
+    /// order, after ensuring resolution — O(items), no allocation
+    /// beyond the vec. Equal `(frag_uid, res_uid)` pairs mean the
+    /// item's paint-relevant facts are IDENTICAL (uids are process-
+    /// unique and never reused), so a painter caches derived marks per
+    /// pair and re-derives only misses via [`item_paint`](Self::item_paint).
+    /// An item's span runs from its `start` to the next item's (or the
+    /// document's end): the gap trivia carries no marks, so the
+    /// over-coverage is harmless.
+    pub fn paint_sync(&mut self, uri: &str) -> Vec<PaintKey> {
+        self.ensure_resolved(uri);
+        self.files[uri]
+            .items
+            .iter()
+            .map(|s| PaintKey {
+                start: s.base_off,
+                frag_uid: s.frag.uid,
+                res_uid: s.res.as_ref().map(|r| r.2).unwrap_or(0),
+            })
+            .collect()
+    }
+
+    /// Paint facts for ONE item, spans ITEM-RELATIVE. Mirrors the
+    /// classification arms of [`resolve`](Self::resolve) exactly —
+    /// the paint differential gate holds it there — but stops at the
+    /// bits level (no def indices), so it allocates only this item's
+    /// two vectors.
+    pub fn item_paint(&mut self, uri: &str, item: u32) -> ItemPaint {
+        self.ensure_resolved(uri);
+        let (frag, res) = {
+            let slot = &self.files[uri].items[item as usize];
+            (slot.frag.clone(), slot.res.as_ref().expect("resolved").3.clone())
+        };
+        let defs = frag.defs.iter().map(|d| (d.span, d.exported)).collect();
+        let mut refs = Vec::with_capacity(frag.refs.len());
+        for (ri, r) in frag.refs.iter().enumerate() {
+            let quiet_gate = |rp: RefPaint| {
+                // The unresolved BIT is kind-gated, exactly as the
+                // composed-view overlay gates it.
+                if rp == RefPaint::Unresolved
+                    && !matches!(
+                        r.kind,
+                        RefKind::Qualified | RefKind::Var | RefKind::Call | RefKind::Import
+                    )
+                {
+                    RefPaint::Quiet
+                } else {
+                    rp
+                }
+            };
+            let rp = match &res.targets[ri] {
+                Classified::Local(_) => RefPaint::Ref,
+                Classified::Top => match self.top_site(uri, &r.ns, &r.name, item) {
+                    Some(_) => RefPaint::Ref,
+                    None => RefPaint::Unresolved,
+                },
+                Classified::Foreign(fu) => {
+                    let fu = fu.clone();
+                    self.ensure_resolved(&fu);
+                    match self.export_site(&fu, &r.ns, &r.name) {
+                        Some(_) => RefPaint::RefForeign,
+                        None => RefPaint::Unresolved,
+                    }
+                }
+                Classified::Qualified => match self.resolve_qualified(uri, item, ri as u32) {
+                    Ok((qu, span)) => {
+                        let e = &self.files[&qu];
+                        let ti = e.items.partition_point(|s| s.base_off <= span.0) - 1;
+                        let slot = &e.items[ti];
+                        match slot
+                            .frag
+                            .defs
+                            .iter()
+                            .position(|d| slot.base_off + d.span.0 == span.0)
+                        {
+                            Some(_) if qu == uri => RefPaint::Ref,
+                            Some(_) => RefPaint::RefForeign,
+                            None => RefPaint::Unresolved,
+                        }
+                    }
+                    Err(_) => RefPaint::Unresolved,
+                },
+                Classified::Unresolved => RefPaint::Unresolved,
+            };
+            refs.push((r.span, quiet_gate(rp)));
+        }
+        ItemPaint { defs, refs }
+    }
+}
+
+/// One item's identity + position in the paint view — see
+/// [`SemDb::paint_sync`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaintKey {
+    /// Absolute char offset of the item's subtree.
+    pub start: u32,
+    /// Identity of the item's fragment (defs/refs/spans).
+    pub frag_uid: u64,
+    /// Identity of the item's resolution (classifications).
+    pub res_uid: u64,
+}
+
+/// One item's paint facts, spans ITEM-RELATIVE — see
+/// [`SemDb::item_paint`].
+#[derive(Clone, Debug)]
+pub struct ItemPaint {
+    /// (span, exported).
+    pub defs: Vec<((u32, u32), bool)>,
+    /// (span, resolution class).
+    pub refs: Vec<((u32, u32), RefPaint)>,
+}
+
+/// A ref's resolution, at the granularity paint needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefPaint {
+    /// Resolves in this file.
+    Ref,
+    /// Resolves in another file.
+    RefForeign,
+    /// Does not resolve (and its kind is diagnosed).
+    Unresolved,
+    /// Does not resolve, but its kind stays quiet.
+    Quiet,
 }
 
 fn collect_list_items(n: &GreenNode, base: u32, out: &mut Vec<(NodeKey, u32)>) {

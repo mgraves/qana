@@ -33,6 +33,7 @@ use crate::Styles;
 use qana_engine::{DamageReport, IncSession, LexedBuffer};
 use qana_grammar::CompiledLexer;
 use qana_sem::{RefKind, SemDb, Target};
+use std::sync::Arc;
 
 // The protocol TYPES live in the engine-neutral `linework` crate — this
 // module is qana's IMPLEMENTATION of them (the Painter, the facts
@@ -185,6 +186,39 @@ pub struct Painter {
     /// Emitted (overlaid) runs per line — what the editor is showing.
     shown: Vec<Vec<Run>>,
     rev: u64,
+    /// Per-line widths (chars incl. terminator), maintained by splice —
+    /// the identity-cached overlay path's coordinate backbone.
+    widths: Vec<u32>,
+    /// The identity-cached overlay: per item in document order, its
+    /// paint key and derived marks (item-relative spans). An item whose
+    /// `(frag_uid, res_uid)` pair reappears re-uses its marks by `Arc`
+    /// clone; only misses re-derive, and only their lines repaint.
+    /// `None` until the first typeless-grammar update populates it.
+    cache: Option<Vec<(qana_sem::PaintKey, Arc<Vec<((u32, u32), u8)>>)>>,
+}
+
+/// One item's marks from its paint facts — the bits mapping shared by
+/// the identity-cached path (and gated to equal the composed-view path
+/// by the paint differential test).
+fn item_marks(ip: &qana_sem::ItemPaint) -> Vec<((u32, u32), u8)> {
+    let mut out = Vec::with_capacity(ip.defs.len() + ip.refs.len());
+    for &(span, exported) in &ip.defs {
+        let mut bits = MOD_DEF;
+        if exported {
+            bits |= MOD_PUBLIC;
+        }
+        out.push((span, bits));
+    }
+    for &(span, rp) in &ip.refs {
+        let bits = match rp {
+            qana_sem::RefPaint::Ref => MOD_REF,
+            qana_sem::RefPaint::RefForeign => MOD_REF | MOD_FOREIGN,
+            qana_sem::RefPaint::Unresolved => MOD_UNRESOLVED,
+            qana_sem::RefPaint::Quiet => continue,
+        };
+        out.push((span, bits));
+    }
+    out
 }
 
 impl Painter {
@@ -205,11 +239,26 @@ impl Painter {
             .map(|(lt, l)| wave0_line(&lt.tokens, l.term.as_str().len() as u32, styles))
             .collect();
         let mut shown = base.clone();
+        let mut cache = None;
         if let Some((db, uri)) = db {
             let marks = overlay_marks(db, uri);
             apply_overlay(&mut shown, &widths, &marks);
+            if !db.has_types() {
+                // Prefill the identity cache so the FIRST keystroke is
+                // already the steady state — the all-miss fill belongs
+                // to open, where the whole-document pass already lives.
+                let keys = db.paint_sync(uri);
+                cache = Some(
+                    keys.iter()
+                        .enumerate()
+                        .map(|(i, k)| {
+                            (*k, Arc::new(item_marks(&db.item_paint(uri, i as u32))))
+                        })
+                        .collect(),
+                );
+            }
         }
-        let p = Painter { base, shown: shown.clone(), rev: 0 };
+        let p = Painter { base, shown: shown.clone(), rev: 0, widths, cache };
         let paint = Paint { rev: 0, lines: shown };
         (p, paint)
     }
@@ -262,6 +311,15 @@ impl Painter {
                     delta.splice = Some(((old_lo as u32, old_hi as u32), repl));
                 }
             }
+            Some((db, uri)) if !db.has_types() => {
+                // The IDENTITY-CACHED overlay: typeless grammars (no
+                // per-item identity for the type report yet) re-derive
+                // marks only for items whose (fragment, resolution)
+                // identity changed, and repaint only their lines plus
+                // the damaged window. Keystroke cost is O(window +
+                // changed items), independent of document size.
+                self.overlay_via_items(session, window, db, uri, &mut delta);
+            }
             Some((db, uri)) => {
                 let trace = std::env::var_os("QANA_TRACE_EDIT").is_some();
                 // Fresh overlay over the maintained base…
@@ -313,6 +371,156 @@ impl Painter {
     /// The frame as currently shown (what a fresh viewer would paint).
     pub fn frame(&self) -> Paint {
         Paint { rev: self.rev, lines: self.shown.clone() }
+    }
+
+    /// The identity-cached overlay path (typeless grammars). See the
+    /// dispatch site in [`update`](Self::update) for the contract.
+    #[allow(clippy::too_many_arguments)]
+    fn overlay_via_items(
+        &mut self,
+        session: &IncSession<'_>,
+        window: Option<(usize, usize, usize, usize)>,
+        db: &mut SemDb,
+        uri: &str,
+        delta: &mut PaintDelta,
+    ) {
+        let trace = std::env::var_os("QANA_TRACE_EDIT").is_some();
+        let t0 = std::time::Instant::now();
+
+        // Widths follow the window by splice; a missing or drifted
+        // cache rebuilds them whole (first update, or a resync).
+        match window {
+            Some((old_lo, old_hi, new_lo, new_hi))
+                if self.widths.len() == self.base.len() + (old_hi - old_lo) - (new_hi - new_lo) =>
+            {
+                let fresh: Vec<u32> = (new_lo..new_hi)
+                    .map(|li| {
+                        let l = &session.buf.lines[li];
+                        (l.text.len() + l.term.as_str().len()) as u32
+                    })
+                    .collect();
+                self.widths.splice(old_lo..old_hi, fresh);
+            }
+            _ => self.widths = line_widths(&session.buf),
+        }
+        debug_assert_eq!(self.widths.len(), self.base.len());
+
+        // Line starts, absolute — O(lines) of u32 adds.
+        let mut starts = Vec::with_capacity(self.widths.len() + 1);
+        let mut acc = 0u32;
+        for w in &self.widths {
+            starts.push(acc);
+            acc += w;
+        }
+        starts.push(acc);
+        let total = acc;
+
+        // Sync the item view; misses re-derive their marks.
+        let keys = db.paint_sync(uri);
+        let old: std::collections::HashMap<(u64, u64), Arc<Vec<((u32, u32), u8)>>> = self
+            .cache
+            .take()
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|(k, m)| ((k.frag_uid, k.res_uid), m))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut misses: Vec<usize> = Vec::new();
+        let mut items: Vec<(qana_sem::PaintKey, Arc<Vec<((u32, u32), u8)>>)> =
+            Vec::with_capacity(keys.len());
+        for (i, k) in keys.iter().enumerate() {
+            match old.get(&(k.frag_uid, k.res_uid)) {
+                Some(m) => items.push((*k, m.clone())),
+                None => {
+                    let ip = db.item_paint(uri, i as u32);
+                    items.push((*k, Arc::new(item_marks(&ip))));
+                    misses.push(i);
+                }
+            }
+        }
+        let t_sync = t0.elapsed();
+
+        // Touched lines: the damaged window plus every miss item's
+        // line range (an item's span runs to the next item's start —
+        // the trivia gap carries no marks, so over-coverage is safe).
+        let t1 = std::time::Instant::now();
+        let line_of = |off: u32| -> usize {
+            match starts.binary_search(&off.min(total)) {
+                Ok(i) => i.min(self.widths.len().saturating_sub(1)),
+                Err(i) => i - 1,
+            }
+        };
+        let mut touched: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        let (old_lo, old_hi, new_lo, new_hi) = window.unwrap_or((0, 0, 0, 0));
+        if window.is_some() {
+            touched.extend(new_lo..new_hi);
+        }
+        for &i in &misses {
+            let a = items[i].0.start;
+            let b = if i + 1 < items.len() { items[i + 1].0.start } else { total };
+            if b > a && !self.widths.is_empty() {
+                touched.extend(line_of(a)..=line_of(b.saturating_sub(1)));
+            }
+        }
+
+        // Rebuild each touched line from its wave-0 base plus the marks
+        // of every item intersecting it.
+        let rebuild = |li: usize,
+                       items: &[(qana_sem::PaintKey, Arc<Vec<((u32, u32), u8)>>)]|
+         -> Vec<Run> {
+            let mut fresh = self.base[li].clone();
+            let (ls, le) = (starts[li], starts[li] + self.widths[li]);
+            let mut ii = items.partition_point(|(k, _)| k.start <= ls);
+            ii = ii.saturating_sub(1);
+            while ii < items.len() {
+                let a0 = items[ii].0.start;
+                if a0 >= le {
+                    break;
+                }
+                let b0 = if ii + 1 < items.len() { items[ii + 1].0.start } else { total };
+                if b0 > ls {
+                    for &((ra, rb), bits) in items[ii].1.iter() {
+                        let (a, b) = (a0 + ra, a0 + rb);
+                        let (a, b) = (a.max(ls), b.min(le));
+                        if b > a {
+                            mark(&mut fresh, a - ls, b - ls, bits);
+                        }
+                    }
+                }
+                ii += 1;
+            }
+            fresh
+        };
+
+        if window.is_some() {
+            let repl: Vec<Vec<Run>> = (new_lo..new_hi).map(|li| rebuild(li, &items)).collect();
+            self.shown.splice(old_lo..old_hi, repl.clone());
+            delta.splice = Some(((old_lo as u32, old_hi as u32), repl));
+        }
+        for &li in &touched {
+            if window.is_some() && li >= new_lo && li < new_hi {
+                continue;
+            }
+            let fresh = rebuild(li, &items);
+            if self.shown.get(li) != Some(&fresh) {
+                delta.repaints.push((li as u32, fresh.clone()));
+                self.shown[li] = fresh;
+            }
+        }
+        debug_assert_eq!(self.shown.len(), self.base.len());
+
+        if trace {
+            eprintln!(
+                "[paint-trace] items {} | misses {} | touched {} | sync {t_sync:?} | rebuild {:?}",
+                items.len(),
+                misses.len(),
+                touched.len(),
+                t1.elapsed()
+            );
+        }
+        self.cache = Some(items);
     }
 }
 

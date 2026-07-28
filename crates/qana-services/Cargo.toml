@@ -1,9 +1,10 @@
 [package]
 name = "qana-services"
 # Versioned independently of the workspace line (the linework
-# precedent): 0.0.3 is the identity-cached overlay — keystroke paint
-# cost O(window + changed items), independent of document size.
-version = "0.0.3"
+# precedent): 0.0.3 was the identity-cached overlay; 0.0.4 adds
+# outline-by-delegation (a NODE name child resolves to the first def
+# inside it — C functions outline through the declarator nest).
+version = "0.0.4"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

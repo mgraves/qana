@@ -64,7 +64,7 @@ version = "0.0.2"
 
 [[package]]
 name = "qana-lang"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "linework",
  "qana-engine",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "qana-services"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "linework",
  "qana-engine",

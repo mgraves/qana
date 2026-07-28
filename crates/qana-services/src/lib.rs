@@ -303,10 +303,19 @@ pub struct Symbol {
 }
 
 /// Outline configuration: which (nt, prod) pairs are outline-worthy and
-/// which RHS symbol position carries the name token.
+/// which RHS symbol position carries the name — a TOKEN child directly,
+/// or a NODE child by DELEGATION: the name is the first `@def` inside
+/// that child's subtree (pre-order). Delegation is what lets a C
+/// function outline as `handler` when its name sits at unbounded depth
+/// in the declarator nest — the binding tier already knows where it
+/// is, so the outline borrows its answer.
 #[derive(Clone, Debug, Default)]
 pub struct OutlineConfig {
     pub entries: Vec<OutlineEntry>,
+    /// The binding tier's def sites, (nt, prod, symbol-child of the
+    /// name token) — the delegation walker's map. Filled by the
+    /// grammar compiler; empty means delegated entries never resolve.
+    pub defs: Vec<(u16, u16, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -315,6 +324,51 @@ pub struct OutlineEntry {
     pub prod: u16,
     pub name_child: usize,
     pub kind: &'static str,
+}
+
+/// The first `@def` name inside `n`'s subtree, pre-order: the
+/// delegation resolver for outline entries whose name child is a NODE.
+/// In a declarator nest, pre-order meets the declared name before any
+/// parameter it binds — `int (*handler(int sig))(void)` resolves to
+/// `handler`, not `sig`.
+fn first_def_in(
+    n: &GreenNode,
+    base: u32,
+    defs: &[(u16, u16, usize)],
+) -> Option<(String, (u32, u32))> {
+    if let Some(&(_, _, k)) = defs.iter().find(|d| d.0 == n.nt && d.1 == n.prod) {
+        let mut off = base;
+        let mut sym_idx = 0usize;
+        for c in &n.children {
+            let w = c.width();
+            let is_symbol = match c {
+                GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+                GreenChild::Node(m) => m.nt != ERROR_NT,
+            };
+            if is_symbol {
+                if sym_idx == k {
+                    if let GreenChild::Token(t) = c {
+                        return Some((t.text.clone(), (off, off + w)));
+                    }
+                    break;
+                }
+                sym_idx += 1;
+            }
+            off += w;
+        }
+    }
+    let mut off = base;
+    for c in &n.children {
+        if let GreenChild::Node(m) = c {
+            if m.nt != ERROR_NT {
+                if let Some(hit) = first_def_in(m, off, defs) {
+                    return Some(hit);
+                }
+            }
+        }
+        off += c.width();
+    }
+    None
 }
 
 pub fn outline(tree: &GreenNode, cfg: &OutlineConfig) -> Vec<Symbol> {
@@ -335,21 +389,33 @@ pub fn outline(tree: &GreenNode, cfg: &OutlineConfig) -> Vec<Symbol> {
                 };
                 if is_symbol {
                     if sym_idx == e.name_child {
-                        if let GreenChild::Token(t) = c {
-                            out.push(Symbol {
+                        // The construct's SIGNIFICANT span, not its
+                        // trivia-padded node span: leading comments
+                        // attach inside the following node, and outline
+                        // consumers (folding, breadcrumbs,
+                        // documentSymbol ranges) want the construct,
+                        // not its gutter of trivia.
+                        let span =
+                            significant_span(n, base).unwrap_or((base, base + n.width));
+                        match c {
+                            GreenChild::Token(t) => out.push(Symbol {
                                 name: t.text.clone(),
                                 kind: e.kind,
-                                // The construct's SIGNIFICANT span, not
-                                // its trivia-padded node span: leading
-                                // comments attach inside the following
-                                // node, and outline consumers (folding,
-                                // breadcrumbs, documentSymbol ranges)
-                                // want the construct, not its gutter of
-                                // trivia.
-                                span: significant_span(n, base)
-                                    .unwrap_or((base, base + n.width)),
+                                span,
                                 selection: (off, off + w),
-                            });
+                            }),
+                            // DELEGATION: the name is the first def
+                            // inside this child's subtree.
+                            GreenChild::Node(m) => {
+                                if let Some((name, sel)) = first_def_in(m, off, &cfg.defs) {
+                                    out.push(Symbol {
+                                        name,
+                                        kind: e.kind,
+                                        span,
+                                        selection: sel,
+                                    });
+                                }
+                            }
                         }
                         break;
                     }

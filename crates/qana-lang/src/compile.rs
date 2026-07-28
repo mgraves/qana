@@ -1722,7 +1722,23 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
     }
 
     (
-        LangDef { lex, sg, binding, types: type_cfg, macros, styles, outline, token_spans, prod_spans },
+        {
+            // The outline's delegation walker borrows the binding
+            // tier's def sites: an @outline whose label names a NODE
+            // child means "the name is the first def inside it".
+            let outline = OutlineConfig { defs: binding.defs.clone(), ..outline };
+            LangDef {
+                lex,
+                sg,
+                binding,
+                types: type_cfg,
+                macros,
+                styles,
+                outline,
+                token_spans,
+                prod_spans,
+            }
+        },
         diags,
     )
 }

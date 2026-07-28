@@ -43,6 +43,50 @@ fn c_subset_certifies_and_serves_the_demo() {
     }
 }
 
+/// Functions OUTLINE by delegation: `@outline(d, function)` names a
+/// NODE child, and the walker resolves the name to the first `@def`
+/// inside it — through the declarator nest, however deep. Pre-order
+/// meets the declared name before the parameters it binds.
+#[test]
+fn functions_outline_through_the_declarator_nest() {
+    let tc = QanaToolchain::new();
+    let out = compile_source(&tc, C_RG);
+    assert!(out.diags.is_empty(), "c.qana compiles: {:?}", out.diags);
+    let (lexer, tables) = certify(&out.def).expect("certifies");
+
+    // demo.c's own functions…
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, DEMO).unwrap();
+    let symbols = qana_services::outline(session.tree().expect("total"), &out.def.outline);
+    let fns: Vec<&str> = symbols
+        .iter()
+        .filter(|s| s.kind == "function")
+        .map(|s| s.name.as_str())
+        .collect();
+    for expected in ["twice", "scale", "apply", "main"] {
+        assert!(fns.contains(&expected), "function {expected} outlines: {fns:?}");
+    }
+    // …and top-level variables ride along as outline entries too.
+    let vars: Vec<&str> = symbols
+        .iter()
+        .filter(|s| s.kind == "variable")
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(vars.contains(&"global_words"), "globals outline: {vars:?}");
+
+    // The pathological nest: a function returning a function pointer.
+    // The outline's name must be `handler`, never the parameter `sig`.
+    let nest = "int (*handler(int sig))(void) { return 0; }\n";
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, nest).unwrap();
+    let symbols = qana_services::outline(session.tree().expect("total"), &out.def.outline);
+    let h = symbols
+        .iter()
+        .find(|s| s.kind == "function")
+        .expect("the nested declarator still outlines");
+    assert_eq!(h.name, "handler", "pre-order finds the declared name, not its params");
+    let sel = &nest[h.selection.0 as usize..h.selection.1 as usize];
+    assert_eq!(sel, "handler", "selection covers the name token exactly");
+}
+
 use qana_engine::{Line, LineEdit};
 
 /// The preprocessor as a LINE-BOUNDED mode: `#` enters, EOL leaves.

@@ -164,16 +164,16 @@ rule translation_unit = TranslationUnit: external_decls
 rule external_decls = external_decl*
 
 rule external_decl =
-  | FunctionDef: decl_specs declarator compound_stmt
-  | Declaration: decl_specs init_declarators ";"
+  | FunctionDef: decl_specs d:declarator compound_stmt @outline(d, function)
+  | Declaration: decl_specs i:init_declarators ";" @outline(i)
   | BareDecl:    decl_specs ";"
   // Typedef-name heads, the COVERING way — no lexer feedback, ever.
   // File scope has no expression statements, so an IDENT-led item is
   // unambiguously a typedef'd declaration: FULL declarators, pointers
   // included. The head is a REFERENCE — uses of `word_t` navigate to
   // its typedef, and an unknown type is a "cannot find" diagnostic.
-  | TdFunctionDef: head:IDENT declarator compound_stmt @ref(head)
-  | TdDeclaration: head:IDENT init_declarators ";" @ref(head)
+  | TdFunctionDef: head:IDENT d:declarator compound_stmt @ref(head) @outline(d, function)
+  | TdDeclaration: head:IDENT i:init_declarators ";" @ref(head) @outline(i)
   | PpItem:      pp_directive
 
 // ---- declaration specifiers (keywords only in v0) ----

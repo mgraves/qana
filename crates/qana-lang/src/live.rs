@@ -111,6 +111,10 @@ impl Limner for LiveDoc {
                 replacement.push(Line::new(String::new(), LineTerm::None));
             }
         }
+        // `QANA_TRACE_EDIT=1` prints per-stage timings — the scale
+        // harness's scalpel for attributing keystroke cost.
+        let trace = std::env::var_os("QANA_TRACE_EDIT").is_some();
+        let t0 = std::time::Instant::now();
         let outcome = self
             .session
             .edit(self.lang.sg, self.lang.tables, &[qana_engine::LineEdit {
@@ -119,13 +123,24 @@ impl Limner for LiveDoc {
                 replacement,
             }])
             .expect("total under errors");
+        let t_parse = t0.elapsed();
+        let t1 = std::time::Instant::now();
         self.db.set_tree(&self.uri, self.session.tree().expect("total").clone());
-        self.painter.update(
+        let t_sem = t1.elapsed();
+        let t2 = std::time::Instant::now();
+        let delta = self.painter.update(
             &self.session,
             &outcome.damage,
             &self.lang.styles,
             Some((&mut self.db, &self.uri)),
-        )
+        );
+        if trace {
+            eprintln!(
+                "[edit-trace] parse {t_parse:?} | sem set_tree {t_sem:?} | paint+resolve {:?}",
+                t2.elapsed()
+            );
+        }
+        delta
     }
 
     fn facts(&mut self, offset: u32) -> Option<FactCard> {

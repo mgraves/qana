@@ -263,11 +263,26 @@ impl Painter {
                 }
             }
             Some((db, uri)) => {
+                let trace = std::env::var_os("QANA_TRACE_EDIT").is_some();
                 // Fresh overlay over the maintained base…
+                let t0 = std::time::Instant::now();
                 let widths = line_widths(&session.buf);
+                let t_widths = t0.elapsed();
+                let t1 = std::time::Instant::now();
                 let mut next = self.base.clone();
+                let t_clone = t1.elapsed();
+                let t2 = std::time::Instant::now();
                 let marks = overlay_marks(db, uri);
+                let t_marks = t2.elapsed();
+                let t3 = std::time::Instant::now();
                 apply_overlay(&mut next, &widths, &marks);
+                if trace {
+                    eprintln!(
+                        "[paint-trace] widths {t_widths:?} | clone {t_clone:?} | overlay_marks {t_marks:?} (n={}) | apply {:?}",
+                        marks.len(),
+                        t3.elapsed()
+                    );
+                }
                 // …then emit exactly what differs from the last frame:
                 // the window as a splice, everything else by diff
                 // (alignment shifts by the window's line-count delta).

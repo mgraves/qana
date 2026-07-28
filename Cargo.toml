@@ -31,10 +31,10 @@ repository = "https://github.com/mgraves/qana"
 # the generated one against. Cargo strips path-only dev-dependencies when
 # packaging, so it needs no version and is never published.
 [workspace.dependencies]
-linework = { path = "crates/linework", version = "0.0.2" }
+linework = { path = "crates/linework", version = "0.0.3" }
 qana-grammar = { path = "crates/qana-grammar", version = "0.0.2" }
 qana-engine = { path = "crates/qana-engine", version = "0.0.2" }
-qana-sem = { path = "crates/qana-sem", version = "0.0.2" }
-qana-services = { path = "crates/qana-services", version = "0.0.2" }
-qana-lang = { path = "crates/qana-lang", version = "0.0.3" }
+qana-sem = { path = "crates/qana-sem", version = "0.0.3" }
+qana-services = { path = "crates/qana-services", version = "0.0.3" }
+qana-lang = { path = "crates/qana-lang", version = "0.0.4" }
 qana-lex = { path = "crates/qana-lex" }

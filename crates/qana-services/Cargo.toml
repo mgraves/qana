@@ -1,6 +1,9 @@
 [package]
 name = "qana-services"
-version.workspace = true
+# Versioned independently of the workspace line (the linework
+# precedent): 0.0.3 is the identity-cached overlay — keystroke paint
+# cost O(window + changed items), independent of document size.
+version = "0.0.3"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

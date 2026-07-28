@@ -1,9 +1,10 @@
 [package]
 name = "qana-lang"
 # Versioned independently of the workspace line (the linework
-# precedent): 0.0.3 carries the LiveDoc canonical-line-term fix while
-# the rest of the family stays 0.0.2.
-version = "0.0.3"
+# precedent): 0.0.3 carried the LiveDoc canonical-line-term fix;
+# 0.0.4 carries the marks channel (linework 0.0.3) and rides the
+# identity-cached overlay (qana-sem/-services 0.0.3).
+version = "0.0.4"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,6 +1,9 @@
 [package]
 name = "qana-sem"
-version.workspace = true
+# Versioned independently of the workspace line (the linework
+# precedent): 0.0.3 adds the identity-keyed paint view — uid-carrying
+# fragments/resolutions, paint_sync, item_paint, has_types.
+version = "0.0.3"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

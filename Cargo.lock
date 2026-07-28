@@ -10,7 +10,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "linework"
-version = "0.0.2"
+version = "0.0.3"
 
 [[package]]
 name = "memchr"
@@ -64,7 +64,7 @@ version = "0.0.2"
 
 [[package]]
 name = "qana-lang"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "linework",
  "qana-engine",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "qana-sem"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "qana-engine",
  "qana-grammar",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "qana-services"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "linework",
  "qana-engine",

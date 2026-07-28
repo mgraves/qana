@@ -4,7 +4,7 @@ name = "linework"
 # dependency on qana; an editor adopting it should not see qana's release
 # cadence in its version number, and a qana release should not bump a
 # protocol that did not change. It versions on its own schedule.
-version = "0.0.2"
+version = "0.0.3"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

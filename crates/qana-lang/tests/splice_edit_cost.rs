@@ -169,3 +169,121 @@ fn deleting_the_splice_at_scale_is_not_a_beach_ball() {
         "splice-flip edits must not be beach balls: break={break_edit:?} heal={heal_edit:?}"
     );
 }
+
+/// Mike's actual fixture shape: ~250k lines WITH multi-line macros
+/// sprinkled through (552 of them). A plain body keystroke mid-file
+/// must be editor-speed; the live app measured SECONDS.
+#[test]
+#[ignore = "timing evidence — release + --nocapture"]
+fn big_demo_shaped_keystroke() {
+    let lang = c_lang();
+    let mut s = String::new();
+    s.push_str("#include <stdio.h>\n#define LIMIT 100\n\n");
+    s.push_str("#define CLAMP(x) \\\n    ((x) > LIMIT ? LIMIT : \\\n     (x) < 0 ? 0 : (x))\n\n");
+    let mut i = 0usize;
+    while s.lines().count() < 249_000 {
+        if i % 50 == 0 {
+            s.push_str(&format!(
+                "#define SCALE_STEP_{i}(v) \\\n    ((v) * {i} + \\\n     (v) % LIMIT)\n\n"
+            ));
+        }
+        s.push_str(&format!(
+            "static int scale_{i}(int v, int factor) {{\n    int result = v * factor + {i};   /* block {i} */\n    if (result > LIMIT)\n        result = LIMIT;\n    else\n        result = result % LIMIT;\n    return result;\n}}\n\n"
+        ));
+        i += 1;
+    }
+    let lines = s.lines().count();
+    let mut l: Box<dyn Limner> = Box::new(LiveDoc::open(lang.clone(), "big.c", &s));
+    let t = Instant::now();
+    let _ = l.open(&s);
+    let open = t.elapsed();
+
+    // A plain body keystroke mid-file, far from any macro.
+    let mid = (lines / 2) as u32;
+    let mid_text: String = s.lines().nth(mid as usize).unwrap_or("").to_string();
+    let t = Instant::now();
+    let _ = l.edit(&LineEdit { start: mid, end: mid + 1, lines: vec![format!("{mid_text} ")] });
+    let ks1 = t.elapsed();
+    let t = Instant::now();
+    let _ = l.edit(&LineEdit { start: mid, end: mid + 1, lines: vec![mid_text.clone()] });
+    let ks2 = t.elapsed();
+
+    println!("lines={lines} open={open:?} keystroke1={ks1:?} keystroke2={ks2:?}");
+    assert!(ks2.as_millis() < 5_000, "keystroke: {ks2:?}");
+}
+
+/// Mike's 12-second keystroke: typing `s` on a new line at the top of
+/// a 249k-line document — a PARTIAL TOKEN at file scope. The clean
+/// path costs 10ms; the transiently-invalid document hit the error
+/// machinery, which the bridge trace timed at 11.96s in the app.
+#[test]
+#[ignore = "timing evidence — release + --nocapture"]
+fn partial_token_keystroke_at_scale() {
+    let lang = c_lang();
+    let mut s = String::new();
+    s.push_str("#include <stdio.h>\n#define LIMIT 100\n\n");
+    let mut i = 0usize;
+    while s.lines().count() < 249_000 {
+        if i % 50 == 0 {
+            s.push_str(&format!(
+                "#define SCALE_STEP_{i}(v) \\\n    ((v) * {i} + \\\n     (v) % LIMIT)\n\n"
+            ));
+        }
+        s.push_str(&format!(
+            "static int scale_{i}(int v, int factor) {{\n    int result = v * factor + {i};\n    return result % LIMIT;\n}}\n\n"
+        ));
+        i += 1;
+    }
+    let mut l: Box<dyn Limner> = Box::new(LiveDoc::open(lang.clone(), "big.c", &s));
+    let _ = l.open(&s);
+
+    // Insert a blank line at line 8, then type `s` into it — the
+    // exact transiently-invalid state a human typist creates.
+    let line8: String = s.lines().nth(8).unwrap_or("").to_string();
+    let _ = l.edit(&LineEdit { start: 8, end: 9, lines: vec![String::new(), line8.clone()] });
+    let t = Instant::now();
+    let _ = l.edit(&LineEdit { start: 8, end: 9, lines: vec!["s".to_string()] });
+    let partial = t.elapsed();
+    let t = Instant::now();
+    let _ = l.edit(&LineEdit { start: 8, end: 9, lines: vec!["struct".to_string()] });
+    let keyword = t.elapsed();
+    let t = Instant::now();
+    let _ = l.edit(&LineEdit { start: 8, end: 9, lines: vec![String::new()] });
+    let healed = t.elapsed();
+    println!("partial-token 's'={partial:?} 'struct'={keyword:?} healed={healed:?}");
+}
+
+/// THE REAL FILE: the fixture generator had a formatting bug that
+/// put `%%` (a syntax error) in every function — 27,455 error
+/// regions. The engine's clean-document keystroke is 10ms; this
+/// measures the same keystroke against the error-dense document,
+/// which the live app timed at 11.96s. Transient errors are what
+/// TYPING IS — error density must not destroy incrementality.
+#[test]
+#[ignore = "timing evidence — release + --nocapture"]
+fn error_dense_document_keystroke() {
+    let lang = c_lang();
+    for &functions in &[1_000usize, 5_000, 27_000] {
+        let mut s = String::new();
+        s.push_str("#include <stdio.h>\n#define LIMIT 100\n\n");
+        for i in 0..functions {
+            s.push_str(&format!(
+                "static int scale_{i}(int v, int factor) {{\n    int result = v * factor + {i};\n    result = result %% LIMIT;\n    return result;\n}}\n\n"
+            ));
+        }
+        let lines = s.lines().count();
+        let mut l: Box<dyn Limner> = Box::new(LiveDoc::open(lang.clone(), "err.c", &s));
+        let t = Instant::now();
+        let _ = l.open(&s);
+        let open = t.elapsed();
+
+        let line8: String = s.lines().nth(8).unwrap_or("").to_string();
+        let _ = l.edit(&LineEdit { start: 8, end: 9, lines: vec![String::new(), line8] });
+        let t = Instant::now();
+        let _ = l.edit(&LineEdit { start: 8, end: 9, lines: vec!["s".to_string()] });
+        let partial = t.elapsed();
+        println!(
+            "functions={functions} lines={lines} errors={functions} open={open:?} partial-token={partial:?}"
+        );
+    }
+}

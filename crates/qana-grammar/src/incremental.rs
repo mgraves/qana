@@ -1448,10 +1448,35 @@ pub fn salvage(old: &Arc<GreenNode>, regions: &[FreshRegion]) -> VecDeque<Item> 
             }
             GreenChild::Node(n) => {
                 let span = (*tok_index, *tok_index + n.n_toks);
-                // Error-poisoned nodes always dissolve: their real tokens
-                // re-enter the parse as plain lookaheads (ERROR wrappers
-                // evaporate), so recovery re-runs against current text.
-                if !n.has_err && !dirty(span, regions) {
+                // Error-containing nodes are REUSABLE when the damage
+                // is at least a repair-context margin away on both
+                // sides: repair is deterministic, and its only inputs
+                // beyond the region's own tokens are the entry state
+                // (the splice conditions guard that) and K peeked
+                // terminals (the margin guards those). The old blanket
+                // dissolution re-ran recovery for EVERY error in the
+                // document on EVERY keystroke — a file carrying 27k
+                // transient errors paid ~2s per character typed, with
+                // the cost LINEAR in total error count. Editing within
+                // the margin of an error still dissolves it, so
+                // recovery always re-runs against current text where
+                // the text actually changed. (Bare ERROR_NT nodes at
+                // splice level have no GOTO and dissolve downstream as
+                // before — this reuse is about the healthy constructs
+                // WRAPPING contained errors.)
+                const REPAIR_CONTEXT_MARGIN: u32 = 8;
+                let reusable = if n.has_err {
+                    !dirty(
+                        (
+                            span.0.saturating_sub(REPAIR_CONTEXT_MARGIN),
+                            span.1 + REPAIR_CONTEXT_MARGIN,
+                        ),
+                        regions,
+                    )
+                } else {
+                    !dirty(span, regions)
+                };
+                if reusable {
                     // Maximal clean subtree: emit whole.
                     out.push_back(Item::Sub(c.clone()));
                     *tok_index += n.n_toks;

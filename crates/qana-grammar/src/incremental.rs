@@ -642,12 +642,25 @@ pub fn incremental_parse(
 ) -> Result<(Arc<GreenNode>, ReuseStats, Vec<Repair>), IncParseError> {
     const K: usize = 3;
     const MAX_REPAIRS: usize = 200;
+    // REPAIR-DENSITY HYSTERESIS: insert-search validates only K
+    // terminals ahead, so structurally hopeless text (a naked
+    // expression at file scope reads as declarator gymnastics for a
+    // few tokens at a time) can chain plausible-but-wrong inserts
+    // clear through a document — 28 "winning" repairs once deleted a
+    // fixture's `int` and buried 20 functions in the error region.
+    // When errors keep clustering within WINDOW terminals of the last
+    // repair, stop trusting inserts and SKIP until clean shifting
+    // resumes: contained garbage beats clever mangling.
+    const REPAIR_CLUSTER_WINDOW: usize = 6;
+    const REPAIR_CLUSTER_ESCALATE: u32 = 3;
     let mut stats = ReuseStats::default();
     let mut states: Vec<u16> = vec![0];
     let mut stack: Vec<Entry> = Vec::new();
     let mut pending: Vec<GreenChild> = Vec::new();
     let mut consumed_terms = 0usize;
     let mut repairs: Vec<Repair> = Vec::new();
+    let mut last_repair_at = usize::MAX;
+    let mut repair_cluster = 0u32;
 
     macro_rules! reduce {
         ($pidx:expr) => {{
@@ -995,13 +1008,85 @@ pub fn incremental_parse(
                     }
                 }
             } else {
+                // ERROR-TIME DEFAULT-REDUCTION CLOSURE: reduces are
+                // lookahead-gated, so with garbage lookahead the
+                // automaton freezes MID-construct even when everything
+                // before the garbage is complete (an empty pp_tokens
+                // list refuses to reduce on `(` — the error fires
+                // inside the directive, hiding the list boundary one
+                // reduce-chain below the top). A state whose EVERY
+                // action is the same reduce loses nothing by reducing
+                // without a valid lookahead; closing over such states
+                // surfaces the real boundary before repair chooses.
+                let mut closure_steps = 0;
+                while closure_steps < 32 {
+                    let row = &t.action[*states.last().unwrap() as usize];
+                    let mut only: Option<u16> = None;
+                    let mut uniform = !row.is_empty();
+                    for act in row.values() {
+                        match act {
+                            LrAct::Reduce(p) => match only {
+                                None => only = Some(*p),
+                                Some(q) if q == *p => {}
+                                _ => {
+                                    uniform = false;
+                                    break;
+                                }
+                            },
+                            _ => {
+                                uniform = false;
+                                break;
+                            }
+                        }
+                    }
+                    match (uniform, only) {
+                        (true, Some(p)) => {
+                            reduce!(p);
+                            closure_steps += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                // Density bookkeeping: a repair landing within WINDOW
+                // terminals of the previous one grows the cluster; a
+                // clean stretch of shifting resets it.
+                if last_repair_at != usize::MAX
+                    && consumed_terms.saturating_sub(last_repair_at) <= REPAIR_CLUSTER_WINDOW
+                {
+                    repair_cluster += 1;
+                } else {
+                    repair_cluster = 1;
+                }
+                last_repair_at = consumed_terms;
+                let escalated = repair_cluster >= REPAIR_CLUSTER_ESCALATE;
+
                 let peeked = peek_terms(&input, K + 1);
                 let delete_score = if peeked.is_empty() {
                     0
                 } else {
                     simulate(g, t, &states, &peeked[1..])
                 };
-                let insert_hit = search_inserts(g, t, &states, &peeked);
+                // LIST-BOUNDARY RESYNC: an error while the stack top
+                // is a list under construction means the lookahead
+                // could not START an element. Garbage must never
+                // fabricate an element prefix there — a viable-but-
+                // wrong prefix absorbs the GOOD constructs that follow
+                // without ever erroring again (the file-scope orphan
+                // expression read as declarator gymnastics and buried
+                // twenty functions). Skipping is always the containing
+                // choice at a boundary: real element starts shift.
+                let at_list_boundary =
+                    matches!(stack.last(), Some(Entry { sym: SymSlot::List(_), .. }));
+                // Escalated clusters also skip the insert search: its
+                // K-terminal validation is exactly what a repair
+                // spiral exploits (and the BFS is the expensive part
+                // of a repair storm).
+                let insert_hit = if escalated || at_list_boundary {
+                    None
+                } else {
+                    search_inserts(g, t, &states, &peeked)
+                };
                 // Choose: higher real consumption wins; ties prefer the
                 // single delete over an insert sequence (lower cost).
                 match insert_hit {

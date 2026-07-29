@@ -283,6 +283,27 @@ pub trait Limner {
         Vec::new()
     }
 
+    /// The marks as a SHARED vector — the editor-hot form. At tens of
+    /// thousands of marks, rebuilding (or even cloning) the vector per
+    /// cursor tick is an editor-freezing cost; an implementation that
+    /// caches by document revision hands out the same `Arc` until an
+    /// edit invalidates it, making the per-tick cost O(1). The default
+    /// wraps [`Limner::marks`], so plain implementations need nothing.
+    fn marks_shared(&mut self) -> std::sync::Arc<Vec<Mark>> {
+        std::sync::Arc::new(self.marks())
+    }
+
+    /// A revision counter for the marks channel: consumers that build
+    /// DERIVED structures from marks (outline trees, signatures) gate
+    /// that work on this changing rather than recomputing per cursor
+    /// tick. `0` means "no revision tracking — treat every call as
+    /// possibly changed" (the conservative default); implementations
+    /// with real tracking return a counter that bumps on every edit
+    /// and reopen, and is otherwise stable.
+    fn marks_rev(&mut self) -> u64 {
+        0
+    }
+
     /// The chain of marks enclosing `offset` (half-open spans:
     /// `start <= offset < end`), OUTERMOST FIRST — the breadcrumb /
     /// sticky-context query, expected cheap enough to run per cursor

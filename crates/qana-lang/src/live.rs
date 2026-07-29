@@ -24,6 +24,14 @@ pub struct LiveDoc {
     session: IncSession<'static>,
     db: SemDb,
     painter: Painter,
+    /// Marks-channel revision: bumps on every edit and reopen. Keys
+    /// the marks cache and answers [`Limner::marks_rev`] so editors
+    /// gate their derived outline work on real structure changes.
+    marks_rev: u64,
+    /// The outline walk's result, cached per revision. Editors query
+    /// marks per cursor tick; the walk at 27k symbols is ~15ms, the
+    /// cached Arc handout is O(1).
+    marks_cache: Option<(u64, Arc<Vec<Mark>>)>,
 }
 
 impl LiveDoc {
@@ -37,12 +45,41 @@ impl LiveDoc {
         db.set_macro_bodies(&lang.macros);
         db.set_tree(&uri, session.tree().expect("total").clone());
         let (painter, _) = Painter::new(&session, &lang.styles, Some((&mut db, &uri)));
-        LiveDoc { lang, uri, session, db, painter }
+        LiveDoc { lang, uri, session, db, painter, marks_rev: 1, marks_cache: None }
+    }
+
+    /// The cached outline marks for the CURRENT revision, computing
+    /// once per revision.
+    fn marks_now(&mut self) -> Arc<Vec<Mark>> {
+        if let Some((rev, cached)) = &self.marks_cache {
+            if *rev == self.marks_rev {
+                return cached.clone();
+            }
+        }
+        let kinds = mark_kinds(&self.lang.outline);
+        let tree = self.session.tree().expect("total");
+        let fresh: Arc<Vec<Mark>> = Arc::new(
+            qana_services::outline(tree, &self.lang.outline)
+                .into_iter()
+                .map(|s| Mark {
+                    category: kinds.iter().position(|k| *k == s.kind).unwrap_or(0) as u8,
+                    start: s.span.0,
+                    end: s.span.1,
+                    name_start: s.selection.0,
+                    name_end: s.selection.1,
+                    name: s.name,
+                })
+                .collect(),
+        );
+        self.marks_cache = Some((self.marks_rev, fresh.clone()));
+        fresh
     }
 }
 
 impl Limner for LiveDoc {
     fn open(&mut self, text: &str) -> Paint {
+        self.marks_rev = self.marks_rev.wrapping_add(1);
+        self.marks_cache = None;
         self.session = self.lang.session(text);
         self.db = SemDb::new(self.lang.binding.clone());
         self.db.set_types(self.lang.types.clone());
@@ -55,6 +92,7 @@ impl Limner for LiveDoc {
     }
 
     fn edit(&mut self, edit: &LineEdit) -> PaintDelta {
+        self.marks_rev = self.marks_rev.wrapping_add(1);
         // Terminators: interior replacement lines keep the replaced
         // lines' own, positionally (CRLF fidelity in mixed files);
         // extras get the document's prevailing flavor (the protocol
@@ -162,29 +200,29 @@ impl Limner for LiveDoc {
     }
 
     fn marks(&mut self) -> Vec<Mark> {
-        let kinds = mark_kinds(&self.lang.outline);
-        let tree = self.session.tree().expect("total");
-        qana_services::outline(tree, &self.lang.outline)
-            .into_iter()
-            .map(|s| Mark {
-                category: kinds.iter().position(|k| *k == s.kind).unwrap_or(0) as u8,
-                start: s.span.0,
-                end: s.span.1,
-                name_start: s.selection.0,
-                name_end: s.selection.1,
-                name: s.name,
-            })
-            .collect()
+        // Trait-shaped copy of the cached vector; hot callers use
+        // marks_shared and pay nothing.
+        (*self.marks_now()).clone()
+    }
+
+    fn marks_shared(&mut self) -> Arc<Vec<Mark>> {
+        self.marks_now()
+    }
+
+    fn marks_rev(&mut self) -> u64 {
+        self.marks_rev
     }
 
     fn enclosing(&mut self, offset: u32) -> Vec<Mark> {
-        // Containment filter over the outline walk. Document order is
-        // pre-order, so the surviving chain is outermost-first for
-        // free. (A targeted tree descent is the documented fast path if
-        // a giant document ever makes this cursor-move query warm.)
-        self.marks()
-            .into_iter()
+        // Containment filter over the CACHED outline walk. Document
+        // order is pre-order, so the surviving chain is outermost-first
+        // for free. The giant-document day the old comment predicted
+        // arrived (27k marks, queried per cursor tick): the walk now
+        // computes once per revision and this is a scan over the cache.
+        self.marks_now()
+            .iter()
             .filter(|m| m.start <= offset && offset < m.end)
+            .cloned()
             .collect()
     }
 

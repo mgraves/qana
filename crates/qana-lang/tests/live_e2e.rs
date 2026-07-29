@@ -226,3 +226,41 @@ fn edits_reaching_the_document_end_keep_terms_canonical() {
     assert!(delta.splice.is_some());
     assert_eq!(l.text(), trimmed, "tail deletion re-terminates the new final line");
 }
+
+/// The marks cache: editors query marks per CURSOR TICK, and at 27k
+/// symbols the outline walk per query froze typing. marks_shared
+/// hands out the same Arc until an edit bumps the revision — the
+/// per-tick cost is O(1), and derived-work consumers gate on
+/// marks_rev instead of recomputing to find out nothing changed.
+#[test]
+fn marks_are_cached_per_revision() {
+    let mut l = limner();
+    l.open(SL_DEMO);
+
+    let rev0 = l.marks_rev();
+    let a = l.marks_shared();
+    let b = l.marks_shared();
+    assert!(std::sync::Arc::ptr_eq(&a, &b), "same revision: same Arc, zero recompute");
+    assert_eq!(l.marks_rev(), rev0, "queries do not bump the revision");
+
+    // An edit invalidates: new revision, fresh marks reflecting it.
+    let delta = l.edit(&LineEdit {
+        start: 0,
+        end: 0,
+        lines: vec!["struct Fresh { a: Num }".to_string()],
+    });
+    let _ = delta;
+    assert_ne!(l.marks_rev(), rev0, "edits bump the revision");
+    let c = l.marks_shared();
+    assert!(!std::sync::Arc::ptr_eq(&a, &c), "new revision: recomputed marks");
+    assert!(
+        c.iter().any(|m| m.name == "Fresh"),
+        "fresh marks see the edit: {:?}",
+        c.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
+    );
+
+    // enclosing() rides the same cache and stays correct.
+    let fresh = c.iter().find(|m| m.name == "Fresh").unwrap();
+    let chain = l.enclosing(fresh.name_start);
+    assert!(chain.iter().any(|m| m.name == "Fresh"), "chain: {chain:?}");
+}

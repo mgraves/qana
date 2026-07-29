@@ -304,6 +304,18 @@ pub trait Limner {
         0
     }
 
+    /// The marks SHAPE revision: changes only when the outline's
+    /// structure — the (name, category, nesting) sequence — changes,
+    /// NOT when spans merely shift (every keystroke shifts spans; the
+    /// shape survives body edits untouched). This is the gate for
+    /// consumers building shape-derived structures like outline
+    /// trees: keyed here, typing costs them nothing. Default falls
+    /// back to [`Limner::marks_rev`] (conservative: every edit is a
+    /// possible shape change).
+    fn marks_shape_rev(&mut self) -> u64 {
+        self.marks_rev()
+    }
+
     /// The chain of marks enclosing `offset` (half-open spans:
     /// `start <= offset < end`), OUTERMOST FIRST — the breadcrumb /
     /// sticky-context query, expected cheap enough to run per cursor

@@ -264,3 +264,33 @@ fn marks_are_cached_per_revision() {
     let chain = l.enclosing(fresh.name_start);
     assert!(chain.iter().any(|m| m.name == "Fresh"), "chain: {chain:?}");
 }
+
+/// The SHAPE revision: typing inside a body shifts every later mark's
+/// spans (marks_rev bumps) but the outline's structure is unchanged —
+/// shape_rev must hold still, so outline-tree consumers keyed on it
+/// pay nothing per keystroke. Adding a construct changes the shape.
+#[test]
+fn shape_rev_survives_body_edits_and_tracks_structure() {
+    let mut l = limner();
+    l.open(SL_DEMO);
+
+    let shape0 = l.marks_shape_rev();
+
+    // A body-shaped edit: retype line 1 with a tweak (no new names).
+    let line1 = l.text().lines().nth(1).unwrap_or("").to_string();
+    let _ = l.edit(&LineEdit { start: 1, end: 2, lines: vec![format!("{line1} ")] });
+    assert_ne!(l.marks_rev(), 0, "marks revision tracks edits");
+    assert_eq!(
+        l.marks_shape_rev(),
+        shape0,
+        "body edit: spans shifted, shape identical — no outline rebuild"
+    );
+
+    // A structural edit: a new construct appears.
+    let _ = l.edit(&LineEdit {
+        start: 0,
+        end: 0,
+        lines: vec!["struct Newcomer { n: Num }".to_string()],
+    });
+    assert_ne!(l.marks_shape_rev(), shape0, "new construct: the shape changed");
+}

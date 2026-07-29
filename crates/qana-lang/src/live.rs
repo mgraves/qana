@@ -32,6 +32,13 @@ pub struct LiveDoc {
     /// marks per cursor tick; the walk at 27k symbols is ~15ms, the
     /// cached Arc handout is O(1).
     marks_cache: Option<(u64, Arc<Vec<Mark>>)>,
+    /// The SHAPE revision: bumps only when the (name, category,
+    /// nesting) sequence of the marks changes — spans shift on every
+    /// keystroke, the shape survives body edits. Computed as a hash
+    /// during the cached walk; consumers gate outline-tree rebuilds
+    /// on this, so typing costs them nothing.
+    shape_rev: u64,
+    shape_hash: u64,
 }
 
 impl LiveDoc {
@@ -45,7 +52,17 @@ impl LiveDoc {
         db.set_macro_bodies(&lang.macros);
         db.set_tree(&uri, session.tree().expect("total").clone());
         let (painter, _) = Painter::new(&session, &lang.styles, Some((&mut db, &uri)));
-        LiveDoc { lang, uri, session, db, painter, marks_rev: 1, marks_cache: None }
+        LiveDoc {
+            lang,
+            uri,
+            session,
+            db,
+            painter,
+            marks_rev: 1,
+            marks_cache: None,
+            shape_rev: 0,
+            shape_hash: 0,
+        }
     }
 
     /// The cached outline marks for the CURRENT revision, computing
@@ -71,6 +88,35 @@ impl LiveDoc {
                 })
                 .collect(),
         );
+
+        // The SHAPE hash, as a byproduct of the walk: (name, category,
+        // nesting depth) per mark — the things an outline TREE is made
+        // of. Spans deliberately excluded: they shift on every
+        // keystroke while the shape survives body edits, and shape_rev
+        // only bumps when this hash changes.
+        let mut h = 0xcbf29ce484222325u64;
+        let mut fnv = |bytes: &[u8]| {
+            for &b in bytes {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h ^= 0xff;
+            h = h.wrapping_mul(0x100000001b3);
+        };
+        let mut open_ends: Vec<u32> = Vec::new();
+        for m in fresh.iter() {
+            while open_ends.last().is_some_and(|&e| m.start >= e) {
+                open_ends.pop();
+            }
+            fnv(m.name.as_bytes());
+            fnv(&[m.category, open_ends.len() as u8]);
+            open_ends.push(m.end);
+        }
+        if h != self.shape_hash {
+            self.shape_hash = h;
+            self.shape_rev = self.shape_rev.wrapping_add(1);
+        }
+
         self.marks_cache = Some((self.marks_rev, fresh.clone()));
         fresh
     }
@@ -211,6 +257,13 @@ impl Limner for LiveDoc {
 
     fn marks_rev(&mut self) -> u64 {
         self.marks_rev
+    }
+
+    fn marks_shape_rev(&mut self) -> u64 {
+        // The hash is a byproduct of the (cached) walk: make sure the
+        // current revision has been walked, then report.
+        let _ = self.marks_now();
+        self.shape_rev
     }
 
     fn enclosing(&mut self, offset: u32) -> Vec<Mark> {

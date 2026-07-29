@@ -44,6 +44,15 @@ pub struct TokenDef {
     /// If set, matched text is looked up in the grammar's keyword map and
     /// re-tagged to that keyword's own token id on a hit.
     pub specialize: bool,
+    /// Line-splice marker (`@continues`): when this token is the FINAL
+    /// token of a line, the line-bounded mode it belongs to survives the
+    /// end of line — the next line enters still inside it. This is C's
+    /// backslash-newline in envelope terms: the SPLICE happens at a
+    /// token boundary (tokens still never span lines — L1 holds), and
+    /// the mode stack, which is already the line state, carries the
+    /// continuation. Only meaningful in an eol-popped mode; the
+    /// envelope check refuses it anywhere else.
+    pub continues: bool,
 }
 
 impl TokenDef {
@@ -57,6 +66,7 @@ impl TokenDef {
             bracket: None,
             action: Action::None,
             specialize: false,
+            continues: false,
         }
     }
     pub fn trivia(mut self) -> Self {
@@ -83,6 +93,10 @@ impl TokenDef {
         self.specialize = true;
         self
     }
+    pub fn continues(mut self) -> Self {
+        self.continues = true;
+        self
+    }
 }
 
 /// The lexical half of an envelope grammar, as a first-class value.
@@ -103,11 +117,15 @@ pub struct LexGrammar {
     /// push graph is cyclic; must be ≤ [`crate::lexer::MAX_STACK`].
     pub max_stack: Option<u8>,
     /// Per-mode LINE-BOUNDED flag (`@push(MODE, eol)`): the mode pops
-    /// automatically at end of line, so it can never appear in a line's
-    /// ENTRY state — the L2 space shrinks, and edits inside such a mode
-    /// (preprocessor directives, say) can never damage neighboring
-    /// lines. At EOL, flagged modes pop from the top of the stack until
-    /// an unflagged one (or the base) is exposed.
+    /// automatically at end of line, so edits inside such a mode
+    /// (preprocessor directives, say) stay line-local by construction.
+    /// At EOL, flagged modes pop from the top of the stack until an
+    /// unflagged one (or the base) is exposed — UNLESS the line's final
+    /// token is a `@continues` splice (C's backslash-newline), in which
+    /// case the whole stack survives into the next line's entry state.
+    /// Without a continuation token in the mode, an eol-popped mode can
+    /// never appear in a line's entry state; with one, it can — that is
+    /// the feature.
     pub eol_pop: Vec<bool>,
 }
 

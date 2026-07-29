@@ -589,6 +589,11 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                 "trivia" => def.trivia = true,
                 "error" => def.error = true,
                 "specialize" => def.specialize = true,
+                // Line splice (C's backslash-newline): as the line's
+                // final token it keeps the eol-bounded mode alive into
+                // the next line. The envelope check refuses it in
+                // modes that aren't `@push(M, eol)`.
+                "continues" => def.continues = true,
                 "pop" => def.action = qana_grammar::model::Action::Pop,
                 "push" => {
                     if a.args.is_empty() || a.args.len() > 2 {
@@ -633,7 +638,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                     d,
                     a.name_span,
                     format!(
-                        "unknown token attribute `@{other}` (expected @trivia, @error, @specialize, @style, @push, @pop)"
+                        "unknown token attribute `@{other}` (expected @trivia, @error, @specialize, @style, @push, @pop, @continues)"
                     ),
                 ),
             }

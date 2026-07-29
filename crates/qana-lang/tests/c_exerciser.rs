@@ -3,7 +3,8 @@
 //! construction — canonical LR(1) never terminated on it), and the
 //! committed demo parses losslessly with every reference resolving.
 
-use qana_engine::IncSession;
+use qana_engine::{IncSession, Line, LineEdit, LineTerm};
+use qana_grammar::green::semantic_eq;
 use qana_lang::compile::certify;
 use qana_lang::{compile_source, QanaToolchain};
 use qana_sem::SemDb;
@@ -86,8 +87,6 @@ fn functions_outline_through_the_declarator_nest() {
     let sel = &nest[h.selection.0 as usize..h.selection.1 as usize];
     assert_eq!(sel, "handler", "selection covers the name token exactly");
 }
-
-use qana_engine::{Line, LineEdit};
 
 /// The preprocessor as a LINE-BOUNDED mode: `#` enters, EOL leaves.
 /// Directive modes never reach another line's entry state, `#define`
@@ -541,4 +540,68 @@ fn c_macro_bodies_are_token_soup_so_splicing_stays_textual() {
     );
     // A MacLang-style body (a real expression) would have been
     // parenthesized — see meta_e2e::substitution_is_syntax_aware.
+}
+
+/// C's backslash-newline, as an envelope feature: the `@continues`
+/// splice keeps the PP mode alive across the line break, so a
+/// multi-line `#define` lexes its whole body in directive space and
+/// the statement tier never sees the macro body's naked expression
+/// lines. sqlite3.c is full of these.
+#[test]
+fn backslash_newline_continues_a_directive() {
+    let tc = QanaToolchain::new();
+    let out = compile_source(&tc, C_RG);
+    assert!(out.diags.is_empty(), "c.qana compiles: {:?}", out.diags);
+    let (lexer, tables) = certify(&out.def).expect("certifies with @continues");
+
+    // The lexer-level fact through the certified artifact: a spliced
+    // directive line EXITS still inside PP.
+    let (_, st) = lexer.lex_line("#define A \\", qana_grammar::lexer::MStack::default());
+    assert!(st.depth() > 0, "spliced directive line re-enters PP on the next line");
+
+    let spliced = "#define MAX(a, b) \\\n    ((a) > (b) ? (a) : (b))\nint y;\n";
+    let mut s = IncSession::new(&lexer, &out.def.sg, &tables, spliced).unwrap();
+    assert_eq!(s.tree().unwrap().text(), spliced, "lossless");
+    assert!(
+        s.last_repairs.is_empty(),
+        "continued body stays in directive space: {:?}",
+        s.last_repairs
+    );
+
+    // Strictness is observable end-to-end: a space after the backslash
+    // is no splice (the standard's rule), so the body line lands in
+    // the statement tier and needs repair.
+    let defeated = "#define MAX(a, b) \\ \n    ((a) > (b) ? (a) : (b))\nint y;\n";
+    let d = IncSession::new(&lexer, &out.def.sg, &tables, defeated).unwrap();
+    assert!(!d.last_repairs.is_empty(), "trailing space defeats the splice");
+
+    // Incremental ≡ batch through splice edits — including while the
+    // deleted backslash leaves the body line broken (total under
+    // errors), and healed again when it returns.
+    let gate = |s: &IncSession<'_>| {
+        let now = s.buf.reproduce();
+        let batch = IncSession::new(&lexer, &out.def.sg, &tables, &now).unwrap();
+        assert_eq!(s.tree().unwrap().text(), now, "lossless");
+        assert!(
+            semantic_eq(s.tree().unwrap(), batch.tree().unwrap()),
+            "incremental ≡ batch through the splice edit"
+        );
+    };
+
+    s.edit(&out.def.sg, &tables, &[LineEdit {
+        start: 0,
+        end: 1,
+        replacement: vec![Line::new("#define MAX(a, b)", LineTerm::Lf)],
+    }])
+    .unwrap();
+    gate(&s);
+
+    s.edit(&out.def.sg, &tables, &[LineEdit {
+        start: 0,
+        end: 1,
+        replacement: vec![Line::new("#define MAX(a, b) \\", LineTerm::Lf)],
+    }])
+    .unwrap();
+    gate(&s);
+    assert!(s.last_repairs.is_empty(), "splice restored: clean again");
 }

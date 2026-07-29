@@ -82,6 +82,13 @@ mode PP {
   token PP_NUM     = /\d[\w.]*/ @style(number)
   token PP_COMMA   = "," @style(punctuation)
   token PP_RP      = ")" @style(bracket)
+  // C's line splice: a backslash as the line's FINAL character keeps
+  // the directive alive into the next line (`@continues` suppresses
+  // the eol pop), so multi-line #define bodies lex whole in directive
+  // space. Trailing whitespace after the backslash defeats it — the
+  // standard's own rule. Declared before PP_ANY so `\` is a splice,
+  // not catch-all noise.
+  token PP_CONT    = /\\/ @trivia @continues @style(punctuation)
   token PP_ANY     = /./ @style(regexp)
 }
 

@@ -23,6 +23,10 @@ pub enum LintError {
     UnboundedModeStack { cycle: Vec<String> },
     /// L2: declared bound exceeds engine capacity.
     StackBoundTooLarge { declared: u8, max: u8 },
+    /// `@continues` on a token whose mode is not eol-popped: the splice
+    /// suppresses an eol pop that would never happen — dead config is
+    /// refused, not ignored.
+    ContinuationOutsideLineBoundedMode { token: String, mode: String },
 }
 
 impl std::fmt::Display for LintError {
@@ -42,6 +46,12 @@ impl std::fmt::Display for LintError {
             LintError::StackBoundTooLarge { declared, max } => {
                 write!(f, "L2: declared max_stack {declared} exceeds engine capacity {max}")
             }
+            LintError::ContinuationOutsideLineBoundedMode { token, mode } => write!(
+                f,
+                "`@continues` on token `{token}`: its mode `{mode}` is not line-bounded \
+                 (`@push({mode}, eol)`), so there is no end-of-line pop to suppress. \
+                 A splice token belongs in the mode it splices."
+            ),
         }
     }
 }
@@ -208,6 +218,18 @@ pub fn check_l2(g: &LexGrammar) -> Result<u8, LintError> {
 pub fn check_envelope(g: &LexGrammar, dfas: &[ModeDfa]) -> Result<EnvelopeReport, LintError> {
     check_l1(g, dfas)?;
     let bound = check_l2(g)?;
+    // A `@continues` splice only means something where an eol pop
+    // exists to suppress. Anywhere else it is dead config — refused
+    // with the fix, not silently ignored (the @scope(unordered)
+    // lesson: attributes that do nothing hide real intent).
+    for t in &g.tokens {
+        if t.continues && !g.eol_pop.get(t.mode as usize).copied().unwrap_or(false) {
+            return Err(LintError::ContinuationOutsideLineBoundedMode {
+                token: t.name.clone(),
+                mode: g.mode_names[t.mode as usize].clone(),
+            });
+        }
+    }
     let pushable = g
         .tokens
         .iter()

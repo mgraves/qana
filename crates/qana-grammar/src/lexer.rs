@@ -94,6 +94,7 @@ pub struct CompiledLexer {
     actions: Vec<Action>,
     trivia: Vec<bool>,
     specialize: Vec<bool>,
+    continues: Vec<bool>,
     eol_pop: Vec<bool>,
     keywords: HashMap<(TokenId, String), TokenId>,
     stack_bound: u8,
@@ -117,6 +118,7 @@ impl CompiledLexer {
             actions: g.tokens.iter().map(|t| t.action).collect(),
             trivia: g.tokens.iter().map(|t| t.trivia).collect(),
             specialize: g.tokens.iter().map(|t| t.specialize).collect(),
+            continues: g.tokens.iter().map(|t| t.continues).collect(),
             eol_pop: g.eol_pop.clone(),
             // Specialization is PER-OWNER: a keyword only re-tags the
             // token it was declared for (composed languages keep their
@@ -183,9 +185,21 @@ impl CompiledLexer {
         );
         // Line-bounded modes (`@push(M, eol)`) end with the line: pop
         // them from the top so the EXIT state never carries them —
-        // directive edits stay line-local by construction.
-        while state.depth() > 0 && self.eol_pop[state.current_mode() as usize] {
-            state.pop();
+        // directive edits stay line-local by construction. EXCEPT when
+        // the line's FINAL token is a `@continues` splice (C's
+        // backslash-newline): the line has not logically ended, so the
+        // whole stack survives as the next line's entry state. Being
+        // the final token means the splice sits immediately before the
+        // terminator — trailing spaces make whitespace the final token
+        // and defeat it, exactly C's rule. (Splices act at token
+        // boundaries only; mid-token splices are outside the envelope.)
+        let spliced = out
+            .last()
+            .is_some_and(|t| (t.id as usize) < self.continues.len() && self.continues[t.id as usize]);
+        if !spliced {
+            while state.depth() > 0 && self.eol_pop[state.current_mode() as usize] {
+                state.pop();
+            }
         }
         (out, state)
     }

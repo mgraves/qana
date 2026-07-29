@@ -324,6 +324,10 @@ pub enum RepairKind {
     Deleted(String),
     /// A zero-width token of this kind was pretended into existence.
     Inserted(TokenId),
+    /// The construct in progress was set aside as error material so a
+    /// structural token an ENCLOSING construct was waiting for (a
+    /// closer, a separator) could reach it.
+    Unwound,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1062,6 +1066,29 @@ pub fn incremental_parse(
                 let escalated = repair_cluster >= REPAIR_CLUSTER_ESCALATE;
 
                 let peeked = peek_terms(&input, K + 1);
+                let la = peeked.first().copied();
+                // A lookahead some ENCLOSING state still wants (a
+                // closer, a separator) is LOAD-BEARING: deleting it
+                // hands everything that follows to the construct in
+                // progress. The K-token simulate cannot see that
+                // catastrophe past its horizon — deleting the `}` of
+                // a two-line struct near the top of a 249k-line file
+                // scored PERFECTLY (the next function parses as a
+                // member declaration), the outline collapsed from 41k
+                // marks to 2, and every keystroke inside the
+                // incomplete member re-earned one document-sized
+                // error region at 3-4 SECONDS each (the world-swallow,
+                // measured by the keystroke lab). Such a token is
+                // never deleted: a completing insert wins ties, and
+                // failing that the in-progress item is set aside as
+                // error material until the token can act.
+                let la_wanted_below = la.is_some_and(|x| {
+                    states[..states.len().saturating_sub(1)]
+                        .iter()
+                        .rev()
+                        .take(128)
+                        .any(|&s| t.action[s as usize].contains_key(&x))
+                });
                 let delete_score = if peeked.is_empty() {
                     0
                 } else {
@@ -1087,10 +1114,58 @@ pub fn incremental_parse(
                 } else {
                     search_inserts(g, t, &states, &peeked)
                 };
+                if std::env::var_os("QANA_TRACE_REPAIR").is_some() {
+                    let top = match stack.last() {
+                        None => "-",
+                        Some(Entry { sym: SymSlot::List(_), .. }) => "List",
+                        Some(Entry { sym: SymSlot::Child(GreenChild::Node(_)), .. }) => "Node",
+                        Some(Entry { sym: SymSlot::Child(GreenChild::Token(_)), .. }) => "Token",
+                    };
+                    // The pop ladder: for each depth, the entry popped
+                    // (with its nonterminal or token name) and whether
+                    // the exposed state acts on la.
+                    let mut ladder = String::new();
+                    if let Some(x) = la {
+                        for k in 1..=stack.len().min(10) {
+                            let name = match &stack[stack.len() - k].sym {
+                                SymSlot::List(b) => format!(
+                                    "L:{}",
+                                    g.nt_names.get(b.nt as usize).map(|s| s.as_str()).unwrap_or("?")
+                                ),
+                                SymSlot::Child(GreenChild::Node(n)) => format!(
+                                    "N:{}",
+                                    g.nt_names.get(n.nt as usize).map(|s| s.as_str()).unwrap_or("?")
+                                ),
+                                SymSlot::Child(GreenChild::Token(tk)) => {
+                                    format!("T:{}", g.term_name(tk.id))
+                                }
+                            };
+                            let exposed = states[states.len() - 1 - k];
+                            let acts = t.action[exposed as usize].contains_key(&x);
+                            ladder.push_str(&name);
+                            ladder.push(if acts { '+' } else { '.' });
+                            ladder.push(' ');
+                        }
+                    }
+                    eprintln!(
+                        "[repair] term={consumed_terms} la={:?} top={top} depth={} ladder={ladder} list_boundary={at_list_boundary} wanted_below={la_wanted_below} delete_score={delete_score} insert={:?}",
+                        la.map(|x| g.term_name(x)),
+                        stack.len(),
+                        insert_hit
+                            .as_ref()
+                            .map(|(seq, sc)| (seq.iter().map(|&x| g.term_name(x)).collect::<Vec<_>>(), *sc)),
+                    );
+                }
                 // Choose: higher real consumption wins; ties prefer the
-                // single delete over an insert sequence (lower cost).
+                // single delete over an insert sequence (lower cost) —
+                // EXCEPT under a wanted-below lookahead, where the
+                // insert is what keeps the wanted token alive and so
+                // wins ties too.
                 match insert_hit {
-                    Some((seq, score)) if score > delete_score => {
+                    Some((seq, score))
+                        if score > delete_score
+                            || (la_wanted_below && score > 0 && score >= delete_score) =>
+                    {
                         for &x in &seq {
                             repairs.push(Repair {
                                 at_terminal: consumed_terms,
@@ -1099,11 +1174,69 @@ pub fn incremental_parse(
                             apply_insert!(x);
                         }
                     }
-                    _ if delete_score > 0 => {
-                        delete_la!();
-                    }
                     _ => {
-                        delete_la!(); // panic-skip: guaranteed progress
+                        // Wanted below and no completing insert: set
+                        // the in-progress item aside (pop into an
+                        // error node) until the wanted token can act
+                        // for its enclosing construct. EMPTY lists
+                        // are transparent — an ε-seeded builder (the
+                        // ptrs list of `struct P { i }`'s half-born
+                        // declarator) protects nothing. A list WITH
+                        // elements pops only as the LANDING step —
+                        // when the wanted token acts directly beneath
+                        // it, the list is the broken construct's own
+                        // sub-structure (the spec+ holding `int` in
+                        // `struct P { int }`). The probe never hunts
+                        // PAST a non-empty list: elements at an outer
+                        // level are good parses (a statement list, a
+                        // field list of completed fields), and a
+                        // wanted token belonging somewhere deeper
+                        // never justifies dumping them.
+                        let mut popped = false;
+                        if let (true, Some(x)) = (la_wanted_below, la) {
+                            let mut k = 0usize;
+                            let depth = loop {
+                                if k >= stack.len() {
+                                    break None;
+                                }
+                                let nonempty_list = match &stack[stack.len() - 1 - k].sym {
+                                    SymSlot::List(b) => !b.pieces.is_empty(),
+                                    _ => false,
+                                };
+                                k += 1;
+                                let exposed = states[states.len() - 1 - k];
+                                if t.action[exposed as usize].contains_key(&x) {
+                                    break Some(k);
+                                }
+                                if nonempty_list {
+                                    break None;
+                                }
+                            };
+                            if let Some(k) = depth {
+                                repairs.push(Repair {
+                                    at_terminal: consumed_terms,
+                                    kind: RepairKind::Unwound,
+                                });
+                                for _ in 0..k {
+                                    let e = stack.pop().expect("counted above");
+                                    states.pop();
+                                    let mut kids = e.leading;
+                                    kids.push(e.sym.into_child());
+                                    pending.insert(
+                                        0,
+                                        GreenChild::Node(make_node(
+                                            crate::green::ERROR_NT,
+                                            crate::green::ERROR_PROD,
+                                            kids,
+                                        )),
+                                    );
+                                }
+                                popped = true;
+                            }
+                        }
+                        if !popped {
+                            delete_la!(); // skip: guaranteed progress
+                        }
                     }
                 }
             }

@@ -591,6 +591,7 @@ pub fn diagnostics(
             let message = match &r.kind {
                 RepairKind::Deleted(text) => format!("unexpected `{text}`"),
                 RepairKind::Inserted(id) => format!("missing {}", sg.term_name(*id)),
+                RepairKind::Unwound => "incomplete construct".to_string(),
             };
             Diagnostic { span, message }
         })

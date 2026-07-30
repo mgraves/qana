@@ -387,6 +387,17 @@ fn peek_terms(input: &VecDeque<Item>, k: usize) -> Vec<TokenId> {
 /// States-only LR run over a terminal feed; returns how many feed tokens
 /// were consumed before erroring (Accept counts as consuming the rest).
 fn simulate(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) -> usize {
+    simulate_depth(g, t, base, feed).0
+}
+
+/// Like [`simulate`], but also reports the stack depth WHERE THE FEED
+/// ENDED UP. Two repairs can consume the lookahead equally well while
+/// leaving the following text in different worlds: after
+/// `struct Point P` + `;` the next function lives at file scope; after
+/// `struct Point P` + `{` it lives inside a fabricated K&R body (and
+/// after `(`, inside a fabricated parameter list) — both of which
+/// absorb unboundedly. The final depth is the tell.
+fn simulate_depth(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) -> (usize, usize) {
     let mut states = base.to_vec();
     let mut i = 0usize;
     let mut steps = 0usize;
@@ -402,20 +413,20 @@ fn simulate(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) -> usi
                 let prod = &g.prods[p as usize];
                 let k = prod.rhs.len();
                 if states.len() <= k {
-                    return i;
+                    return (i, states.len());
                 }
                 states.truncate(states.len() - k);
                 let top = *states.last().unwrap();
                 match t.goto_[top as usize].get(&prod.lhs) {
                     Some(&n) => states.push(n),
-                    None => return i,
+                    None => return (i, states.len()),
                 }
             }
-            Some(LrAct::Accept) => return feed.len(),
-            _ => return i,
+            Some(LrAct::Accept) => return (feed.len(), states.len()),
+            _ => return (i, states.len()),
         }
     }
-    i
+    (i, states.len())
 }
 
 /// Apply one insertion on a cloned state stack (reduces, then the shift).
@@ -465,7 +476,22 @@ fn search_inserts(
     let mut budget = 600usize;
     for _len in 1..=3usize {
         let mut next: Vec<(Vec<TokenId>, Vec<u16>)> = Vec::new();
-        let mut best_at_len: Option<(Vec<TokenId>, usize)> = None;
+        // (seq, score, post-SIMULATION stack depth): among equal
+        // scores, the repair that leaves the FOLLOWING TEXT at the
+        // shallowest depth wins. A completing insert (`;` after
+        // `struct Point P`) puts the next function back at file scope;
+        // an opening insert (`(` or `{` in the same spot) fabricates a
+        // viable-but-wrong prefix — a parameter list or K&R body —
+        // that the rest of the document feeds without ever erroring
+        // (each ate a 249k-line file). All of them simulate perfectly
+        // inside the K-token horizon; where the lookahead ENDS UP is
+        // the tell. Note the probe point: post-insert depth is not
+        // enough — inserting `{` first REDUCES the declaration head
+        // (landing shallow) and only then opens the door.
+        // (Lexicographic order stays as the last tie-break for
+        // determinism — it just no longer decides between a
+        // terminator and an absorber by accident of token numbering.)
+        let mut best_at_len: Option<(Vec<TokenId>, usize, usize)> = None;
         for (seq, states) in &frontier {
             let s = *states.last().unwrap();
             let mut cands: Vec<TokenId> =
@@ -480,24 +506,26 @@ fn search_inserts(
                 let Some(states2) = apply_insert_sim(g, t, states, cand) else { continue };
                 let mut seq2 = seq.clone();
                 seq2.push(cand);
-                let score = simulate(g, t, &states2, peeked);
+                let (score, depth) = simulate_depth(g, t, &states2, peeked);
                 if score >= 1 {
                     let better = match &best_at_len {
                         None => true,
-                        Some((bseq, bscore)) => {
-                            score > *bscore || (score == *bscore && seq2 < *bseq)
+                        Some((bseq, bscore, bdepth)) => {
+                            score > *bscore
+                                || (score == *bscore && depth < *bdepth)
+                                || (score == *bscore && depth == *bdepth && seq2 < *bseq)
                         }
                     };
                     if better {
-                        best_at_len = Some((seq2, score));
+                        best_at_len = Some((seq2, score, depth));
                     }
                 } else {
                     next.push((seq2, states2));
                 }
             }
         }
-        if let Some(hit) = best_at_len {
-            return Some(hit);
+        if let Some((seq, score, _)) = best_at_len {
+            return Some((seq, score));
         }
         frontier = next;
         if frontier.is_empty() || budget == 0 {

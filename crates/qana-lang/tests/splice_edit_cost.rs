@@ -154,7 +154,7 @@ fn incomplete_member_stays_a_local_error_region() {
         })
         .collect();
 
-    let case = |name: &str, body: &str| -> (usize, bool, usize) {
+    let case = |name: &str, body: &str| -> (usize, Vec<String>, usize) {
         let text = format!("#define LIMIT 100\n\n{body}\n{tail}");
         let s = IncSession::new(&lexer, &out.def.sg, &tables, &text).unwrap();
         let repairs: Vec<String> = s
@@ -164,19 +164,15 @@ fn incomplete_member_stays_a_local_error_region() {
             .map(|r| format!("{:?}@{}", r.kind, r.at_terminal))
             .collect();
         let symbols = qana_services::outline(s.tree().expect("total"), &out.def.outline);
-        let names: Vec<&str> = symbols.iter().map(|m| m.name.as_str()).take(10).collect();
+        let names: Vec<String> = symbols.iter().map(|m| m.name.clone()).collect();
         println!(
             "CASE {name}: outline={} {:?} repairs={} {:?}",
             symbols.len(),
-            names,
+            names.iter().take(10).collect::<Vec<_>>(),
             s.last_repairs.len(),
             repairs
         );
-        (
-            symbols.len(),
-            symbols.iter().any(|m| m.name == "Point"),
-            s.last_repairs.len(),
-        )
+        (symbols.len(), names, s.last_repairs.len())
     };
 
     // Baselines: the empty struct and the well-formed struct parse
@@ -186,32 +182,62 @@ fn incomplete_member_stays_a_local_error_region() {
         ("empty_struct_spaced", "struct Point {\n}\n"),
         ("wellformed_struct", "struct Point {\n  int x;\n}\n"),
     ] {
-        let (outline, has_point, repairs) = case(name, body);
+        let (outline, names, repairs) = case(name, body);
         assert_eq!(repairs, 0, "{name}: baseline must be repair-free");
-        assert!(has_point && outline >= 7, "{name}: full outline");
+        assert!(
+            names.iter().any(|n| n == "Point") && outline >= 7,
+            "{name}: full outline"
+        );
     }
 
     // The incomplete member, in-function and at file scope, plus the
     // complete-declarator contrast (missing only `;`). Every case:
     // the struct closes, the world survives, repairs stay minimal.
-    for (name, body, floor) in [
+    // The `_P_` cases are MIKE'S variant, caught live by QE_TRACE_KEYS
+    // (2026-07-29): `struct Point P {` — tag AND declarator before the
+    // brace — errors at `{` in a different stack shape (an initializer
+    // `= {…}` is a viable repair there) and swallowed the world after
+    // the tag-only variant was contained.
+    for (name, body, floor, survivor) in [
+        // `struct Point P { … }` is LEGAL C — a K&R-style definition of
+        // a function P returning struct Point — so the survivor is P.
+        (
+            "file_scope_P_open",
+            "struct Point P {\n  int x;\n  int z;\n}\n",
+            7,
+            "P",
+        ),
+        (
+            "file_scope_P_incomplete",
+            "struct Point P {\n  i}\n",
+            7,
+            "P",
+        ),
+        // Intermediate states of typing the P variant: the bare
+        // declaration missing everything after the declarator, and
+        // the auto-closed empty braces.
+        ("file_scope_P_bare", "struct Point P\n", 6, "scale_1"),
+        ("file_scope_P_empty_braces", "struct Point P {}\n", 7, "P"),
+        ("file_scope_P_half_word", "struct Poi\n", 6, "scale_1"),
         (
             "in_fn_incomplete",
             "static int scale_0(int v, int factor) {\n    int result = v * factor + 0;\nstruct Point {\n  i}\n    result = result % LIMIT;\n    return result;\n}\n",
             8,
+            "Point",
         ),
-        ("file_scope_incomplete", "struct Point {\n  i}\n", 7),
+        ("file_scope_incomplete", "struct Point {\n  i}\n", 7, "Point"),
         (
             "in_fn_int_x",
             "static int scale_0(int v, int factor) {\n    int result = v * factor + 0;\nstruct Point {\n  int x}\n    result = result % LIMIT;\n    return result;\n}\n",
             8,
+            "Point",
         ),
-        ("file_scope_int_x", "struct Point {\n  int x}\n", 7),
+        ("file_scope_int_x", "struct Point {\n  int x}\n", 7, "Point"),
     ] {
-        let (outline, has_point, repairs) = case(name, body);
+        let (outline, names, repairs) = case(name, body);
         assert!(
-            has_point,
-            "{name}: the struct itself must survive its broken member"
+            names.iter().any(|n| n == survivor),
+            "{name}: the construct itself must survive its broken interior (want {survivor})"
         );
         assert!(
             outline >= floor,
@@ -537,11 +563,16 @@ fn in_struct_member_typing_at_scale() {
         ("post_semi_space", 12, 13, vec!["  int x; }".into()]),
     ];
 
-    let mut worst_incomplete = std::time::Duration::ZERO;
-    let mut post_semi = std::time::Duration::ZERO;
-    let mut min_marks = usize::MAX;
-    for (name, start, end, lines) in steps {
-        let edit = LineEdit { start, end, lines: lines.clone() };
+    fn run_step(
+        l: &mut Box<dyn Limner>,
+        name: &str,
+        start: u32,
+        end: u32,
+        lines: Vec<String>,
+        worst: &mut std::time::Duration,
+        min_marks: &mut usize,
+    ) {
+        let edit = LineEdit { start, end, lines };
         let t = Instant::now();
         let delta = l.edit(&edit);
         let took = t.elapsed();
@@ -551,23 +582,90 @@ fn in_struct_member_typing_at_scale() {
             .map(|((lo, hi), repl)| format!("{lo}..{hi}+{}", repl.len()))
             .unwrap_or_else(|| "-".into());
         let marks = l.marks().len();
-        min_marks = min_marks.min(marks);
+        *min_marks = (*min_marks).min(marks);
+        *worst = (*worst).max(took);
         println!(
             "ENG step={name} edit={:.1}ms splice={splice} repaints={} marks={marks}",
             took.as_secs_f64() * 1e3,
             delta.repaints.len()
         );
-        if name.starts_with("f_") && name != "f_int_x_semi" {
-            worst_incomplete = worst_incomplete.max(took);
-        }
-        if name == "post_semi_space" {
-            post_semi = took;
-        }
+    }
+
+    let mut worst = std::time::Duration::ZERO;
+    let mut min_marks = usize::MAX;
+    for (name, start, end, lines) in steps {
+        run_step(&mut l, name, start, end, lines, &mut worst, &mut min_marks);
+    }
+
+    // JOURNEY 2 — MIKE'S VARIANT, caught live by QE_TRACE_KEYS
+    // (2026-07-29): tag AND declarator before the brace, typed at
+    // another location. The bare `struct Point P` moment made the
+    // repair fabricate an opener (`(`, then `{`) whose fresh nesting
+    // ate the document; the post-simulation-depth tie-break now picks
+    // `;`. Both fields from his screenshot, char by char.
+    let text_now = l.text();
+    let base: u32 = 40;
+    let base_line: String = text_now.lines().nth(base as usize).unwrap_or("").to_string();
+    run_step(
+        &mut l,
+        "p_return_open",
+        base,
+        base + 1,
+        vec![base_line, String::new()],
+        &mut worst,
+        &mut min_marks,
+    );
+    let t = base + 1;
+    let mut acc = String::new();
+    for ch in "struct Point P ".chars() {
+        acc.push(ch);
+        let name = format!("p_k{:02}", acc.chars().count());
+        run_step(&mut l, &name, t, t + 1, vec![acc.clone()], &mut worst, &mut min_marks);
+    }
+    run_step(
+        &mut l,
+        "p_open_brace",
+        t,
+        t + 1,
+        vec!["struct Point P {}".into()],
+        &mut worst,
+        &mut min_marks,
+    );
+    run_step(
+        &mut l,
+        "p_return_inside",
+        t,
+        t + 1,
+        vec!["struct Point P {".into(), "  }".into()],
+        &mut worst,
+        &mut min_marks,
+    );
+    for (i, s) in ["  i}", "  in}", "  int}", "  int }", "  int x}", "  int x;}"]
+        .iter()
+        .enumerate()
+    {
+        let name = format!("p_x{:02}", i);
+        run_step(&mut l, &name, t + 1, t + 2, vec![s.to_string()], &mut worst, &mut min_marks);
+    }
+    run_step(
+        &mut l,
+        "p_return_after_x",
+        t + 1,
+        t + 2,
+        vec!["  int x;".into(), "  }".into()],
+        &mut worst,
+        &mut min_marks,
+    );
+    for (i, s) in ["  i}", "  in}", "  int}", "  int }", "  int z}", "  int z;}"]
+        .iter()
+        .enumerate()
+    {
+        let name = format!("p_z{:02}", i);
+        run_step(&mut l, &name, t + 2, t + 3, vec![s.to_string()], &mut worst, &mut min_marks);
     }
     println!(
-        "ENG worst_incomplete={:.1}ms post_semi={:.1}ms min_marks={min_marks}",
-        worst_incomplete.as_secs_f64() * 1e3,
-        post_semi.as_secs_f64() * 1e3
+        "ENG worst_step={:.1}ms min_marks={min_marks}",
+        worst.as_secs_f64() * 1e3
     );
 
     // Containment: at NO point in the journey may the outline collapse

@@ -5,3 +5,8 @@
 # Editor and tool state. Local to whoever is working, never shared.
 /.idea/
 /.claude/settings.local.json
+
+# The 250k-line C file for reproducing editor stalls by hand in qana_edit
+# (5.9 MB). The tests build the same shape in memory; see
+# crates/qana-lang/tests/splice_edit_cost.rs.
+/examples/c/big_demo.c

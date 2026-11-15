@@ -119,6 +119,45 @@ fn main() {
         n_tokens
     );
 
+    // The same corpus with NUMBER written the way Rust's lexer needs it:
+    // `1.` is a number unless a `.`, a `_` or a letter follows. Every
+    // number in the corpus is now a conditional accept, so this is what
+    // a trailing context costs where it is used. (The run above is a
+    // grammar with none, which takes the lexer's context-free body.)
+    {
+        use qana_grammar::pat::{ClassSet, Pat};
+        let digits = || Pat::plus(Pat::Class(ClassSet::digit()));
+        let mut with_context = g.clone();
+        with_context.tokens[ids.number as usize].pat = Pat::alt([
+            Pat::seq([digits(), Pat::lit("."), digits()]),
+            Pat::seq([
+                digits(),
+                Pat::lit("."),
+                Pat::not_before(Pat::Class(ClassSet {
+                    chars: vec!['.', '_'],
+                    alpha: true,
+                    ..Default::default()
+                })),
+            ]),
+            Pat::seq([digits(), Pat::not_before(Pat::Class(ClassSet::digit()))]),
+        ]);
+        let context_lexer =
+            CompiledLexer::build(&with_context).expect("the context variant is in the envelope");
+        let mut best = Duration::MAX;
+        let mut tokens = 0usize;
+        for _ in 0..5 {
+            let (b, d) = time(|| LexedBuffer::new(&context_lexer, &src));
+            best = best.min(d);
+            tokens = b.lexed.iter().map(|l| l.tokens.len()).sum();
+        }
+        assert_eq!(tokens, n_tokens, "the corpus has no `1.` before a dot or a letter");
+        println!(
+            "cold lex, trailing context:  {:>10}   ({:.1} MB/s, every NUMBER decided by what follows it)",
+            fmt_dur(best),
+            mb / best.as_secs_f64()
+        );
+    }
+
     let (repro, d) = time(|| buf.reproduce());
     assert_eq!(repro, src, "LOSSLESS ROUNDTRIP FAILED");
     println!("lossless roundtrip:          {:>10}   (byte-identical: verified)", fmt_dur(d));

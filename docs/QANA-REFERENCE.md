@@ -71,11 +71,71 @@ The pattern is either a **literal string** (`"{"`, `"else"`) or a
 | `\s` | whitespace (never a line terminator) |
 | `\t` | tab |
 | `\.` `\/` `\\` `\"` … | an escaped punctuation character, literally |
+| `(?=…)` | trailing context: accept the token only if `…` follows it |
+| `(?!…)` | negated trailing context: accept the token only if `…` does not follow it |
 
 There are no PCRE class shorthands beyond those four: `\S`, `\D`, `\b`,
 and `\p{…}` are refused rather than silently read as literal letters.
-There are no anchors, backreferences, or lookaround — the patterns
-compile to a DFA.
+There are no anchors, backreferences, or lookbehind, and no lookahead
+inside a pattern — the patterns compile to a DFA. The one condition a
+token can carry is on what follows it: a trailing context.
+
+### Trailing context
+
+A token is the **longest match**, and among tokens of the same length
+the one declared first. The lexer reads ahead as far as any token can
+reach and backs up to the last place one ended. That alone cannot turn
+down a longer match because of what comes after it, and some languages
+need exactly that. In Rust `1.` is a float, unless a `.`, a `_` or a
+letter follows: `1..2` is a range of integers and `1.foo()` is a method
+call.
+
+```
+token FLOAT = /\d+\.\d+|\d+\.(?![._\a])/ @style(number)
+token INT   = /\d+/                        @style(number)
+```
+
+`(?=…)` and `(?!…)` end a pattern, or one branch of it. They match no
+characters. The token before them is accepted only if the rest of the
+line begins with a match of `…` (`(?=…)`), or does not (`(?!…)`).
+
+| Input | Tokens | Why |
+| --- | --- | --- |
+| `1.5` | `FLOAT` | the first branch has no context |
+| `1.` at the end of a line | `FLOAT` | nothing follows, so `(?!…)` holds |
+| `1. ` | `FLOAT` `WS` | a space is not `.`, `_` or a letter |
+| `1..2` | `INT` `..` `INT` | a `.` follows `1.`, so the lexer falls back to `1` |
+| `1.foo()` | `INT` `.` `IDENT` … | a letter follows `1.` |
+
+The rules:
+
+- **The context is a pattern**, of any length: `/\a+(?=\s*:)/` is a word
+  followed, after any spaces, by a colon.
+- **Longest match still comes first.** A conditional token is tried at
+  the longest place it could end, then at shorter ones; it gives way to
+  another token only where its context fails.
+- **Declaration order still breaks ties.** At the same length the
+  earliest-declared token whose context holds wins, so an unconditional
+  token declared before a conditional one of the same length always
+  wins. Declare the conditional token first.
+- **The end of the line is "nothing follows".** `(?=…)` fails there and
+  `(?!…)` holds. `(?!.)` therefore means "at the end of the line".
+- **A context reads its own line only.** It never sees the line
+  terminator or the next line, so a line's tokens still depend on
+  nothing but that line and its entry state (L1), and an edit relexes
+  what it always relexed.
+- **It only ends a token.** Nothing may follow it; it cannot be repeated
+  (`*`, `+`), be optional by itself, or contain another context. A group
+  that ends in one may be optional: `/a(b(?=c))?/`. A context that can
+  match the empty string is refused, since it would hold everywhere.
+
+A context costs nothing where it is not used: a grammar without one runs
+the lexer it always ran. Where one is used, the lexer checks it once,
+at the longest candidate, in the common case.
+
+Tree-sitter's lexer has no equivalent, so `qana ts` refuses a
+grammar that uses one rather than emit a grammar for a different
+language.
 
 `\n` and `\r` are refused outright (envelope rule L1). Multi-line
 constructs are expressed with modes, not multi-line tokens.

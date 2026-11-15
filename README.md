@@ -568,8 +568,9 @@ Helix, Zed, GitHub). The envelope makes the mapping principled:
   `@punctuation.bracket`, `@string.regexp`, …)
 
 Deliberate boundaries, refused with explanations: @error tokens are
-skipped (tree-sitter has its own ERROR recovery) and non-trivia modes
-(string interpolation) are named external-scanner territory.
+skipped (tree-sitter has its own ERROR recovery), and non-trivia modes
+(string interpolation) and tokens with a trailing context are named
+external-scanner territory.
 
 Validated against the real thing: `tree-sitter generate` (v0.25)
 accepts both emitted grammars — our canonical-LR(1) discipline held
@@ -1582,9 +1583,70 @@ two meet only at the trait. The first consumer is Synkro's
 edits structlang live: colors with the keystroke, unresolved names
 red in the same frame, facts at the cursor from warm tiers.
 
+## Trailing context (shipped): a token can depend on what follows it
+
+The lexer was always a longest-match lexer: it runs each mode's DFA
+until it dies and backs up to the last accept. What it could not do was
+turn down a longer match because of what comes next, and Rust's numbers
+need that: `1.` is a float unless a `.`, a `_` or a letter follows, so
+`1..2` is a range and `1.foo()` a method call. Longest match alone takes
+`1.` and breaks both.
+
+A token pattern, or one branch of it, may now end in `(?=…)` or
+`(?!…)`:
+
+```
+token FLOAT = /\d+\.\d+|\d+\.(?![._\a])/ @style(number)
+token INT   = /\d+/                        @style(number)
+```
+
+The context is itself a pattern, of any length (`/\a+(?=\s*:)/`), and
+it matches no characters. How it is built, and why it is cheap:
+
+* **The mode DFA is unchanged.** A context consumes nothing, so it adds
+  no transition. What changes is what an accepting state says: where a
+  conditional token outranks every unconditional one, the state points
+  at a row of candidates, in declaration priority, each with the context
+  it needs. A context compiles to its own small DFA.
+* **Longest match first, then declaration order**, exactly as before.
+  The scan notes the ends at which a conditional accept was passed; the
+  candidates are then tried from the longest down, and only those longer
+  than the best unconditional match. For a token with a context that is
+  usually one check, which stops at the first character that decides it.
+* **The envelope is untouched.** A context is read from the line being
+  lexed and stops at its end: the end of a line means "nothing follows".
+  `lex_line` is still a pure function of the line's text and its entry
+  state (L1), so incremental relexing needed no change at all. An
+  engine that relexes token by token has to remember how far each token
+  looked ahead; relexing by line makes lookahead inside the line free.
+* **It only ends a token**: nothing may follow it, and it cannot be
+  repeated or nested. Misuse is refused with a position; a context that
+  can match the empty string is refused because it would say nothing.
+* **A grammar without one pays nothing.** The choice between the two
+  scan loops is made once per line, and the context-free one is the
+  loop that was always there, compiled separately.
+
+Measured with `p1bench` (the demo corpus, 100k lines, release build,
+the unchanged and the changed binary run alternately twelve times on a
+busy machine, so read the ratios and not the times): a grammar with no
+context lexes at the same speed as before, means within 0.2% of each
+other. With `NUMBER` rewritten so that **every** number in the corpus is
+decided by a trailing context, the cold lex is 11% slower.
+
+`tests/context_tests.rs` pins the meaning down and checks the lexer
+against a direct reading of the patterns (no automaton) on random
+input; `qana-lang/tests/context_e2e.rs` does it through a `.qana` file,
+including that an edited document equals a batch parse. Tree-sitter
+emission refuses such a grammar: its lexer has no equivalent.
+
+What this does not do: lookbehind, and conditions in the middle of a
+token. `>>` closing two generic argument lists is not a lexing question
+either; it is settled by lexing `>` singly and letting the grammar join
+adjacent ones, which is what rustc does.
+
 ## Status
 
-Eight crates + two binaries (`qana`, `qana-lsp`); 171 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`qana`, `qana-lsp`); 217 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

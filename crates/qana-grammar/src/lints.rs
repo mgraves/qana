@@ -119,7 +119,10 @@ fn reach_accept(dfa: &ModeDfa, from: u16) -> Option<(u16, String)> {
     path[from as usize] = Some(String::new());
     let mut queue = std::collections::VecDeque::from([from]);
     while let Some(s) = queue.pop_front() {
-        if let Some(tok) = dfa.accept[s as usize] {
+        // A conditional accept counts: some continuation of the line
+        // makes it a token, and the path to it already crossed a
+        // terminator.
+        if let Some(tok) = dfa.may_accept(s) {
             return Some((tok, path[s as usize].clone().unwrap()));
         }
         let prefix = path[s as usize].clone().unwrap();

@@ -17,8 +17,9 @@
 //!   in the permissive direction and noted in the emitted header)
 //!
 //! Deliberate scope: @error tokens are skipped (tree-sitter has its own
-//! ERROR recovery); non-trivia modes (string interpolation etc.) are
-//! refused — that's external-scanner territory, documented as such.
+//! ERROR recovery); non-trivia modes (string interpolation etc.) and
+//! tokens with a trailing context are refused — that's external-scanner
+//! territory, documented as such.
 
 use qana_grammar::model::{Action, LexGrammar, TokenId};
 use qana_grammar::pat::{ClassSet, Pat};
@@ -150,6 +151,20 @@ pub fn emit_tree_sitter(
             lex.max_stack.unwrap_or(8)
         ));
         mode_rule.insert(m, rule);
+    }
+
+    // Trailing context: tree-sitter's lexer has no way to accept a token
+    // on condition of what follows it. Dropping the condition would emit
+    // a grammar that lexes a different language (`1..2` as `1.` `.` `2`),
+    // so such a token is refused, in whichever mode it lives.
+    for t in &lex.tokens {
+        if t.pat.has_context() {
+            errors.push(format!(
+                "token `{}` ends in a trailing context (`(?=…)` / `(?!…)`), which tree-sitter's \
+                 lexer cannot express — that is external-scanner territory",
+                t.name
+            ));
+        }
     }
 
     for (i, t) in lex.tokens.iter().enumerate() {
@@ -522,6 +537,7 @@ fn needs_group(p: &Pat) -> bool {
         Pat::Class(_) => false,
         Pat::Seq(_) | Pat::Alt(_) => true,
         Pat::Star(_) | Pat::Plus(_) | Pat::Opt(_) => false,
+        Pat::Ahead { .. } => false,
         Pat::Never => false,
     }
 }
@@ -550,6 +566,11 @@ pub fn pat_regex(p: &Pat) -> String {
         Pat::Star(q) => rep(q, '*'),
         Pat::Plus(q) => rep(q, '+'),
         Pat::Opt(q) => rep(q, '?'),
+        // Regex lookahead syntax. `emit_tree_sitter` refuses a token that
+        // has one, so this is only ever read by a person.
+        Pat::Ahead { context, negated } => {
+            format!("(?{}{})", if *negated { '!' } else { '=' }, pat_regex(context))
+        }
         Pat::Never => "[^\\s\\S]".to_string(), // matches nothing
     }
 }

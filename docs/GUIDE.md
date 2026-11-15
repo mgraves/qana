@@ -457,7 +457,9 @@ qana ast mylang/mylang.qana > src/ast.rs        # typed Rust AST over the green 
 
 The tree-sitter export gives you an escape hatch into the tree-sitter
 ecosystem (Neovim, GitHub, Zed). It is a one-way emit: edit the `.qana`
-and re-emit, not the reverse.
+and re-emit, not the reverse. A grammar whose tokens use a trailing
+context (`(?=…)`, `(?!…)`) is refused: tree-sitter's lexer cannot
+express one.
 
 The typed AST is zero-copy accessors over the same green tree, with
 production labels as variant names, so `LetStmt::name()` returns the

@@ -8,6 +8,13 @@
 //! `\n`/`\r` are refused with an explanation, `.` and negated classes
 //! exclude terminators by definition — mirroring [`ClassSet::any`].
 //!
+//! Trailing context: a pattern, or any branch of it, may END with
+//! `(?=…)` or `(?!…)`. The token is then accepted only if the rest of
+//! its line does, or does not, begin with a match of the inner pattern.
+//! It is the one form of lookaround there is, and it only looks ahead on
+//! the same line, so L1 is untouched. Nothing may follow it, and it may
+//! not be repeated or nested: those are refused here, with a position.
+//!
 //! Canonical-form contract (what the self-host fixed point relies on):
 //! adjacent unpostfixed literal characters merge into one `Pat::Lit`,
 //! singleton sequences/alternations collapse to their element, and
@@ -76,11 +83,19 @@ fn parse_seq(p: &mut P) -> Result<Pat, PatError> {
     let mut items: Vec<Pat> = Vec::new();
     let mut lit = String::new(); // pending mergeable literal run
     let start = p.pos;
+    // Set once an item ends in a trailing context: it must be the last.
+    let mut ended_by_context = false;
     loop {
         match p.peek() {
             None | Some('|') | Some(')') => break,
             Some(c @ ('*' | '+' | '?')) => return err(p.pos, format!("`{c}` needs an operand")),
             _ => {}
+        }
+        if ended_by_context {
+            return err(
+                p.pos,
+                "nothing may follow a trailing context — `(?=…)` / `(?!…)` must end the token",
+            );
         }
         let at = p.pos;
         let atom = parse_atom(p)?;
@@ -99,6 +114,22 @@ fn parse_seq(p: &mut P) -> Result<Pat, PatError> {
             }
             _ => None,
         };
+        if atom.has_context() {
+            // A context matches no characters: repeating it, or making
+            // the context itself optional, says nothing. A group that
+            // merely ENDS in one may be optional (`(\.(?!\.))?`).
+            let bare = matches!(atom, Pat::Ahead { .. });
+            match postfix {
+                Some(op @ ('*' | '+')) => {
+                    return err(at, format!("a trailing context cannot be repeated with `{op}`"));
+                }
+                Some('?') if bare => {
+                    return err(at, "a trailing context cannot be optional");
+                }
+                _ => {}
+            }
+            ended_by_context = true;
+        }
         match (postfix, &atom) {
             (None, Pat::Lit(s)) => lit.push_str(s),
             _ => {
@@ -130,6 +161,30 @@ fn parse_atom(p: &mut P) -> Result<Pat, PatError> {
     let at = p.pos;
     match p.bump().expect("caller checked") {
         '.' => Ok(Pat::Class(ClassSet::any())),
+        '(' if p.peek() == Some('?') => {
+            // `(?=…)` / `(?!…)`: trailing context.
+            p.bump();
+            let negated = match p.bump() {
+                Some('=') => false,
+                Some('!') => true,
+                _ => {
+                    return err(
+                        at,
+                        "unknown group `(?…` — the only forms are `(?=…)` and `(?!…)`, \
+                         a trailing context that ends a token",
+                    )
+                }
+            };
+            let context = parse_alt(p)?;
+            if p.peek() != Some(')') {
+                return err(p.pos, "unclosed `(`");
+            }
+            p.bump();
+            if context.has_context() {
+                return err(at, "a trailing context cannot contain another");
+            }
+            Ok(Pat::Ahead { context: Box::new(context), negated })
+        }
         '(' => {
             let inner = parse_alt(p)?;
             if p.peek() != Some(')') {
@@ -341,6 +396,82 @@ mod tests {
         assert_eq!(parse_pattern("a||b").unwrap_err().pos, 2);
         assert!(parse_pattern("[]").is_err());
         assert!(parse_pattern("[z-a]").is_err());
+    }
+
+    #[test]
+    fn trailing_context_parses_to_the_combinator_form() {
+        let digits = || Pat::plus(Pat::Class(ClassSet::digit()));
+        // `1.` is a float unless a `.`, `_` or a letter follows.
+        assert_eq!(
+            parse_pattern(r"\d+\.(?![._\a])").unwrap(),
+            Pat::seq([
+                digits(),
+                Pat::lit("."),
+                Pat::not_before(Pat::Class(ClassSet {
+                    chars: vec!['.', '_'],
+                    alpha: true,
+                    ..Default::default()
+                })),
+            ])
+        );
+        // One branch of an alternation may end in a context.
+        assert_eq!(
+            parse_pattern(r"\d+\.\d+|\d+\.(?!\.)").unwrap(),
+            Pat::alt([
+                Pat::seq([digits(), Pat::lit("."), digits()]),
+                Pat::seq([digits(), Pat::lit("."), Pat::not_before(Pat::lit("."))]),
+            ])
+        );
+        // A context is a whole pattern: here, spaces and then a colon.
+        assert_eq!(
+            parse_pattern(r"\a+(?=\s*:)").unwrap(),
+            Pat::seq([
+                Pat::plus(Pat::Class(ClassSet { alpha: true, ..Default::default() })),
+                Pat::before(Pat::seq([
+                    Pat::star(Pat::Class(ClassSet::line_ws())),
+                    Pat::lit(":"),
+                ])),
+            ])
+        );
+        // A group that ends in a context may be optional.
+        assert_eq!(
+            parse_pattern(r"a(b(?=c))?").unwrap(),
+            Pat::seq([
+                Pat::lit("a"),
+                Pat::opt(Pat::seq([Pat::lit("b"), Pat::before(Pat::lit("c"))])),
+            ])
+        );
+        for ok in [r"\d+\.(?![._\a])", r"\d+\.\d+|\d+\.(?!\.)", r"\a+(?=\s*:)", r"a(b(?=c))?"] {
+            assert_eq!(parse_pattern(ok).unwrap().check_contexts(), Ok(()), "{ok}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_context_only_ends_a_token() {
+        // Something after it.
+        let e = parse_pattern("a(?=b)c").unwrap_err();
+        assert_eq!(e.pos, 6);
+        assert!(e.msg.contains("must end the token"), "{}", e.msg);
+        // Something after a group that ends in one.
+        let e = parse_pattern("(a(?=b))c").unwrap_err();
+        assert_eq!(e.pos, 8);
+        assert!(e.msg.contains("must end the token"), "{}", e.msg);
+        // Repeated, optional, nested.
+        assert!(parse_pattern("a(?=b)*").unwrap_err().msg.contains("repeated"));
+        assert!(parse_pattern("(a(?=b))+").unwrap_err().msg.contains("repeated"));
+        assert!(parse_pattern("a(?=b)?").unwrap_err().msg.contains("optional"));
+        assert!(parse_pattern("a(?=b(?!c))").unwrap_err().msg.contains("contain another"));
+        // Not a form qana has.
+        let e = parse_pattern("a(?:b)").unwrap_err();
+        assert_eq!(e.pos, 1);
+        assert!(e.msg.contains("(?=…)"), "{}", e.msg);
+        assert!(parse_pattern("a(?<=b)").is_err(), "no lookbehind");
+        // An empty context, and an unclosed one.
+        assert!(parse_pattern("a(?=)").is_err());
+        assert_eq!(parse_pattern("a(?=b").unwrap_err().msg, "unclosed `(`");
+        // Each branch is judged by itself.
+        assert!(parse_pattern("a(?=b)|c(?!d)").is_ok());
+        assert!(parse_pattern("a(?=b)|cd").is_ok());
     }
 
     #[test]

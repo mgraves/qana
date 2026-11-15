@@ -3,7 +3,7 @@
 //! satisfied, now generated from a grammar value and certified by the
 //! envelope lints instead of by inspection.
 
-use crate::dfa::{build_mode_dfa, CompileError, ModeDfa, DEAD};
+use crate::dfa::{build_mode_dfa, CompileError, ModeDfa, DEAD, NO_ROW};
 use crate::lints::{check_envelope, EnvelopeReport, LintError};
 use crate::model::{Action, LexGrammar, TokenId, Vocab};
 use crate::pat::classify;
@@ -99,6 +99,8 @@ pub struct CompiledLexer {
     keywords: HashMap<(TokenId, String), TokenId>,
     stack_bound: u8,
     unknown: TokenId,
+    /// Whether any mode has a token with a trailing context.
+    has_contexts: bool,
 }
 
 impl CompiledLexer {
@@ -112,6 +114,7 @@ impl CompiledLexer {
         let report = check_envelope(g, &modes).map_err(BuildError::Lint)?;
         Ok(CompiledLexer {
             vocab: Vocab::of(g),
+            has_contexts: modes.iter().any(|dfa| !dfa.rows.is_empty()),
             stack_bound: report.stack_bound,
             report,
             modes,
@@ -134,27 +137,45 @@ impl CompiledLexer {
 
     /// Lex one line: pure, total, line-local. Every byte is covered
     /// (unknown bytes become the synthetic Unknown trivia token).
+    ///
+    /// Each token is the longest match (the DFA runs until it dies and
+    /// the lexer backs up to the last accept), then declaration priority.
+    /// A token with a trailing context is a candidate at the positions
+    /// where the DFA would accept it; whether it is accepted there is
+    /// decided by the rest of THIS line, which is all `text` holds, so
+    /// the result stays a function of `(text, entry)` and nothing else.
     pub fn lex_line(&self, text: &str, entry: MStack) -> (Vec<Token>, MStack) {
+        // A grammar with no trailing context anywhere runs the body that
+        // has no trace of them: the choice is made here, once per line,
+        // and the two bodies are separate instantiations.
+        if self.has_contexts {
+            self.lex_line_as::<true>(text, entry)
+        } else {
+            self.lex_line_as::<false>(text, entry)
+        }
+    }
+
+    /// The body of [`CompiledLexer::lex_line`]. `CONTEXTS` is whether the
+    /// grammar has any trailing context; with `false`, everything that
+    /// serves them is compiled out.
+    #[inline(always)]
+    fn lex_line_as<const CONTEXTS: bool>(&self, text: &str, entry: MStack) -> (Vec<Token>, MStack) {
         let mut out = Vec::new();
         let mut state = entry;
         let n = text.len();
         let mut i = 0usize;
+        // Scratch for `longest_match_with_contexts`: never allocated
+        // unless a conditional accept is passed.
+        let mut candidates: Vec<(usize, u32)> = Vec::new();
         while i < n {
             let dfa = &self.modes[state.current_mode() as usize];
-            let mut s = dfa.start;
-            let mut best: Option<(usize, TokenId)> = None;
-            let mut j = i;
-            for c in text[i..].chars() {
-                let nxt = dfa.trans[s as usize][classify(c)];
-                if nxt == DEAD {
-                    break;
-                }
-                s = nxt;
-                j += c.len_utf8();
-                if let Some(tok) = dfa.accept[s as usize] {
-                    best = Some((j, tok));
-                }
-            }
+            // Even in a grammar that has contexts, a mode without any
+            // takes the plain scan.
+            let best = if CONTEXTS && !dfa.rows.is_empty() {
+                Self::longest_match_with_contexts(dfa, text, i, &mut candidates)
+            } else {
+                Self::longest_match(dfa, text, i)
+            };
             match best {
                 None => {
                     // Total coverage: consume one char as Unknown trivia.
@@ -202,6 +223,73 @@ impl CompiledLexer {
             }
         }
         (out, state)
+    }
+
+    /// The longest match from `i` in a mode with no trailing context:
+    /// run until the DFA dies, keep the last accept.
+    #[inline(always)]
+    fn longest_match(dfa: &ModeDfa, text: &str, i: usize) -> Option<(usize, TokenId)> {
+        let mut s = dfa.start;
+        let mut best: Option<(usize, TokenId)> = None;
+        let mut j = i;
+        for c in text[i..].chars() {
+            let nxt = dfa.trans[s as usize][classify(c)];
+            if nxt == DEAD {
+                break;
+            }
+            s = nxt;
+            j += c.len_utf8();
+            if let Some(tok) = dfa.accept[s as usize] {
+                best = Some((j, tok));
+            }
+        }
+        best
+    }
+
+    /// The longest match from `i` in a mode that has trailing contexts.
+    ///
+    /// The scan is the same, and it also notes each end at which a
+    /// conditional accept was passed (`candidates`, shortest first). The
+    /// longest match wins, so afterwards the candidates are tried from
+    /// the longest down, and only those longer than the best
+    /// unconditional match: the first whose context holds on the rest of
+    /// the line is the token. That is usually one context check for a
+    /// token that has one, and none for a token that does not.
+    fn longest_match_with_contexts(
+        dfa: &ModeDfa,
+        text: &str,
+        i: usize,
+        candidates: &mut Vec<(usize, u32)>,
+    ) -> Option<(usize, TokenId)> {
+        let mut s = dfa.start;
+        let mut best: Option<(usize, TokenId)> = None;
+        let mut j = i;
+        candidates.clear();
+        for c in text[i..].chars() {
+            let nxt = dfa.trans[s as usize][classify(c)];
+            if nxt == DEAD {
+                break;
+            }
+            s = nxt;
+            j += c.len_utf8();
+            if let Some(tok) = dfa.accept[s as usize] {
+                best = Some((j, tok));
+            } else {
+                let row = dfa.conditional[s as usize];
+                if row != NO_ROW {
+                    candidates.push((j, row));
+                }
+            }
+        }
+        while let Some((end, row)) = candidates.pop() {
+            if best.is_some_and(|(unconditional, _)| unconditional >= end) {
+                break;
+            }
+            if let Some(tok) = dfa.resolve(row, &text[end..]) {
+                return Some((end, tok));
+            }
+        }
+        best
     }
 
     pub fn is_trivia(&self, id: TokenId) -> bool {

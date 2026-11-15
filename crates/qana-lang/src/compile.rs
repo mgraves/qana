@@ -1802,7 +1802,10 @@ pub fn certify(def: &LangDef) -> Result<(CompiledLexer, LrTables), Vec<QanaDiag>
             use qana_grammar::lints::LintError;
             let (span, msg) = match &e {
                 BuildError::Compile(CompileError::NonAsciiLiteral { token, .. })
-                | BuildError::Compile(CompileError::EmptyMatch { token }) => {
+                | BuildError::Compile(CompileError::EmptyMatch { token })
+                | BuildError::Compile(CompileError::Context { token, .. })
+                | BuildError::Compile(CompileError::EmptyContext { token })
+                | BuildError::Compile(CompileError::TooManyStates { token }) => {
                     (span_of_token(token), format!("{e}"))
                 }
                 BuildError::Lint(LintError::TokenSpansLines { token, .. }) => {

@@ -214,6 +214,10 @@ pub struct Painter {
     /// clone; only misses re-derive, and only their lines repaint.
     /// `None` until the first typeless-grammar update populates it.
     cache: Option<Vec<(qana_sem::PaintKey, Arc<Vec<((u32, u32), u8)>>)>>,
+    /// How many items the last update had to look up or derive: the
+    /// window between the items an edit left in place. See
+    /// [`Painter::window_items`].
+    window_items: usize,
 }
 
 /// One item's marks from its paint facts — the bits mapping shared by
@@ -277,7 +281,7 @@ impl Painter {
                 );
             }
         }
-        let p = Painter { base, shown: shown.clone(), rev: 0, widths, cache };
+        let p = Painter { base, shown: shown.clone(), rev: 0, widths, cache, window_items: 0 };
         let paint = Paint { rev: 0, lines: shown };
         (p, paint)
     }
@@ -335,8 +339,10 @@ impl Painter {
                 // per-item identity for the type report yet) re-derive
                 // marks only for items whose (fragment, resolution)
                 // identity changed, and repaint only their lines plus
-                // the damaged window. Keystroke cost is O(window +
-                // changed items), independent of document size.
+                // the damaged window. What a keystroke derives is
+                // O(window + changed items). What still grows with the
+                // document is flat: an identity compared per item, and
+                // an addition per line for the line starts.
                 self.overlay_via_items(session, window, db, uri, &mut delta);
             }
             Some((db, uri)) => {
@@ -387,6 +393,15 @@ impl Painter {
         delta
     }
 
+    /// How many items the last [`update`](Self::update) on the
+    /// identity-cached path looked up or re-derived. The items an edit
+    /// leaves in place, before it and after it, are matched where they
+    /// stand and are not counted: for a keystroke this is the item typed
+    /// in, whatever the size of the document.
+    pub fn window_items(&self) -> usize {
+        self.window_items
+    }
+
     /// The frame as currently shown (what a fresh viewer would paint).
     pub fn frame(&self) -> Paint {
         Paint { rev: self.rev, lines: self.shown.clone() }
@@ -435,30 +450,60 @@ impl Painter {
         let total = acc;
 
         // Sync the item view; misses re-derive their marks.
+        //
+        // The cache is last revision's items in document order, and an
+        // edit leaves the items before it and after it as they were. So
+        // the two orders are matched from both ends by identity, in
+        // place, and only the window between them is looked up: an item
+        // that moved inside the window keeps its marks, and one that is
+        // new has them derived. (Every item used to go through a hash map
+        // rebuilt for each keystroke.)
         let keys = db.paint_sync(uri);
-        let old: std::collections::HashMap<(u64, u64), Arc<Vec<((u32, u32), u8)>>> = self
-            .cache
-            .take()
-            .map(|items| {
-                items
-                    .into_iter()
-                    .map(|(k, m)| ((k.frag_uid, k.res_uid), m))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut misses: Vec<usize> = Vec::new();
         let mut items: Vec<(qana_sem::PaintKey, Arc<Vec<((u32, u32), u8)>>)> =
-            Vec::with_capacity(keys.len());
-        for (i, k) in keys.iter().enumerate() {
-            match old.get(&(k.frag_uid, k.res_uid)) {
-                Some(m) => items.push((*k, m.clone())),
+            self.cache.take().unwrap_or_default();
+        let same = |a: &qana_sem::PaintKey, b: &qana_sem::PaintKey| {
+            a.frag_uid == b.frag_uid && a.res_uid == b.res_uid
+        };
+        let (old_len, new_len) = (items.len(), keys.len());
+        let mut lo = 0usize;
+        while lo < old_len && lo < new_len && same(&items[lo].0, &keys[lo]) {
+            lo += 1;
+        }
+        let mut suffix = 0usize;
+        while suffix < old_len - lo
+            && suffix < new_len - lo
+            && same(&items[old_len - 1 - suffix].0, &keys[new_len - 1 - suffix])
+        {
+            suffix += 1;
+        }
+        let (old_hi, new_hi) = (old_len - suffix, new_len - suffix);
+        let moved: std::collections::HashMap<(u64, u64), Arc<Vec<((u32, u32), u8)>>> = items
+            [lo..old_hi]
+            .iter()
+            .map(|(k, m)| ((k.frag_uid, k.res_uid), m.clone()))
+            .collect();
+        let mut misses: Vec<usize> = Vec::new();
+        let mut between: Vec<(qana_sem::PaintKey, Arc<Vec<((u32, u32), u8)>>)> =
+            Vec::with_capacity(new_hi - lo);
+        for (i, k) in keys.iter().enumerate().take(new_hi).skip(lo) {
+            match moved.get(&(k.frag_uid, k.res_uid)) {
+                Some(m) => between.push((*k, m.clone())),
                 None => {
                     let ip = db.item_paint(uri, i as u32);
-                    items.push((*k, Arc::new(item_marks(&ip))));
+                    between.push((*k, Arc::new(item_marks(&ip))));
                     misses.push(i);
                 }
             }
         }
+        self.window_items = new_hi - lo;
+        items.splice(lo..old_hi, between);
+        debug_assert_eq!(items.len(), new_len);
+        // The items after the window are the same items at new offsets.
+        for (item, k) in items[new_hi..].iter_mut().zip(&keys[new_hi..]) {
+            debug_assert!(same(&item.0, k));
+            item.0.start = k.start;
+        }
+        debug_assert!(items.iter().zip(&keys).all(|(item, k)| item.0 == *k));
         let t_sync = t0.elapsed();
 
         // Touched lines: the damaged window plus every miss item's

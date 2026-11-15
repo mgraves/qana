@@ -40,6 +40,16 @@ impl NodeKey {
         &self.0
     }
 
+    /// Is `node` the subtree this key identifies: the same allocation?
+    ///
+    /// Asking does not need a second key, and so does not touch the
+    /// subtree's reference count. It is sound for the reason the type
+    /// exists: the key owns its subtree and `node` is a live handle, so
+    /// neither address can have been recycled.
+    pub fn is(&self, node: &Arc<GreenNode>) -> bool {
+        Arc::ptr_eq(&self.0, node)
+    }
+
     fn addr(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
     }
@@ -90,6 +100,17 @@ mod tests {
         assert_eq!(a, b, "structurally equal");
         assert_ne!(NodeKey::new(a.clone()), NodeKey::new(b), "…but distinct identities");
         assert_eq!(NodeKey::new(a.clone()), NodeKey::new(a.clone()), "same allocation");
+    }
+
+    /// `is` answers as key equality does, without making a key.
+    #[test]
+    fn a_key_knows_its_own_subtree() {
+        let a = leaf();
+        let b = leaf();
+        let key = NodeKey::new(a.clone());
+        assert!(key.is(&a), "the same allocation");
+        assert!(!key.is(&b), "equal contents, another allocation");
+        assert_eq!(Arc::strong_count(&a), 2, "asking made no handle: ours and the key's");
     }
 
     /// The point of the type: a key keeps its subtree alive, so its

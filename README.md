@@ -1644,6 +1644,69 @@ token. `>>` closing two generic argument lists is not a lexing question
 either; it is settled by lexing `>` singly and letting the grammar join
 adjacent ones, which is what rustc does.
 
+## Keystroke cost at scale (shipped): three whole-file rebuilds, off the keystroke
+
+A keystroke changes one item. Profiling one at 250,000 lines of C found
+three places that rebuilt something from EVERY top-level name in the
+file to serve that one item, each invisible in a small file:
+
+* **The name set.** Resolving an item asks whether the file defines the
+  names that escape it. The answer came from a hash set of every
+  top-level name, built again per keystroke: two thirds of the time.
+* **The position index.** Repainting an item that refers to a top-level
+  name built the name → sites index from scratch, allocating a key per
+  definition. It only wanted yes or no.
+* **The painter's cache.** Every item's cached marks went through a hash
+  map rebuilt per keystroke.
+
+What replaced them:
+
+* Every top-level definition has a **signature**: one word hashed from
+  its name when its fragment is built. A file keeps them in a flat
+  array, item after item. A question about a name is a pass over that
+  array comparing words; only a definition whose word matches is opened,
+  to confirm the name. The environment fingerprints fold the same words,
+  so they no longer hash any name either.
+* A file resolves up to 8 changed items that way. More than that (an
+  open, or renaming something every later item can see) and it builds
+  the set once, as before: both give the same answers, and the
+  differential gates hold them to it.
+* The repaint asks the same scan; the position index is left to
+  navigation and to whole-file views, which want positions.
+* The painter matches this revision's items against the last one's from
+  both ends, in place, and looks up only the window between.
+* `set_tree` keeps the slot of every item the edit left alone, where it
+  is: nothing cloned, nothing reference-counted, nothing dropped.
+
+One character typed in a function body, median of 12, release build,
+synthetic C (structs, functions, multi-line macros):
+
+| Lines | Before, body uses only locals | Before, body calls a function and a macro | After, either |
+|---|---|---|---|
+| 10,000 | 0.3 ms | 0.5 ms | 0.1 ms |
+| 50,000 | 1.5 ms | 2.8 ms | 0.3 ms |
+| 250,000 | 8.8 ms | 15.6 ms | 1.5 ms |
+| 1,000,000 | 50 ms | 79 ms | 6 ms |
+
+It still grows with the file. What is left is flat work per item or per
+line (the walk that finds the items, an identity compared per item, the
+line starts) and the incremental parse's own share (0.4 ms at 250,000
+lines). Making a keystroke independent of file size means driving the
+item diff from the engine's damage report instead of walking the list,
+which is the next step and is not done.
+
+`crates/qana-lang/tests/keystroke_cost.rs` holds this by counting, not
+timing: `SemStats` counts name-set and index builds, the painter reports
+how many items it looked up, and a keystroke is allowed one fragment,
+one resolution, one item, and no whole-file build. Two randomized
+differential tests (C paint, and the semantic layer in both root
+orderings) hold the scan to the set's answers.
+
+Found on the way, and not fixed here: after an edit that breaks the
+syntax, the incremental parse can recover differently from a fresh parse
+of the same text. In `examples/c/demo.c`, replacing line 30 (a struct
+field) with a one-line function definition leaves the two trees unequal.
+
 ## Rust, lexically: measured against rustc's own lexer
 
 Trailing context was added because Rust's numbers need it. The question
@@ -1678,7 +1741,7 @@ is not measured here.
 
 ## Status
 
-Eight crates + two binaries (`qana`, `qana-lsp`); 222 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`qana`, `qana-lsp`); 228 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

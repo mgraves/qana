@@ -320,3 +320,83 @@ fn names_in_scope_orders_innermost_first() {
     let outer_pos = names.iter().position(|n| n == "outer").unwrap();
     assert!(inner_pos < outer_pos, "innermost first: {names:?}");
 }
+
+/// The differential gate again, on files large enough that the two ways
+/// of asking "does the file define this name?" are both in play, and in
+/// both orderings of the root scope.
+///
+/// A fresh database resolves every item of a file, and does it from the
+/// set of all the file's top-level names. The incremental database, after
+/// an edit that changes one statement, resolves that one item by a pass
+/// over the file's signatures. (An edit that adds or removes a `let`
+/// changes what later items see, and sends the incremental database down
+/// the set path too.) Use before definition is what tells the orderings
+/// apart: it resolves in an unordered root and not in an ordered one, so
+/// the pool has names used on both sides of their definitions. Every
+/// entry is one whole statement on one line, so the file stays forty
+/// items long however the lines are shuffled.
+#[test]
+fn differential_holds_at_scale_in_both_root_orderings() {
+    let p = pipe();
+    const POOL: &[&str] = &[
+        "let a = 1;",
+        "let b = a;",
+        "let c = b + later;",
+        "let later = c;",
+        "emit(a, later);",
+        "emit(missing, b);",
+        "{ let a = 9; let inner = a + later; }",
+        "let a = b;",
+        "// comment",
+    ];
+    for unordered in [false, true] {
+        let config = || {
+            let mut cfg = demo_binding_config(&p.sg);
+            cfg.unordered = unordered;
+            cfg
+        };
+        // Forty statements: far past the few items a scan is used for.
+        let src: String = (0..40).map(|i| format!("{}\n", POOL[i % POOL.len()])).collect();
+        let mut s = session(&p, &src);
+        let mut db = SemDb::new(config());
+        db.set_tree("a", s.tree().unwrap().clone());
+        db.resolve("a");
+        assert!(db.stats.name_set_builds >= 1, "the open resolved from the set of names");
+
+        let mut seed = 0xD1FFu64 + unordered as u64;
+        let mut rand = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n.max(1) as u64) as usize
+        };
+        for round in 0..80 {
+            let lines = s.buf.lines.len() - 1;
+            let start = rand(lines.max(1));
+            let text = POOL[rand(POOL.len())];
+            let replacement: Vec<Line> =
+                text.split('\n').map(|t| Line::new(t, LineTerm::Lf)).collect();
+            s.edit(&p.sg, &p.tables, &[LineEdit { start, end: (start + 1).min(lines), replacement }])
+                .unwrap();
+            db.set_tree("a", s.tree().unwrap().clone());
+
+            let mut fresh = SemDb::new(config());
+            fresh.set_tree("a", s.tree().unwrap().clone());
+            assert_eq!(
+                db.resolve("a"),
+                fresh.resolve("a"),
+                "unordered={unordered}, round {round}: resolutions agree after `{text}` at line {start}"
+            );
+            assert_eq!(
+                db.unresolved("a"),
+                fresh.unresolved("a"),
+                "unordered={unordered}, round {round}: unresolved names agree"
+            );
+            assert!(fresh.stats.name_set_builds >= 1, "a fresh database resolves from the set");
+        }
+        assert!(
+            db.stats.top_scans > 0,
+            "unordered={unordered}: some edits changed one item, and were resolved by a scan"
+        );
+    }
+}

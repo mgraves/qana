@@ -101,3 +101,93 @@ fn incremental_overlay_equals_fresh_open_after_every_edit() {
         }
     }
 }
+
+/// Lines that make and use top-level names in every way the grammar
+/// binds them: a function used before and after it is defined, one that
+/// calls itself, a struct tag (a hoisted namespace) used before its
+/// definition, an enum (one item, several names), two globals in one
+/// declaration, a macro, a name nothing defines, and duplicates of all of
+/// them once the script has inserted a line twice.
+const POOL: &[&str] = &[
+    "static int helper_a(void) { return 1; }",
+    "static int helper_b(void) { return helper_a() + later_fn(); }",
+    "static int later_fn(void) { return helper_b() + later_fn(); }",
+    "struct box { int w; };",
+    "struct box make_box(void);",
+    "enum color { RED, GREEN };",
+    "int g1, g2;",
+    "int use_g(void) { return g1 + g2 + RED + undefined_name; }",
+    "#define TWICE(x) ((x) * 2)",
+    "int use_macro(void) { return TWICE(g1) + GREEN; }",
+    "int shadow(int helper_a) { return helper_a + g2; }",
+    "",
+    "/* a comment */",
+];
+
+/// The same oracle, over a script nobody chose: lines from [`POOL`]
+/// inserted, replaced and deleted at random places. What an item can see
+/// depends on what is defined before it, so where a line lands decides
+/// what resolves; a fresh open resolves the whole file from the set of
+/// its names, and the incremental document resolves the one changed item
+/// by asking the file's signatures. They must agree after every step.
+///
+/// Every line of the document is a whole top-level item, so every step
+/// leaves a file that parses clean: this test is about names. (A step
+/// that breaks the syntax is another matter. Replacing a line inside a
+/// function body with a function definition can leave the incremental
+/// parse and a fresh parse with different recoveries, and so different
+/// paint; that divergence is older than this test and is not what it
+/// holds.)
+#[test]
+fn a_random_script_of_definitions_and_uses_matches_a_fresh_open() {
+    let lang = Arc::new(EmbeddedLang::from_qana_source(C_QANA).expect("c.qana certifies"));
+
+    // Three rounds of the pool: enough items that a fresh open resolves
+    // from the set, and every name defined more than once.
+    let mut text = String::new();
+    for _ in 0..3 {
+        for line in POOL {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    let mut live: Box<dyn Limner> = Box::new(LiveDoc::open(lang.clone(), "random.c", &text));
+    let mut frame = live.open(&text).lines;
+
+    let mut seed = 0x51CA_D0C5u64;
+    let mut rand = move |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n.max(1) as u64) as usize
+    };
+
+    for step in 0..120 {
+        let n = text.lines().count();
+        // Stay off the last line: the document keeps its final newline.
+        let at = rand(n.saturating_sub(1)) as u32;
+        let line = POOL[rand(POOL.len())].to_string();
+        let edit = match rand(4) {
+            0 => LineEdit { start: at, end: at, lines: vec![line] },
+            1 | 2 => LineEdit { start: at, end: at + 1, lines: vec![line] },
+            _ if n > 8 => LineEdit { start: at, end: at + 1, lines: vec![] },
+            _ => LineEdit { start: at, end: at, lines: vec![line] },
+        };
+        let delta = live.edit(&edit);
+        apply_delta(&mut frame, &delta);
+        text = apply(&text, &edit);
+        assert_eq!(live.text(), text, "step {step}: mirror lost the document");
+
+        let mut oracle: Box<dyn Limner> = Box::new(LiveDoc::open(lang.clone(), "oracle.c", &text));
+        let fresh = oracle.open(&text);
+        assert_eq!(frame.len(), fresh.lines.len(), "step {step}: line counts diverge");
+        for (li, (a, b)) in frame.iter().zip(fresh.lines.iter()).enumerate() {
+            assert_eq!(
+                a,
+                b,
+                "step {step} ({edit:?}): line {li} `{}` runs diverge",
+                text.lines().nth(li).unwrap_or("")
+            );
+        }
+    }
+}

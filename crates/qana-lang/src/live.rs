@@ -15,6 +15,25 @@ use qana_sem::SemDb;
 use qana_services::paint::{facts_at, type_hints, Painter};
 use std::sync::Arc;
 
+/// A stopwatch for one stage of an edit, feeding the `QANA_TRACE_EDIT`
+/// timings. It reads the clock only when the trace is on. An untraced
+/// edit has no use for the time, and on `wasm32-unknown-unknown`
+/// `std::time::Instant::now` panics, so an edit made in a browser must
+/// never reach it. (No environment exists there, so the trace is off.)
+struct StageClock(Option<std::time::Instant>);
+
+impl StageClock {
+    fn start(trace: bool) -> Self {
+        StageClock(trace.then(std::time::Instant::now))
+    }
+
+    /// The time since [`StageClock::start`]. Zero when the trace is off,
+    /// where nothing prints it.
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.map(|started| started.elapsed()).unwrap_or_default()
+    }
+}
+
 /// One open document over one language. Owns the incremental session,
 /// the semantic database, and the painter; answers the [`Limner`]
 /// contract from them.
@@ -196,9 +215,10 @@ impl Limner for LiveDoc {
             }
         }
         // `QANA_TRACE_EDIT=1` prints per-stage timings — the scale
-        // harness's scalpel for attributing keystroke cost.
+        // harness's scalpel for attributing keystroke cost. The clock
+        // is read only under the trace (see `StageClock`).
         let trace = std::env::var_os("QANA_TRACE_EDIT").is_some();
-        let t0 = std::time::Instant::now();
+        let t0 = StageClock::start(trace);
         let outcome = self
             .session
             .edit(self.lang.sg, self.lang.tables, &[qana_engine::LineEdit {
@@ -208,10 +228,10 @@ impl Limner for LiveDoc {
             }])
             .expect("total under errors");
         let t_parse = t0.elapsed();
-        let t1 = std::time::Instant::now();
+        let t1 = StageClock::start(trace);
         self.db.set_tree(&self.uri, self.session.tree().expect("total").clone());
         let t_sem = t1.elapsed();
-        let t2 = std::time::Instant::now();
+        let t2 = StageClock::start(trace);
         let delta = self.painter.update(
             &self.session,
             &outcome.damage,

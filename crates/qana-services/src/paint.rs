@@ -44,6 +44,25 @@ pub use linework::{
     MOD_PUBLIC, MOD_REF, MOD_TYPED, MOD_UNRESOLVED, STYLE_NONE,
 };
 
+/// A stopwatch for one stage of an edit, feeding the `QANA_TRACE_EDIT`
+/// timings. It reads the clock only when the trace is on. An untraced
+/// edit has no use for the time, and on `wasm32-unknown-unknown`
+/// `std::time::Instant::now` panics, so an edit made in a browser must
+/// never reach it. (No environment exists there, so the trace is off.)
+struct StageClock(Option<std::time::Instant>);
+
+impl StageClock {
+    fn start(trace: bool) -> Self {
+        StageClock(trace.then(std::time::Instant::now))
+    }
+
+    /// The time since [`StageClock::start`]. Zero when the trace is off,
+    /// where nothing prints it.
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.map(|started| started.elapsed()).unwrap_or_default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wave 0: lexical runs, straight off the line lexer
 // ---------------------------------------------------------------------------
@@ -323,16 +342,16 @@ impl Painter {
             Some((db, uri)) => {
                 let trace = std::env::var_os("QANA_TRACE_EDIT").is_some();
                 // Fresh overlay over the maintained base…
-                let t0 = std::time::Instant::now();
+                let t0 = StageClock::start(trace);
                 let widths = line_widths(&session.buf);
                 let t_widths = t0.elapsed();
-                let t1 = std::time::Instant::now();
+                let t1 = StageClock::start(trace);
                 let mut next = self.base.clone();
                 let t_clone = t1.elapsed();
-                let t2 = std::time::Instant::now();
+                let t2 = StageClock::start(trace);
                 let marks = overlay_marks(db, uri);
                 let t_marks = t2.elapsed();
-                let t3 = std::time::Instant::now();
+                let t3 = StageClock::start(trace);
                 apply_overlay(&mut next, &widths, &marks);
                 if trace {
                     eprintln!(
@@ -385,7 +404,7 @@ impl Painter {
         delta: &mut PaintDelta,
     ) {
         let trace = std::env::var_os("QANA_TRACE_EDIT").is_some();
-        let t0 = std::time::Instant::now();
+        let t0 = StageClock::start(trace);
 
         // Widths follow the window by splice; a missing or drifted
         // cache rebuilds them whole (first update, or a resync).
@@ -445,7 +464,7 @@ impl Painter {
         // Touched lines: the damaged window plus every miss item's
         // line range (an item's span runs to the next item's start —
         // the trivia gap carries no marks, so over-coverage is safe).
-        let t1 = std::time::Instant::now();
+        let t1 = StageClock::start(trace);
         let line_of = |off: u32| -> usize {
             match starts.binary_search(&off.min(total)) {
                 Ok(i) => i.min(self.widths.len().saturating_sub(1)),

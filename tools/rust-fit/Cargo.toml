@@ -1,0 +1,33 @@
+# rust-fit: how much of real Rust does examples/rust-lex/rust_lex.qana lex
+# the way rustc_lexer does?
+#
+# This crate is NOT a member of the qana workspace, on purpose. The
+# workspace's toolchain crates carry no external dependencies (deny.toml
+# says why), and the reference lexer is one. So the comparison lives here,
+# with its own lock file, and the workspace keeps only what needs no
+# dependency: the grammar, a sample, and a record of how rustc_lexer reads
+# that sample, which crates/qana-lang/tests/rust_lex.rs checks.
+#
+#   cargo run --release --manifest-path tools/rust-fit/Cargo.toml -- compare <root>...
+#   cargo run --manifest-path tools/rust-fit/Cargo.toml -- record
+#   cargo run --manifest-path tools/rust-fit/Cargo.toml -- record --check
+
+[package]
+name = "rust-fit"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Measures qana's Rust lexical grammar against rustc_lexer"
+
+[workspace]
+
+[dependencies]
+# rustc's own lexer, as rust-analyzer publishes it.
+ra-ap-rustc_lexer = "0.185"
+qana-lang = { path = "../../crates/qana-lang" }
+qana-engine = { path = "../../crates/qana-engine" }
+qana-grammar = { path = "../../crates/qana-grammar" }
+
+[profile.release]
+debug = false

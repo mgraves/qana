@@ -10,3 +10,6 @@
 # (5.9 MB). The tests build the same shape in memory; see
 # crates/qana-lang/tests/splice_edit_cost.rs.
 /examples/c/big_demo.c
+
+# The Rust lexical-fit tool is a crate of its own, outside the workspace.
+/tools/rust-fit/target

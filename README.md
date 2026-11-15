@@ -1644,9 +1644,41 @@ token. `>>` closing two generic argument lists is not a lexing question
 either; it is settled by lexing `>` singly and letting the grammar join
 adjacent ones, which is what rustc does.
 
+## Rust, lexically: measured against rustc's own lexer
+
+Trailing context was added because Rust's numbers need it. The question
+after that was how far the envelope reaches: how much of real Rust does
+a `.qana` grammar lex the way rustc does?
+
+[examples/rust-lex](examples/rust-lex/README.md) holds Rust's lexical
+grammar as a `.qana` file (7 modes, 36 tokens; tokens only, no syntax),
+and `tools/rust-fit` runs it and rustc_lexer over the same files and
+compares the class of every byte.
+
+| Corpus | Lines | Lines that differ | Files with a difference |
+|---|---|---|---|
+| This repository | 32,991 | 0 | 0 of 83 |
+| One machine's cargo registry | 29,386,026 | 113 (0.0004%) | 37 of 65,166 |
+
+Of the 37 files, 36 are lexer test fixtures or a lexer's own tests. What
+the envelope costs Rust is bounded, not wrong: a raw string's `#` count
+is a mode each (the grammar declares 0 to 3, and nothing outside lexer
+tests used more), and block comments nest as deep as the mode stack (8).
+Strings and comments that span lines cost nothing: the mode is the state
+a line hands the next.
+
+rustc_lexer is an external dependency and the toolchain crates have
+none, so `tools/rust-fit` is a crate of its own outside the workspace.
+It writes a record of how rustc_lexer reads a sample file, and an
+ordinary test (`crates/qana-lang/tests/rust_lex.rs`) holds qana to that
+record with nothing but the workspace. CI runs both.
+
+This is the lexical half. Whether Rust's syntax fits deterministic LR(1)
+is not measured here.
+
 ## Status
 
-Eight crates + two binaries (`qana`, `qana-lsp`); 217 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`qana`, `qana-lsp`); 222 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

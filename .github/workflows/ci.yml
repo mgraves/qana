@@ -58,6 +58,32 @@ jobs:
           RUSTFLAGS: ""
         run: cargo clippy --workspace --all-targets
 
+  # Rust's lexical grammar as a .qana file, against rustc's own lexer.
+  # tools/rust-fit links rustc_lexer, so it is a crate of its own outside
+  # the workspace (the toolchain crates keep zero external dependencies;
+  # see deny.toml). Two checks: the committed record of how rustc_lexer
+  # reads examples/rust-lex/sample.rs is still what it says, and the two
+  # lexers agree on every line of this repository's own Rust. The
+  # workspace's `rust_lex` test holds qana to that record in the job above.
+  rust-fit:
+    name: Rust lexical fit (rustc_lexer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/rust-fit
+
+      - name: The record is what rustc_lexer says
+        run: cargo run --release --locked --manifest-path tools/rust-fit/Cargo.toml -- record --check
+
+      - name: Both lexers agree on this repository
+        run: cargo run --release --locked --manifest-path tools/rust-fit/Cargo.toml -- compare crates tools examples
+
   # Licence / advisory / source policy over the dependency graph. qana's
   # graph is deliberately tiny — the toolchain crates have zero external
   # dependencies — and this is what keeps it that way rather than merely

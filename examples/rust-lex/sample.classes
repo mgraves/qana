@@ -1,0 +1,172 @@
+# How rustc_lexer reads sample.rs: one line here for each line there.
+# A line is runs of one class, each a letter and a count of bytes:
+#   _ whitespace   c comment   w word   l lifetime   n number
+#   s string, char or byte literal   p punctuation   ? unknown
+# Written by `rust-fit record` (tools/rust-fit); do not edit by hand.
+c72
+c74
+c74
+c67
+c3
+c74
+c3
+c69
+
+p3 w5 p1 w9 p1 _1 w6 p2
+
+w3 _1 w3 p2 w11 p3 w8 p1 _1 w7 p2
+
+c69
+w2 _1 w7 p2 _1 p1
+_4 w3 _1 w5 _1 p1 _1 n1 p2 n2 p1
+_4 w3 _1 w9 _1 p1 _1 n1 p3 n1 p1
+_4 w3 _1 w4 _1 p1 _1 n1 p3
+_4 w3 _1 w6 _1 p1 _1 n1 p1 w3 p1 n1 p2
+_4 w3 _1 w5 _1 p1 _1 n3 p1
+_4 w3 _1 w4 _1 p1 _1 n2 p1
+_4 w3 _1 w3 _1 p1 _1 n2 _1 p1 _1 n2 p1
+_4 w3 _1 w4 _1 p1 _1 w1 p1 n2 p1 _1 n2 p2
+_4 w3 _1 w8 _1 p1 _1 n4 _1 p1 _1 n4 _1 p1 _1 n6 p1
+_4 w3 _1 w8 _1 p1 _1 n3 _1 p1 _1 n8 _1 p1 _1 n11 _1 p1 _1 n5 _1 p1 _1 n13 p1
+_4 w3 _1 w3 _1 p1 _1 n16 p1
+_4 w3 _1 w5 _1 p1 _1 w4 p1 n3 p1
+_4 w3 _1 w6 _1 p1 _1 w4 p1 n1 _1 p1 n1 p1
+_4 w3 _1 w5 _1 p1 _1 n1 p1 w1 p1
+_4 w3 _1 w5 _1 p1 _1 n1 p1 w2 p1
+_4 w3 _1 w4 _1 p1 _1 n14 _1 p1 _1 n4 _1 w2 _1 w3 p1
+_4 w3 _1 w14 _1 p1 _1 n2 p1
+_4 w3 _1 w12 _1 p1 _1 n2 p1
+_4 w3 _1 w1 _1 w2 _1 n1 p2 w1 p1 w3 p2 _1 p2
+_4 w3 _1 w5 _1 p1 _1 p1 w1 p1 n1 p4
+_4 w3 _1 w5 _1 p1 _1 p1 w1 p5
+p1
+
+c48
+w2 _1 w6 p1 l2 p1 _1 l2 p1 _1 l2 p1 _1 w1 p1 _1 l7 p2 w1 p1 _1 p1 l2 _1 w3 p1 _1 w1 p1 _1 p1 l2 _1 w1 p1 _1 p2 _1 p1 l2 _1 w3 _1 p1
+_4 w3 _1 w1 _1 p1 _1 s3 p1
+_4 w3 _1 w7 _1 p1 _1 s4 p1
+_4 w3 _1 w5 _1 p1 _1 s4 p1
+_4 w3 _1 w9 _1 p1 _1 s4 p1
+_4 w3 _1 w7 _1 p1 _1 s11 p1
+_4 w3 _1 w4 _1 p1 _1 s6 p1
+_4 w3 _1 w4 _1 p1 _1 s4 p1
+_4 w3 _1 w11 _1 p1 _1 s5 p1
+_4 w3 _1 w10 _1 p1 _1 s5 p1
+_4 w3 _1 w5 _1 p1 _1 s3 p1
+_4 w3 _1 w5 _1 p1 _1 s3 p1
+_4 l6 p1 _1 w4 _1 p1
+_8 w5 _1 l6 p1
+_4 p1
+_4 w3 _1 w6 _1 p1 _1 s3 p1
+_4 w3 _1 w12 p1 _1 p1 l6 _1 w3 _1 p1 _1 w1 p1
+_4 w3 _1 w9 p1 _1 p1 l2 _1 w3 _1 p1 _1 w1 p1
+_4 w3 _1 w8 _1 p1 _1 s5 p1
+_4 w1
+p1
+
+c63
+w2 _1 w7 p2 _1 p1
+_4 w3 _1 w5 _1 p1 _1 s45 p1
+_4 w3 _1 w5 _1 p1 _1 s17 p1
+_4 w3 _1 w8 _1 p1 _1 s8 p1
+_4 w3 _1 w3 _1 p1 _1 s19 p1
+_4 w3 _1 w7 _1 p1 _1 s35 p1
+_4 w3 _1 w7 _1 p1 _1 s32 p1
+_4 w3 _1 w9 _1 p1 _1 s31 p1
+_4 w3 _1 w5 _1 p1 _1 s11 p1
+_4 w3 _1 w8 _1 p1 _1 s12 p1
+_4 w3 _1 w1 _1 p1 _1 n1 p1
+_4 w3 _1 w1 _1 p1 _1 n1 p1
+_4 w3 _1 w2 _1 p1 _1 w1 _1 p1 _1 w1 p1
+_4 w3 _1 w1 _1 p1 _1 w7 p1
+_4 w3 _1 w9 _1 p1 _1 s24
+s55
+s22 p1
+_4 w3 _1 w6 _1 p1 _1 s9
+s43
+s26 p1
+_4 w3 _1 w10 _1 p1 _1 s3
+s67
+s60 p1
+_4 w3 _1 w5 _1 p1 _1 n1 p2 n1 p1
+_4 w3 _1 w4 _1 p1 _1 s4
+s39
+s37
+s7 p1
+_4 w3 _1 w5 _1 p1 _1 s2 p1
+_4 w3 _1 w9 _1 p1 _1 s5 p1
+_4 w3 _1 w7 _1 p1 _1 s21 p1
+p1
+
+c22
+c54
+c2
+c69
+c12
+c21
+c3
+w2 _1 w8 p2 _1 p2 _1 w2 _1 c20 _1 p1
+_4 c41
+_4 w3 _1 w1 _1 p1 _1 n1 p1 _1 c11
+_4 w3 _1 w1 _1 p1 _1 n1 _1 c12 _1 p1 _1 n1 p1
+_4 c19
+_4 c26
+_4 c4
+_4 c5
+_4 w1 _1 p1 _1 w1
+p1
+
+c67
+w2 _1 w11 p1 w1 p2 w1 p1 _1 w3 p1 w3 p1 w1 p3 _1 w1 p1 _1 w7 p1 w2 p1 _1 w3 p1 w6 p1 w1 p4 _1 p2 _1 w6 p1 w1 p1
+w5
+_4 w1 p1 _1 w5 _1 p1 _1 p1 w5 p1
+p1
+_4 w3 _1 w3 _1 w1 _1 p1 _1 n1 _1 p2 _1 n1 _1 p2 _1 n1 p1
+_4 w1 _1 p3 _1 n1 p1
+_4 w1 _1 p3 _1 n1 p1
+_4 w1 _1 p2 _1 n1 p1 _1 w1 _1 p2 _1 n1 p1 _1 w1 _1 p2 _1 n1 p1 _1 w1 _1 p2 _1 n1 p1 _1 w1 _1 p2 _1 n1 p1 _1 w1 _1 p2 _1 n1 p1 _1 w1 _1 p2 _1 n1 p1 _1 w1 _1 p2 _1 n1 p1
+_4 w3 _1 w1 _1 p1 _1 w1 _1 p2 _1 n1 _1 p2 _1 w1 _1 p2 _1 n1 _1 p2 _1 p2 w1 _1 p2 _1 n1 p1 _1 p2 _1 w1 _1 p2 _1 n1 p1
+_4 w3 _1 w7 _1 p1 _1 p1 w1 p1 _1 w2 p1 _1 p2 _1 w2 _1 p1 _1 w1 _1 p2
+_4 w3 _1 w4 _1 p1 _1 p2 w3 p2 w3 p2 w7 p3 w1 p4
+_4 w3 _1 w9 _1 p1 _1 s3 p1 w5 p3 w2 p5
+_4 w3 _1 w9 _1 p1 _1 p2 w1 p1
+_4 w3 _1 w7 _1 p1 _1 p1 w3 _1 w5 _1 w1 p1
+_4 w3 _1 w4 _1 p1 _1 p3
+_4 w3 _1 w5 _1 p1 _1 p1 n3 p1 _1 n1 p2
+_4 p2 w3 p1 w4 p2
+_4 w3 _1 w9 _1 p1 _1 n1 p1
+_4 w5 _1 w1 _1 p1
+_8 n1 _1 p1 _1 n1 _1 p2 _1 p2
+_8 n1 p3 n1 _1 p2 _1 p2
+_8 w1 _1 p1 _1 n2 p2 _1 p2 _1 p2
+_8 w1 _1 p2 _1 p2
+_4 p1
+_4 w4
+p1
+
+w11 p1 _1 w4 _1 p1
+_4 p4 w4 p1 w5 _1 p2 _1 p1 w5 p1 w4 p3 _1 p6 _1 p2 _1 p1
+_8 p2 _1 w3 _1 p1 w4 _1 p1 _1 p1 w5 p1 _1 p2
+_4 p2
+p1
+
+w2 _1 w7 p1 w6 p1 _1 w2 p1 _1 p2 _1 w2 _1 p1
+_4 w3 _1 w6 _1 p1 _1 w6 _1 p1 _1 n1 p1
+_4 w6
+p1
+
+w6 _1 w5 _1 p1 _1 w1 p1 _1 w3 p1 _1 w1 p1 _1 w3 _1 p1
+
+w4 _1 w5 _1 p1
+_4 w5 _1 w6 p1 _1 w5 _1 p1 _1 w5 _1 p1 _1 w1 p1 _1 n2 p1 _1 w1 p1 _1 n2 _1 p2
+_4 w2 _1 w5 p2 w4 p1 _1 w2 p1 _1 w3 p1 _1 p2 _1 w5 _1 p1
+_8 w5 _1 p1 _1 w1 p1 _1 w4 p1 w1 _1 p1 _1 w2 p1 _1 w1 p1 _1 w4 p1 w1 _1 p1 _1 n5 _1 p1
+_4 p1
+p1
+
+w5 _1 w2 _1 w8 p2 _1 p2 _1 w6 p4 _1 w3 p1 w3 _1 w3 p2 w5 p2 w5 _1 p1 _1 w4 _1 p1 _1 w4 _1 p1 _1 l7 p2 _1 p1
+_4 w3 _1 w7 _1 p1 _1 w7 p1
+_4 w3 _1 w5 _1 p1 _1 w11 p3 w5 p2
+_4 w2 p4
+p1
+

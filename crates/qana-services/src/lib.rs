@@ -377,52 +377,8 @@ pub fn outline(tree: &GreenNode, cfg: &OutlineConfig) -> Vec<Symbol> {
     return out;
 
     fn walk(n: &GreenNode, base: u32, cfg: &OutlineConfig, out: &mut Vec<Symbol>) {
-        if let Some(e) = cfg.entries.iter().find(|e| e.nt == n.nt && e.prod == n.prod) {
-            // Locate the name child among SYMBOL children with offsets.
-            let mut off = base;
-            let mut sym_idx = 0usize;
-            for c in &n.children {
-                let w = c.width();
-                let is_symbol = match c {
-                    GreenChild::Token(t) => !t.trivia && !t.is_missing(),
-                    GreenChild::Node(m) => m.nt != ERROR_NT,
-                };
-                if is_symbol {
-                    if sym_idx == e.name_child {
-                        // The construct's SIGNIFICANT span, not its
-                        // trivia-padded node span: leading comments
-                        // attach inside the following node, and outline
-                        // consumers (folding, breadcrumbs,
-                        // documentSymbol ranges) want the construct,
-                        // not its gutter of trivia.
-                        let span =
-                            significant_span(n, base).unwrap_or((base, base + n.width));
-                        match c {
-                            GreenChild::Token(t) => out.push(Symbol {
-                                name: t.text.clone(),
-                                kind: e.kind,
-                                span,
-                                selection: (off, off + w),
-                            }),
-                            // DELEGATION: the name is the first def
-                            // inside this child's subtree.
-                            GreenChild::Node(m) => {
-                                if let Some((name, sel)) = first_def_in(m, off, &cfg.defs) {
-                                    out.push(Symbol {
-                                        name,
-                                        kind: e.kind,
-                                        span,
-                                        selection: sel,
-                                    });
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    sym_idx += 1;
-                }
-                off += w;
-            }
+        if let Some(symbol) = own_symbol(n, base, cfg) {
+            out.push(symbol);
         }
         let mut off = base;
         for c in &n.children {
@@ -432,32 +388,84 @@ pub fn outline(tree: &GreenNode, cfg: &OutlineConfig) -> Vec<Symbol> {
             off += c.width();
         }
     }
+}
 
-    /// `[first, last)` byte span of a node's significant content —
-    /// trivia and missing tokens trimmed from BOTH ends, recursively
-    /// (a first/last child that is itself a node starts/ends with its
-    /// own attached trivia). `None` for an all-trivia node.
-    fn significant_span(n: &GreenNode, base: u32) -> Option<(u32, u32)> {
-        let mut first: Option<u32> = None;
-        let mut last: Option<u32> = None;
-        let mut off = base;
-        for c in &n.children {
-            let w = c.width();
-            let sub = match c {
-                GreenChild::Token(t) if !t.trivia && !t.is_missing() => Some((off, off + w)),
-                GreenChild::Node(m) => significant_span(m, off),
-                _ => None,
-            };
-            if let Some((s, e)) = sub {
-                if first.is_none() {
-                    first = Some(s);
-                }
-                last = Some(e);
+/// The outline symbol `n` ITSELF is, if its production is
+/// outline-worthy: what [`outline`] emits for `n` before it descends
+/// into `n`'s children, with spans relative to `n`'s start.
+///
+/// `outline(tree)` is this for every node of the tree, in pre-order. A
+/// caller that keeps the outlines of subtrees an edit left alone (see
+/// `qana_lang::live`) asks this for the nodes above them.
+pub fn node_symbol(n: &GreenNode, cfg: &OutlineConfig) -> Option<Symbol> {
+    own_symbol(n, 0, cfg)
+}
+
+fn own_symbol(n: &GreenNode, base: u32, cfg: &OutlineConfig) -> Option<Symbol> {
+    let e = cfg.entries.iter().find(|e| e.nt == n.nt && e.prod == n.prod)?;
+    // Locate the name child among SYMBOL children with offsets.
+    let mut off = base;
+    let mut sym_idx = 0usize;
+    for c in &n.children {
+        let w = c.width();
+        let is_symbol = match c {
+            GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+            GreenChild::Node(m) => m.nt != ERROR_NT,
+        };
+        if is_symbol {
+            if sym_idx == e.name_child {
+                // The construct's SIGNIFICANT span, not its
+                // trivia-padded node span: leading comments
+                // attach inside the following node, and outline
+                // consumers (folding, breadcrumbs,
+                // documentSymbol ranges) want the construct,
+                // not its gutter of trivia.
+                let span = significant_span(n, base).unwrap_or((base, base + n.width));
+                return match c {
+                    GreenChild::Token(t) => Some(Symbol {
+                        name: t.text.clone(),
+                        kind: e.kind,
+                        span,
+                        selection: (off, off + w),
+                    }),
+                    // DELEGATION: the name is the first def
+                    // inside this child's subtree.
+                    GreenChild::Node(m) => first_def_in(m, off, &cfg.defs).map(|(name, sel)| {
+                        Symbol { name, kind: e.kind, span, selection: sel }
+                    }),
+                };
             }
-            off += w;
+            sym_idx += 1;
         }
-        Some((first?, last?))
+        off += w;
     }
+    None
+}
+
+/// `[first, last)` byte span of a node's significant content —
+/// trivia and missing tokens trimmed from BOTH ends, recursively
+/// (a first/last child that is itself a node starts/ends with its
+/// own attached trivia). `None` for an all-trivia node.
+fn significant_span(n: &GreenNode, base: u32) -> Option<(u32, u32)> {
+    let mut first: Option<u32> = None;
+    let mut last: Option<u32> = None;
+    let mut off = base;
+    for c in &n.children {
+        let w = c.width();
+        let sub = match c {
+            GreenChild::Token(t) if !t.trivia && !t.is_missing() => Some((off, off + w)),
+            GreenChild::Node(m) => significant_span(m, off),
+            _ => None,
+        };
+        if let Some((s, e)) = sub {
+            if first.is_none() {
+                first = Some(s);
+            }
+            last = Some(e);
+        }
+        off += w;
+    }
+    Some((first?, last?))
 }
 
 // ---------------------------------------------------------------------------

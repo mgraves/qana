@@ -1707,6 +1707,46 @@ syntax, the incremental parse can recover differently from a fresh parse
 of the same text. In `examples/c/demo.c`, replacing line 30 (a struct
 field) with a one-line function definition leaves the two trees unequal.
 
+## The outline, kept across edits (shipped)
+
+An editor asks for the outline after every edit: breadcrumbs ask on
+every cursor move, folding on every change of line structure. The
+answer was a walk of the whole tree, cached per revision, so the first
+question after each keystroke walked the file again: 25 ms at 250,000
+lines, for an edit that changed one function.
+
+The outline of a subtree depends on nothing outside it, and the
+incremental parser hands back the same subtrees, by pointer, for
+everything an edit did not rebuild. So `LiveDoc` keeps the outline in
+UNITS, the top-level constructs of the file. After an edit it matches
+the tree's units against the ones it kept, from both ends, by identity;
+walks the ones between; and moves the marks of a kept unit to where its
+construct now starts. The mark list is patched where it stands when
+nobody else is holding it.
+
+The shape revision (which moves only when the names, categories and
+nesting change, so that outline views are not rebuilt on body edits) is
+now a polynomial hash: each unit keeps the hash of its own marks, and
+the file's is the units' joined, without reading a mark again and
+without depending on where the units divide.
+
+| Lines | Marks | Outline after a keystroke, before | After |
+|---|---|---|---|
+| 10,000 | 1,524 | 0.73 ms | 0.01 ms |
+| 50,000 | 7,632 | 4.7 ms | 0.03 ms |
+| 250,000 | 38,166 | 24.7 ms | 0.2 ms |
+
+The first outline of a document is the full walk, as before (24 ms then,
+27 ms now at 250,000 lines, one run each).
+
+`qana_services::node_symbol` is the one new public function: the symbol
+a node itself is, which `outline` now calls for every node and the kept
+outline calls for the root. The tests in `qana-lang/src/live.rs` hold
+the kept outline to `qana_services::outline` of the same tree after
+every step of a random script of whole-item edits, in C and in a grammar
+whose root is itself a mark, and hold the shape revision to moving
+exactly when the shape does.
+
 ## Rust, lexically: measured against rustc's own lexer
 
 Trailing context was added because Rust's numbers need it. The question
@@ -1741,7 +1781,7 @@ is not measured here.
 
 ## Status
 
-Eight crates + two binaries (`qana`, `qana-lsp`); 229 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`qana`, `qana-lsp`); 233 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

@@ -498,12 +498,15 @@ impl Painter {
         self.window_items = new_hi - lo;
         items.splice(lo..old_hi, between);
         debug_assert_eq!(items.len(), new_len);
-        // The items after the window are the same items at new offsets.
-        for (item, k) in items[new_hi..].iter_mut().zip(&keys[new_hi..]) {
+        // A kept item is the same item; where it starts may have moved.
+        // That holds before the window as well as after it: an item
+        // moves when anything ahead of it changes length, and not
+        // everything ahead of an item is an item (a grammar may put
+        // tokens of the root production before its list).
+        for (item, k) in items.iter_mut().zip(&keys) {
             debug_assert!(same(&item.0, k));
             item.0.start = k.start;
         }
-        debug_assert!(items.iter().zip(&keys).all(|(item, k)| item.0 == *k));
         let t_sync = t0.elapsed();
 
         // Touched lines: the damaged window plus every miss item's

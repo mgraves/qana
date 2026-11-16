@@ -1741,7 +1741,7 @@ is not measured here.
 
 ## Status
 
-Eight crates + two binaries (`qana`, `qana-lsp`); 228 tests (`cargo test --workspace`); the full story runs:
+Eight crates + two binaries (`qana`, `qana-lsp`); 229 tests (`cargo test --workspace`); the full story runs:
 **one grammar — now a text file — → certified lexer + LR tables +
 incremental lexing/parsing (total under errors) + lossless trees + typed
 AST + editor services + semantic binding + declared type, module, and

@@ -58,6 +58,8 @@ enum RunEdge {
 /// lexer relexes the line.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct LineFolds {
+    /// The line's length in bytes, its terminator included.
+    len: u32,
     /// The line's bracket tokens, in order.
     brackets: Vec<Bracket>,
     /// The line's run edges, in order.
@@ -66,6 +68,98 @@ struct LineFolds {
     /// it but trivia, and at least one comment): the bytes from the start
     /// of its first comment to the end of its last.
     comment: Option<(u32, u32)>,
+}
+
+/// One bracket or run edge of a line, in the order the matching reads
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Event {
+    Bracket(Bracket),
+    Run(RunEdge),
+}
+
+impl Event {
+    /// The event with its columns taken out: what the matching does with
+    /// it, wherever it stands on its line.
+    fn shape(self) -> Event {
+        match self {
+            Event::Bracket(b) => Event::Bracket(Bracket { col: 0, ..b }),
+            Event::Run(RunEdge::Open { len, category, .. }) => {
+                Event::Run(RunEdge::Open { col: 0, len, category })
+            }
+            Event::Run(RunEdge::Close { .. }) => Event::Run(RunEdge::Close { end: 0 }),
+        }
+    }
+
+    /// The column of the line a fold can begin at because of this event:
+    /// where an opening token starts.
+    fn start(self) -> Option<u32> {
+        match self {
+            Event::Bracket(b) => Some(b.col),
+            Event::Run(RunEdge::Open { col, .. }) => Some(col),
+            Event::Run(RunEdge::Close { .. }) => None,
+        }
+    }
+
+    /// The column a fold, or its opening token, can end at because of
+    /// this event: where a token ends.
+    fn end(self) -> u32 {
+        match self {
+            Event::Bracket(b) => b.col + b.len,
+            Event::Run(RunEdge::Open { col, len, .. }) => col + len,
+            Event::Run(RunEdge::Close { end }) => end,
+        }
+    }
+}
+
+impl LineFolds {
+    /// The line's brackets and run edges, in the order they stand on it.
+    /// A run's close is at the end of its token, so it comes after any
+    /// bracket that starts before that end.
+    fn events(&self) -> impl Iterator<Item = Event> + '_ {
+        let (mut b, mut r) = (0usize, 0usize);
+        std::iter::from_fn(move || {
+            let bracket_col = self.brackets.get(b).map(|x| x.col);
+            let run_col = self.runs.get(r).map(|e| match *e {
+                RunEdge::Open { col, .. } => col,
+                RunEdge::Close { end } => end.saturating_sub(1),
+            });
+            let take_bracket = match (bracket_col, run_col) {
+                (None, None) => return None,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some(bc), Some(rc)) => bc <= rc,
+            };
+            if take_bracket {
+                b += 1;
+                Some(Event::Bracket(self.brackets[b - 1]))
+            } else {
+                r += 1;
+                Some(Event::Run(self.runs[r - 1]))
+            }
+        })
+    }
+
+    /// Whether `self` and `other` make the same folds wherever they stand:
+    /// the same events in the same order, and both comment lines or
+    /// neither. Only columns may differ.
+    fn same_shape(&self, other: &LineFolds) -> bool {
+        self.comment.is_some() == other.comment.is_some()
+            && self.brackets.len() == other.brackets.len()
+            && self.runs.len() == other.runs.len()
+            && self.events().zip(other.events()).all(|(a, b)| a.shape() == b.shape())
+    }
+
+    /// Every column of the line a fold can begin at, in an order
+    /// [`same_shape`](Self::same_shape) lines have in common.
+    fn starts(&self) -> impl Iterator<Item = u32> + '_ {
+        self.events().filter_map(Event::start).chain(self.comment.map(|(start, _)| start))
+    }
+
+    /// Every column a fold or its opening token can end at, likewise.
+    fn ends(&self) -> impl Iterator<Item = u32> + '_ {
+        self.events().map(Event::end).chain(self.comment.map(|(_, end)| end))
+    }
 }
 
 /// One fold being matched: a reserved slot in the output, and what
@@ -164,23 +258,119 @@ impl FoldIndex {
     }
 
     /// The lexer relexed `damage` (each region's old lines are replaced by
-    /// its new ones): read those lines again. Every other line was
-    /// entered in the state it was before and has the text it had, so
-    /// what it contributes is unchanged.
+    /// its new ones), making revision `after` of a document whose folds
+    /// were last asked for at revision `before`: read those lines again.
+    /// Every other line was entered in the state it was before and has
+    /// the text it had, so what it contributes is unchanged.
+    ///
+    /// Most edits leave the folds as they were, only moved: typing within
+    /// a line moves the brackets after the cursor and nothing else. When
+    /// every relexed line has the shape it had (see
+    /// [`LineFolds::same_shape`]) and no line was added or removed, the
+    /// matching would pair the same events into the same folds, so the
+    /// folds of `before` are moved to where their events now stand, and
+    /// become the folds of `after` without being matched again.
     pub(crate) fn note_edit(
         &mut self,
         buf: &LexedBuffer<'_, CompiledLexer>,
         damage: &[DamageRegion],
+        before: u64,
+        after: u64,
     ) {
+        let fresh: Vec<Vec<LineFolds>> = damage
+            .iter()
+            .map(|region| {
+                let (new_lo, new_hi) = region.new_lines;
+                (new_lo..new_hi).map(|i| self.read_line(buf, i)).collect()
+            })
+            .collect();
+
+        let only_moved = self.matched_rev == before
+            && damage.iter().zip(&fresh).all(|(region, lines)| {
+                let (old_lo, old_hi) = region.old_lines;
+                old_hi - old_lo == lines.len()
+                    && self.lines[old_lo..old_hi].iter().zip(lines).all(|(o, n)| o.same_shape(n))
+            });
+        if only_moved && self.move_folds(damage, &fresh) {
+            self.matched_rev = after;
+        }
+
         // From the last region back, so that an earlier region's old line
         // numbers still address this vector when it is reached.
-        for region in damage.iter().rev() {
+        for (region, lines) in damage.iter().zip(fresh).rev() {
             let (old_lo, old_hi) = region.old_lines;
-            let (new_lo, new_hi) = region.new_lines;
-            let fresh: Vec<LineFolds> = (new_lo..new_hi).map(|i| self.read_line(buf, i)).collect();
-            self.lines.splice(old_lo..old_hi, fresh);
+            self.lines.splice(old_lo..old_hi, lines);
         }
         debug_assert_eq!(self.lines.len(), buf.lines.len(), "a fold entry for every line");
+    }
+
+    /// Move the folds through an edit that replaced each region of
+    /// `damage` by as many lines of the same shapes, `fresh`. A position
+    /// before a region stays, and one after it moves by the bytes the
+    /// region gained. One within it is a fold's start, at a column where
+    /// a fold can begin, or a fold's or its opening token's end, at a
+    /// column where one can end, and goes to the same column of the new
+    /// line. (Starts and ends are kept apart: in `)(` one token's end is
+    /// the next one's start, and an edit between them moves only one.)
+    /// Returns false, moving nothing, if a position within a region is
+    /// no such column, or two of its columns stand at one place before
+    /// the edit and at two after it; the folds' construction rules out
+    /// both.
+    fn move_folds(&mut self, damage: &[DamageRegion], fresh: &[Vec<LineFolds>]) -> bool {
+        // Where each region stands, and the bytes the regions up to and
+        // including it gained.
+        let mut regions: Vec<(u32, u32, i64)> = Vec::with_capacity(damage.len());
+        // The starts and the ends within the regions, as `(old position,
+        // new position)`.
+        let (mut starts, mut ends): (Vec<(u32, u32)>, Vec<(u32, u32)>) = (Vec::new(), Vec::new());
+        let (mut line, mut at, mut shift) = (0usize, 0u32, 0i64);
+        for (region, lines) in damage.iter().zip(fresh) {
+            let (old_lo, old_hi) = region.old_lines;
+            at += self.lines[line..old_lo].iter().map(|l| l.len).sum::<u32>();
+            let start = at;
+            for (old, new) in self.lines[old_lo..old_hi].iter().zip(lines) {
+                let new_at = (at as i64 + shift) as u32;
+                starts.extend(old.starts().zip(new.starts()).map(|(o, n)| (at + o, new_at + n)));
+                ends.extend(old.ends().zip(new.ends()).map(|(o, n)| (at + o, new_at + n)));
+                at += old.len;
+                shift += new.len as i64 - old.len as i64;
+            }
+            regions.push((start, at, shift));
+            line = old_hi;
+        }
+        for moved in [&mut starts, &mut ends] {
+            moved.sort_unstable();
+            moved.dedup();
+            if moved.windows(2).any(|w| w[0].0 == w[1].0) {
+                return false;
+            }
+        }
+
+        let carry = |p: u32, moved: &[(u32, u32)]| -> Option<u32> {
+            // The last region starting at or before `p`.
+            let k = regions.partition_point(|&(start, _, _)| start <= p);
+            let shift_before = if k == 0 { 0 } else { regions[k - 1].2 };
+            match k.checked_sub(1).map(|i| regions[i]) {
+                Some((start, end, _)) if start <= p && p < end => {
+                    moved.binary_search_by_key(&p, |&(old, _)| old).ok().map(|i| moved[i].1)
+                }
+                _ => Some((p as i64 + shift_before) as u32),
+            }
+        };
+        let mut folds = (*self.folds).clone();
+        for fold in &mut folds {
+            let (Some(start), Some(end), Some(name_end)) =
+                (carry(fold.start, &starts), carry(fold.end, &ends), carry(fold.name_end, &ends))
+            else {
+                return false;
+            };
+            fold.start = start;
+            fold.end = end;
+            fold.name_start = start;
+            fold.name_end = name_end;
+        }
+        self.folds = Arc::new(folds);
+        true
     }
 
     /// What line `i` of `buf` contributes.
@@ -188,7 +378,10 @@ impl FoldIndex {
         let lexer = buf.lexer;
         let (line, lexed) = (&buf.lines[i], &buf.lexed[i]);
         let entry = buf.entry_state(i);
-        let mut out = LineFolds::default();
+        let mut out = LineFolds {
+            len: (line.text.len() + line.term.as_str().len()) as u32,
+            ..LineFolds::default()
+        };
 
         let mut state = entry;
         let mut col = 0u32;
@@ -231,14 +424,11 @@ impl FoldIndex {
         &self.legend
     }
 
-    /// The folds of `buf` at revision `rev`, matched once per revision.
-    pub(crate) fn folds(
-        &mut self,
-        buf: &LexedBuffer<'_, CompiledLexer>,
-        rev: u64,
-    ) -> Arc<Vec<Mark>> {
+    /// The folds at revision `rev`: matched once per revision, unless an
+    /// edit moved them there (see [`note_edit`](Self::note_edit)).
+    pub(crate) fn folds(&mut self, rev: u64) -> Arc<Vec<Mark>> {
         if self.matched_rev != rev {
-            self.folds = Arc::new(self.match_folds(buf));
+            self.folds = Arc::new(self.match_folds());
             self.matched_rev = rev;
         }
         self.folds.clone()
@@ -255,7 +445,7 @@ impl FoldIndex {
     /// folds nest. Each fold takes a slot in the output when it opens,
     /// which keeps the output in document order; a slot is filled when
     /// its region closes on a later line, and stays empty otherwise.
-    fn match_folds(&self, buf: &LexedBuffer<'_, CompiledLexer>) -> Vec<Mark> {
+    fn match_folds(&self) -> Vec<Mark> {
         let mut slots: Vec<Option<Mark>> = Vec::new();
         let mut stack: Vec<Open> = Vec::new();
         // The comment run being read: its slot, start byte, first line,
@@ -275,7 +465,7 @@ impl FoldIndex {
         let mut opens: Vec<(u8, u32, u32)> = Vec::new();
 
         let mut line_start = 0u32;
-        for (i, (folds, line)) in self.lines.iter().zip(&buf.lines).enumerate() {
+        for (i, folds) in self.lines.iter().enumerate() {
             // Comment lines: a run of them is one fold.
             match (folds.comment, &mut comments) {
                 (Some((_, end)), Some(run)) => {
@@ -297,25 +487,8 @@ impl FoldIndex {
                 }
             }
 
-            // Brackets and run edges, in the order they stand on the line.
-            let (mut b, mut r) = (0usize, 0usize);
-            loop {
-                let bracket_col = folds.brackets.get(b).map(|x| x.col);
-                let run_col = folds.runs.get(r).map(|e| match *e {
-                    RunEdge::Open { col, .. } => col,
-                    // A close is at the end of its token: it comes after
-                    // any bracket that starts before that end.
-                    RunEdge::Close { end } => end.saturating_sub(1),
-                });
-                let take_bracket = match (bracket_col, run_col) {
-                    (None, None) => break,
-                    (Some(_), None) => true,
-                    (None, Some(_)) => false,
-                    (Some(bc), Some(rc)) => bc <= rc,
-                };
-                if take_bracket {
-                    let x = folds.brackets[b];
-                    b += 1;
+            for event in folds.events() {
+                if let Event::Bracket(x) = event {
                     let at = line_start + x.col;
                     if x.open {
                         let slot = slots.len();
@@ -338,9 +511,7 @@ impl FoldIndex {
                             }
                         }
                     }
-                } else {
-                    let edge = folds.runs[r];
-                    r += 1;
+                } else if let Event::Run(edge) = event {
                     match edge {
                         RunEdge::Open { col, len, category } => {
                             let slot = slots.len();
@@ -365,7 +536,7 @@ impl FoldIndex {
                     }
                 }
             }
-            line_start += (line.text.len() + line.term.as_str().len()) as u32;
+            line_start += folds.len;
         }
         if let Some((slot, start, first, last, end)) = comments {
             if last > first {

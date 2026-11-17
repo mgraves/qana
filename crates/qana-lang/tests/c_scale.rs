@@ -11,7 +11,7 @@
 //! names produce semantic diagnostics, which is realistic noise — the
 //! engine's job is to stay total and incremental regardless.
 
-use linework::{LineEdit, Limner};
+use linework::{Limner, LineEdit};
 use qana_lang::live::LiveDoc;
 use qana_lang::EmbeddedLang;
 use std::sync::Arc;
@@ -43,8 +43,9 @@ struct Sample {
     marks: Duration,
     mark_count: usize,
     enclosing: Duration,
-    folds: Duration,
+    folds_matched: Duration,
     fold_count: usize,
+    folds_moved: Duration,
     folds_again: Duration,
 }
 
@@ -63,31 +64,32 @@ fn measure(lang: &Arc<EmbeddedLang>, target_lines: usize) -> Sample {
         "every line painted — totality at scale"
     );
 
+    // The folds channel, matched whole: what a document just opened
+    // costs.
+    let t = Instant::now();
+    let fold_count = l.folds_shared().len();
+    let folds_matched = t.elapsed();
+
     // A mid-file keystroke: retype one line with a tweak.
     let mid = (lines / 2) as u32;
     let mid_text: String = text.lines().nth(mid as usize).unwrap_or("").to_string();
     let t = Instant::now();
-    let delta = l.edit(&LineEdit {
-        start: mid,
-        end: mid + 1,
-        lines: vec![format!("{mid_text} ")],
-    });
+    let delta = l.edit(&LineEdit { start: mid, end: mid + 1, lines: vec![format!("{mid_text} ")] });
     let mid_edit = t.elapsed();
-    let mid_splice_lines = delta
-        .splice
-        .as_ref()
-        .map(|((lo, hi), _)| (*hi - *lo) as usize)
-        .unwrap_or(0);
+    // The folds after it: the keystroke changed no fold, so they were
+    // moved by the edit, not matched again.
+    let t = Instant::now();
+    let moved = l.folds_shared();
+    let folds_moved = t.elapsed();
+    assert_eq!(moved.len(), fold_count, "a trailing space changes no fold");
+    let mid_splice_lines =
+        delta.splice.as_ref().map(|((lo, hi), _)| (*hi - *lo) as usize).unwrap_or(0);
 
     // An end-of-file keystroke.
     let last = lines.saturating_sub(1) as u32;
     let last_text: String = text.lines().nth(last as usize).unwrap_or("").to_string();
     let t = Instant::now();
-    let _ = l.edit(&LineEdit {
-        start: last,
-        end: last + 1,
-        lines: vec![format!("{last_text} ")],
-    });
+    let _ = l.edit(&LineEdit { start: last, end: last + 1, lines: vec![format!("{last_text} ")] });
     let eof_edit = t.elapsed();
 
     // The marks channel (structure view / folding provider feed).
@@ -103,12 +105,7 @@ fn measure(lang: &Arc<EmbeddedLang>, target_lines: usize) -> Sample {
     let enclosing = t.elapsed();
     let _ = chain;
 
-    // The folds channel after an edit: matched once for the revision,
-    // then handed out from the cache.
-    let t = Instant::now();
-    let folds = l.folds_shared();
-    let folds_time = t.elapsed();
-    let fold_count = folds.len();
+    // Asked again in the same revision: the cached answer.
     let t = Instant::now();
     let _ = l.folds_shared();
     let folds_again = t.elapsed();
@@ -123,8 +120,9 @@ fn measure(lang: &Arc<EmbeddedLang>, target_lines: usize) -> Sample {
         marks: marks_time,
         mark_count,
         enclosing,
-        folds: folds_time,
+        folds_matched,
         fold_count,
+        folds_moved,
         folds_again,
     }
 }
@@ -139,7 +137,7 @@ fn huge_c_documents_stay_live() {
     for target in [10_000usize, 50_000, 200_000] {
         let s = measure(&lang, target);
         println!(
-            "[c-scale] {} lines ({} KB): open+paint {:?} | mid-edit {:?} (splice {} lines) | eof-edit {:?} | marks {:?} (n={}) | enclosing {:?} | folds {:?} (n={}, again {:?})",
+            "[c-scale] {} lines ({} KB): open+paint {:?} | mid-edit {:?} (splice {} lines) | eof-edit {:?} | marks {:?} (n={}) | enclosing {:?} | folds matched {:?} (n={}), after a keystroke {:?}, again {:?}",
             s.lines,
             s.bytes / 1024,
             s.open,
@@ -149,8 +147,9 @@ fn huge_c_documents_stay_live() {
             s.marks,
             s.mark_count,
             s.enclosing,
-            s.folds,
+            s.folds_matched,
             s.fold_count,
+            s.folds_moved,
             s.folds_again,
         );
 

@@ -252,3 +252,25 @@ int f(void) {
     assert_eq!(folds, want);
     assert_nested(&doc.folds_shared(), "the C example");
 }
+
+/// In `)(` one token's end is the next one's start. Typing between them
+/// moves the second and not the first, and the folds kept across the
+/// edit are still those of the text opened afresh.
+#[test]
+fn typing_between_a_close_and_an_open_moves_only_the_open() {
+    let lang = lang(RUST);
+    let src = "fn f() {\n    g(1,\n      2)(3,\n      4);\n}\n";
+    let mut doc = LiveDoc::open(lang.clone(), "t.rs", src);
+    let before = spelled(&mut doc, src);
+    assert_eq!(
+        before.iter().filter(|(c, _)| c == "paren").count(),
+        2,
+        "both calls fold: {before:?}"
+    );
+    doc.edit(&LineEdit { start: 2, end: 3, lines: vec!["      2) (3,".to_string()] });
+    let text = doc.text();
+    let kept = spelled(&mut doc, &text);
+    assert_eq!(kept, spelled(&mut LiveDoc::open(lang, "t.rs", &text), &text));
+    assert!(kept.contains(&("paren".to_string(), "(1,\n      2)".to_string())));
+    assert!(kept.contains(&("paren".to_string(), "(3,\n      4)".to_string())));
+}

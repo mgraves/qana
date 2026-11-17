@@ -473,7 +473,12 @@ impl Limner for LiveDoc {
             }])
             .expect("total under errors");
         let t_parse = t0.elapsed();
-        self.folds.note_edit(&self.session.buf, &outcome.damage.regions);
+        self.folds.note_edit(
+            &self.session.buf,
+            &outcome.damage.regions,
+            self.marks_rev.wrapping_sub(1),
+            self.marks_rev,
+        );
         let t1 = StageClock::start(trace);
         self.db.set_tree(&self.uri, self.session.tree().expect("total").clone());
         let t_sem = t1.elapsed();
@@ -550,7 +555,7 @@ impl Limner for LiveDoc {
     }
 
     fn folds_shared(&mut self) -> Arc<Vec<Mark>> {
-        self.folds.folds(&self.session.buf, self.marks_rev)
+        self.folds.folds(self.marks_rev)
     }
 
     fn folds_rev(&mut self) -> u64 {

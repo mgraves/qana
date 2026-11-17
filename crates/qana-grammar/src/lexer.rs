@@ -190,11 +190,7 @@ impl CompiledLexer {
                         }
                     }
                     out.push(Token { id: tok, len: (end - i) as u32 });
-                    match self.actions[tok as usize] {
-                        Action::None => {}
-                        Action::Push(m) => state.push(m, self.stack_bound),
-                        Action::Pop => state.pop(),
-                    }
+                    state = self.after_token(state, tok);
                     i = end;
                 }
             }
@@ -290,6 +286,22 @@ impl CompiledLexer {
             }
         }
         best
+    }
+
+    /// The mode stack after the token `tok`, lexed in `state`: its push or
+    /// pop applied, exactly as [`lex_line`](Self::lex_line) applies it. A
+    /// reader of a line's tokens replays the line's states with this,
+    /// from the line's entry state, and learns where each mode begins and
+    /// ends. (The end of a line can pop more: line-bounded modes end
+    /// there, which the line's exit state shows.)
+    pub fn after_token(&self, mut state: MStack, tok: TokenId) -> MStack {
+        match self.actions.get(tok as usize) {
+            Some(Action::Push(m)) => state.push(*m, self.stack_bound),
+            Some(Action::Pop) => state.pop(),
+            // `Action::None`, and the unknown token, which has no action.
+            Some(Action::None) | None => {}
+        }
+        state
     }
 
     /// The text of the keyword `id` is, or `None` when `id` is not a

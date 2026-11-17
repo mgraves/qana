@@ -38,6 +38,10 @@ A raw identifier (`r#fn`) is a name.
 
 There is no syntax: the rule is flat, every token in any order, so a
 broken program is never an error here and nothing is outlined or bound.
+Folding needs none: a live document folds the blocks between the
+bracket pairs, comments and strings over lines, and runs of comment
+lines (see `pair` in the reference).
+
 qana's style legend has no class for types, functions, macros,
 attributes, lifetimes or doc comments, so those are coloured as names,
 punctuation or comments.

@@ -9,6 +9,7 @@
 pub mod bootstrap;
 pub mod compile;
 pub mod expand;
+mod folds;
 pub mod live;
 pub mod pat_parse;
 pub mod qana_ast;

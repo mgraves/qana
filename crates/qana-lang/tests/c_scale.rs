@@ -43,6 +43,9 @@ struct Sample {
     marks: Duration,
     mark_count: usize,
     enclosing: Duration,
+    folds: Duration,
+    fold_count: usize,
+    folds_again: Duration,
 }
 
 fn measure(lang: &Arc<EmbeddedLang>, target_lines: usize) -> Sample {
@@ -100,6 +103,16 @@ fn measure(lang: &Arc<EmbeddedLang>, target_lines: usize) -> Sample {
     let enclosing = t.elapsed();
     let _ = chain;
 
+    // The folds channel after an edit: matched once for the revision,
+    // then handed out from the cache.
+    let t = Instant::now();
+    let folds = l.folds_shared();
+    let folds_time = t.elapsed();
+    let fold_count = folds.len();
+    let t = Instant::now();
+    let _ = l.folds_shared();
+    let folds_again = t.elapsed();
+
     Sample {
         lines,
         bytes,
@@ -110,6 +123,9 @@ fn measure(lang: &Arc<EmbeddedLang>, target_lines: usize) -> Sample {
         marks: marks_time,
         mark_count,
         enclosing,
+        folds: folds_time,
+        fold_count,
+        folds_again,
     }
 }
 
@@ -123,7 +139,7 @@ fn huge_c_documents_stay_live() {
     for target in [10_000usize, 50_000, 200_000] {
         let s = measure(&lang, target);
         println!(
-            "[c-scale] {} lines ({} KB): open+paint {:?} | mid-edit {:?} (splice {} lines) | eof-edit {:?} | marks {:?} (n={}) | enclosing {:?}",
+            "[c-scale] {} lines ({} KB): open+paint {:?} | mid-edit {:?} (splice {} lines) | eof-edit {:?} | marks {:?} (n={}) | enclosing {:?} | folds {:?} (n={}, again {:?})",
             s.lines,
             s.bytes / 1024,
             s.open,
@@ -133,6 +149,9 @@ fn huge_c_documents_stay_live() {
             s.marks,
             s.mark_count,
             s.enclosing,
+            s.folds,
+            s.fold_count,
+            s.folds_again,
         );
 
         // Sanity ceilings only — generous enough for debug builds on
@@ -146,5 +165,6 @@ fn huge_c_documents_stay_live() {
         );
         assert!(s.eof_edit < Duration::from_secs(5), "EOF keystroke runaway");
         assert!(s.mark_count > 0, "the outline exists at scale");
+        assert!(s.fold_count > 0, "the folds exist at scale");
     }
 }

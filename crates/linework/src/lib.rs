@@ -228,7 +228,9 @@ pub struct Hint {
 /// ancestor precedes and encloses its descendants, and an editor can
 /// rebuild the tree — or just walk a chain — without parent pointers on
 /// the wire. One channel feeds breadcrumbs, structure views, sticky
-/// context, and folding.
+/// context, and folding. The folds that are not structure (a block
+/// between brackets, a comment over lines) are marks too, in a channel
+/// of their own: [`Limner::folds_shared`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mark {
     /// Index into [`Limner::mark_legend`] — an engine-neutral category
@@ -327,6 +329,39 @@ pub trait Limner {
 
     /// Legend of mark category names, indexed by [`Mark::category`].
     fn mark_legend(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The document's FOLDS: regions an editor can fold that are not
+    /// structure. A block between brackets, a comment or a string that
+    /// runs over lines, a run of comment lines. The outline's
+    /// [`Mark`]s fold too; these are the rest, in a channel of their own
+    /// so that they never reach an outline or a breadcrumb.
+    ///
+    /// Each is a [`Mark`] with the same promises as the marks: flat,
+    /// document-ordered, containment-nested. `start..end` runs from the
+    /// region's opening token to the end of its closing one, the name
+    /// span is the opening token, and the name is empty. Only regions
+    /// that span lines are folds; one that opens and closes on a line
+    /// folds nothing and is left out. `category` indexes
+    /// [`fold_legend`](Limner::fold_legend).
+    ///
+    /// Shared and cached like [`marks_shared`](Limner::marks_shared):
+    /// the same `Arc` until an edit. The default is no folds.
+    fn folds_shared(&mut self) -> std::sync::Arc<Vec<Mark>> {
+        std::sync::Arc::new(Vec::new())
+    }
+
+    /// A revision counter for the folds channel, with the meaning of
+    /// [`marks_rev`](Limner::marks_rev): `0` is no tracking, otherwise
+    /// it changes whenever the folds may have.
+    fn folds_rev(&mut self) -> u64 {
+        0
+    }
+
+    /// Legend of fold category names, indexed by [`Mark::category`] of
+    /// a fold.
+    fn fold_legend(&self) -> Vec<String> {
         Vec::new()
     }
 }

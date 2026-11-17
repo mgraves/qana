@@ -215,6 +215,20 @@ Declares a bracket pair by token name or literal. Pairs drive folding
 and the incremental skeleton that lets the engine find a damaged
 region's enclosing block without reparsing.
 
+A live document's folds (`Limner::folds_shared`) come from the tokens
+alone, so a grammar with no syntax folds too:
+
+* a block between a pair that opens and closes on different lines. A
+  close takes the nearest open of its kind and leaves the opens it
+  passes unclosed, so one stray bracket does not unpair the rest;
+* a mode entered from the base mode and left on a later line (a block
+  comment, a string), named for the style of the token that enters it;
+* two or more lines in a row with nothing on them but trivia and at
+  least one comment.
+
+The folds are kept per line, and an edit reads again only the lines
+the lexer relexed.
+
 ---
 
 ## `prec left|right tok …`

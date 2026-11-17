@@ -8,6 +8,7 @@
 //! alone; this crate depends on `linework` and implements it. The two
 //! meet only at the trait.
 
+use crate::folds::FoldIndex;
 use crate::EmbeddedLang;
 use linework::{FactCard, Hint, LineEdit, Limner, Mark, Paint, PaintDelta};
 use qana_engine::{IncSession, Line, LineTerm};
@@ -60,6 +61,9 @@ pub struct LiveDoc {
     /// so typing costs them nothing.
     shape_rev: u64,
     shape_hash: u64,
+    /// The folds channel: what each line contributes, kept across edits,
+    /// and the folds matched from it once per revision.
+    folds: FoldIndex,
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +232,7 @@ impl LiveDoc {
         db.set_macro_bodies(&lang.macros);
         db.set_tree(&uri, session.tree().expect("total").clone());
         let (painter, _) = Painter::new(&session, &lang.styles, Some((&mut db, &uri)));
+        let folds = FoldIndex::new(lang.lexer, |id| style_class(&lang, id), &session.buf);
         LiveDoc {
             lang,
             uri,
@@ -238,6 +243,7 @@ impl LiveDoc {
             outline: Outline::new(),
             shape_rev: 0,
             shape_hash: 0,
+            folds,
         }
     }
 
@@ -384,6 +390,7 @@ impl Limner for LiveDoc {
         // shape does not announce a new one.)
         self.outline = Outline::new();
         self.session = self.lang.session(text);
+        self.folds.reset(&self.session.buf);
         self.db = SemDb::new(self.lang.binding.clone());
         self.db.set_types(self.lang.types.clone());
         self.db.set_macro_bodies(&self.lang.macros);
@@ -466,6 +473,7 @@ impl Limner for LiveDoc {
             }])
             .expect("total under errors");
         let t_parse = t0.elapsed();
+        self.folds.note_edit(&self.session.buf, &outcome.damage.regions);
         let t1 = StageClock::start(trace);
         self.db.set_tree(&self.uri, self.session.tree().expect("total").clone());
         let t_sem = t1.elapsed();
@@ -540,6 +548,23 @@ impl Limner for LiveDoc {
     fn mark_legend(&self) -> Vec<String> {
         mark_kinds(&self.lang.outline).iter().map(|k| k.to_string()).collect()
     }
+
+    fn folds_shared(&mut self) -> Arc<Vec<Mark>> {
+        self.folds.folds(&self.session.buf, self.marks_rev)
+    }
+
+    fn folds_rev(&mut self) -> u64 {
+        self.marks_rev
+    }
+
+    fn fold_legend(&self) -> Vec<String> {
+        self.folds.legend().to_vec()
+    }
+}
+
+/// The style class of a token of `lang`, if it has one.
+fn style_class(lang: &EmbeddedLang, id: qana_grammar::model::TokenId) -> Option<&'static str> {
+    lang.styles.class_of(id).map(|class| lang.styles.legend[class as usize])
 }
 
 /// Mark categories = the outline config's kinds, deduped in first-use

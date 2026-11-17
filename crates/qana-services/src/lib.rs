@@ -540,15 +540,9 @@ pub fn completion_at(
     let mut items: Vec<CompletionItem> = tables.action[s as usize]
         .keys()
         .filter(|&&t| t != EOF)
-        .map(|&t| {
-            let name = sg.term_name(t).to_string();
-            let is_keyword = name.starts_with("KW_");
-            let label = if is_keyword {
-                name.trim_start_matches("KW_").to_lowercase()
-            } else {
-                name
-            };
-            CompletionItem { label, is_keyword }
+        .map(|&t| match lexer.keyword_text(t) {
+            Some(text) => CompletionItem { label: text.to_string(), is_keyword: true },
+            None => CompletionItem { label: sg.term_name(t).to_string(), is_keyword: false },
         })
         .collect();
     items.sort_by(|a, b| a.label.cmp(&b.label));

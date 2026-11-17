@@ -1,0 +1,226 @@
+// Rust, for COLOURING: the lexical grammar of `../rust-lex/rust_lex.qana`
+// with the parts an editor shows. It cuts every line into exactly the
+// tokens rust_lex.qana does, in the same modes, so what was measured
+// there against rustc's own lexer holds here (crates/qana-lang/tests/
+// rust.rs checks that it does). What it adds:
+//
+// * Keywords. Rust 2021's strict and reserved keywords are their own
+//   tokens, styled `keyword`. Weak keywords (`union`, `macro_rules`,
+//   `raw`, `safe`, `default`) are ordinary names where they are not
+//   keywords, so they are left as names; so is `gen`, which only the
+//   2024 edition reserves.
+// * Operators apart from punctuation, and brackets as tokens of their
+//   own, declared as pairs so that a block folds.
+//
+// There is still no syntax: the rule is flat, every token in any order.
+// What the envelope leaves out is what rust_lex.qana leaves out: a raw
+// string with more than three `#`, and block comments nested deeper
+// than the mode stack (8).
+
+language Rust
+max_stack 8
+
+token WS           = /\s+/      @trivia
+token LINE_COMMENT = /\/\/.*/   @trivia @style(comment)
+token BLOCK_OPEN   = "/*"       @trivia @push(BLOCK) @style(comment)
+
+// Strings. A prefix (`b`, `c`, `r`, `br`, `cr`) followed by its quote is
+// longer than the identifier it starts with, so longest match takes it.
+// Raw strings close on a quote and the same number of `#`: one mode per
+// count, up to three.
+token RAW3_OPEN = /(b|c)?r###"/ @push(RAW3) @style(string)
+token RAW2_OPEN = /(b|c)?r##"/  @push(RAW2) @style(string)
+token RAW1_OPEN = /(b|c)?r#"/   @push(RAW1) @style(string)
+token RAW0_OPEN = /(b|c)?r"/    @push(RAW0) @style(string)
+token STR_OPEN  = /(b|c)?"/     @push(STR)  @style(string)
+
+// `b'…'`: one symbol, or anything up to the closing quote (escapes are
+// pairs); rustc_lexer stops an unclosed one at a `/` or the line's end.
+token BYTE = /b'[^\\]'([\a_][\w_]*)?|b'([^'\\\/]|\\.)*('([\a_][\w_]*)?)?/ @style(string)
+
+// `'`: a char literal or a lifetime. One symbol between quotes is a
+// char. Otherwise, a quote followed by an identifier start or a digit is
+// a lifetime, unless a quote closes the identifier (`'ab'`, an error
+// rustc reports later). Anything else after the quote is a char literal,
+// closed or not. Longest match picks between them.
+token CHAR = /'[^\\]'([\a_][\w_]*)?|'\\.([^'\\\/]|\\.)*('([\a_][\w_]*)?)?|'[\a_\d][\w_]*'|'[^\a_\d'\\\/]([^'\\\/]|\\.)*('([\a_][\w_]*)?)?/ @style(string)
+token RAW_LIFETIME = /'r#[\a_][\w_]*/ @style(variable)
+token LIFETIME     = /'[\a_\d][\w_]*/ @style(variable)
+
+// Numbers. `1.` is a float unless a `.`, a `_` or a letter follows
+// (`1..2`, `1.foo()`): the trailing context. A literal takes an
+// identifier as its suffix (`1u8`, `1.5f32`).
+token FLOAT = /\d[\d_]*\.\d[\d_]*([eE][+\-]?[\d_]*)?([\a_][\w_]*)?|\d[\d_]*\.(?![._\a])|\d[\d_]*[eE][+\-]?[\d_]*([\a_][\w_]*)?/ @style(number)
+token INT   = /0b[\d_]*([\a_][\w_]*)?|0o[\d_]*([\a_][\w_]*)?|0x[\da-fA-F_]*([\a_][\w_]*)?|\d[\d_]*([\a_][\w_]*)?/ @style(number)
+
+// A raw identifier is never a keyword: `r#fn` is a name.
+token RAW_IDENT = /r#[\a_][\w_]*/ @style(variable)
+token IDENT     = /[\a_][\w_]*/   @specialize @style(variable)
+
+// rustc_lexer emits punctuation one character at a time; the parser
+// joins `>>`, `..=` and the rest. So does this grammar, in three kinds.
+token LPAREN = "(" @style(bracket)
+token RPAREN = ")" @style(bracket)
+token LBRACK = "[" @style(bracket)
+token RBRACK = "]" @style(bracket)
+token LBRACE = "{" @style(bracket)
+token RBRACE = "}" @style(bracket)
+token OP     = /[=!<>\-&|+*\/\^%]/ @style(operator)
+token PUNCT  = /[;,.@#~?:$]/       @style(punctuation)
+
+// Strict keywords, then the 2018 edition's (`async`, `await`, `dyn`),
+// then the reserved ones no edition lets a name take (`try` from 2018).
+keywords IDENT =
+  as break const continue crate else enum extern false fn for if impl in
+  let loop match mod move mut pub ref return self Self static struct super
+  trait true type unsafe use where while
+  async await dyn
+  abstract become box do final macro override priv try typeof unsized
+  virtual yield
+
+pair "(" ")"
+pair "[" "]"
+pair "{" "}"
+
+mode BLOCK {
+  token B_OPEN    = "/*"      @trivia @push(BLOCK) @style(comment)
+  token B_CLOSE   = "*/"      @trivia @pop         @style(comment)
+  token B_CONTENT = /[^*\/]+/ @trivia              @style(comment)
+  token B_MISC    = /[*\/]/   @trivia              @style(comment)
+}
+
+mode STR {
+  token S_CLOSE     = /"([\a_][\w_]*)?/ @pop @style(string)
+  token S_ESC       = /\\./                  @style(string)
+  token S_BACKSLASH = /\\/                   @style(string)
+  token S_TEXT      = /[^"\\]+/              @style(string)
+}
+
+mode RAW0 {
+  token R0_CLOSE = /"([\a_][\w_]*)?/ @pop @style(string)
+  token R0_TEXT  = /[^"]+/                @style(string)
+}
+
+mode RAW1 {
+  token R1_CLOSE = /"#([\a_][\w_]*)?/ @pop @style(string)
+  token R1_QUOTE = /"/                     @style(string)
+  token R1_TEXT  = /[^"]+/                 @style(string)
+}
+
+mode RAW2 {
+  token R2_CLOSE = /"##([\a_][\w_]*)?/ @pop @style(string)
+  token R2_QUOTE = /"/                      @style(string)
+  token R2_TEXT  = /[^"]+/                  @style(string)
+}
+
+mode RAW3 {
+  token R3_CLOSE = /"###([\a_][\w_]*)?/ @pop @style(string)
+  token R3_QUOTE = /"/                       @style(string)
+  token R3_TEXT  = /[^"]+/                   @style(string)
+}
+
+start file
+
+rule file = File: items
+
+rule items = item*
+
+rule item =
+  | Word:      IDENT
+  | RawWord:   RAW_IDENT
+  | Keyword:   keyword
+  | Life:      LIFETIME
+  | RawLife:   RAW_LIFETIME
+  | Int:       INT
+  | Float:     FLOAT
+  | Char:      CHAR
+  | Byte:      BYTE
+  | Open:      open
+  | Close:     close
+  | Op:        OP
+  | Punct:     PUNCT
+  | StrOpen:   STR_OPEN
+  | StrClose:  S_CLOSE
+  | StrEsc:    S_ESC
+  | StrSlash:  S_BACKSLASH
+  | StrText:   S_TEXT
+  | Raw0Open:  RAW0_OPEN
+  | Raw0Close: R0_CLOSE
+  | Raw0Text:  R0_TEXT
+  | Raw1Open:  RAW1_OPEN
+  | Raw1Close: R1_CLOSE
+  | Raw1Quote: R1_QUOTE
+  | Raw1Text:  R1_TEXT
+  | Raw2Open:  RAW2_OPEN
+  | Raw2Close: R2_CLOSE
+  | Raw2Quote: R2_QUOTE
+  | Raw2Text:  R2_TEXT
+  | Raw3Open:  RAW3_OPEN
+  | Raw3Close: R3_CLOSE
+  | Raw3Quote: R3_QUOTE
+  | Raw3Text:  R3_TEXT
+
+// Brackets are taken one at a time, like every other token: a flat rule
+// has no nesting to match them in. Folding reads the declared pairs.
+rule open =
+  | Paren:   "("
+  | Bracket: "["
+  | Brace:   "{"
+
+rule close =
+  | ParenEnd:   ")"
+  | BracketEnd: "]"
+  | BraceEnd:   "}"
+
+rule keyword =
+  | As:       "as"
+  | Break:    "break"
+  | Const:    "const"
+  | Continue: "continue"
+  | Crate:    "crate"
+  | Else:     "else"
+  | Enum:     "enum"
+  | Extern:   "extern"
+  | False:    "false"
+  | Fn:       "fn"
+  | For:      "for"
+  | If:       "if"
+  | Impl:     "impl"
+  | In:       "in"
+  | Let:      "let"
+  | Loop:     "loop"
+  | Match:    "match"
+  | Mod:      "mod"
+  | Move:     "move"
+  | Mut:      "mut"
+  | Pub:      "pub"
+  | Ref:      "ref"
+  | Return:   "return"
+  | SelfValue: "self"
+  | SelfType: "Self"
+  | Static:   "static"
+  | Struct:   "struct"
+  | Super:    "super"
+  | Trait:    "trait"
+  | True:     "true"
+  | Type:     "type"
+  | Unsafe:   "unsafe"
+  | Use:      "use"
+  | Where:    "where"
+  | While:    "while"
+  | Async:    "async"
+  | Await:    "await"
+  | Dyn:      "dyn"
+  | Abstract: "abstract"
+  | Become:   "become"
+  | Box:      "box"
+  | Do:       "do"
+  | Final:    "final"
+  | Macro:    "macro"
+  | Override: "override"
+  | Priv:     "priv"
+  | Try:      "try"
+  | Typeof:   "typeof"
+  | Unsized:  "unsized"
+  | Virtual:  "virtual"
+  | Yield:    "yield"

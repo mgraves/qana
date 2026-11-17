@@ -175,6 +175,13 @@ only — a mode-local `"if"` (in a preprocessor mode, say) never shadows
 the base language's keyword. Reference mode-local tokens BY NAME in
 productions.
 
+A keyword's token, as parse trees and conflict reports name it, is `KW_`
+and its text in capitals: `while` is `KW_WHILE`. A keyword with a capital
+of its own keeps its text as written, so Rust's `self` and `Self` are
+`KW_SELF` and `KW_Self`. A keyword whose name a declared token already
+has (`token KW_FN` beside the keyword `fn`) is refused. Completion
+offers a keyword by its text, never by its token's name.
+
 Bare words and quoted strings are both accepted; quote a word when it
 collides with a `.qana` keyword (`language`, `max_stack`, `keywords`,
 `token`, `mode`, `pair`, `prec`, `left`, `right`, `start`, `rule`).

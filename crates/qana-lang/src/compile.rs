@@ -232,6 +232,19 @@ impl Default for IdEvent {
 }
 
 /// Strip one level of `\c → c` escaping from a STRING token's content.
+/// The token name a keyword is given: `KW_` and its text in capitals
+/// (`while` is `KW_WHILE`), which is how a keyword reads in parse trees
+/// and conflict reports. A keyword with a capital of its own keeps its
+/// text as written (Rust's `Self` is `KW_Self`), so that it cannot take
+/// the name of the lowercase keyword beside it (`self`, `KW_SELF`).
+fn keyword_token_name(text: &str) -> String {
+    if text.chars().any(char::is_uppercase) {
+        format!("KW_{text}")
+    } else {
+        format!("KW_{}", text.to_uppercase())
+    }
+}
+
 fn unquote(text: &str) -> String {
     let inner = text.strip_prefix('"').unwrap_or(text);
     let inner = inner.strip_suffix('"').unwrap_or(inner);
@@ -536,11 +549,8 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                         error(d, item.span, format!("keyword `{}` declared twice", item.text));
                         continue;
                     }
-                    let id = lex.add(TokenDef::new(
-                        &format!("KW_{}", item.text.to_uppercase()),
-                        0,
-                        Pat::Never,
-                    ));
+                    let id =
+                        lex.add(TokenDef::new(&keyword_token_name(&item.text), 0, Pat::Never));
                     indices.push(lex.keywords.len());
                     lex.keywords.push((item.text.clone(), id, 0));
                     kw_text.insert(item.text.clone(), id);
@@ -679,6 +689,32 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                     lex.keywords[i].2 = id;
                 }
             }
+        }
+    }
+
+    // A keyword's token name is made from its text, so it can be one a
+    // declared token already has (`token KW_FN` beside the keyword
+    // `fn`). Two tokens of one name cannot be told apart in a parse
+    // tree or a conflict report.
+    let mut first_named: HashMap<&str, usize> = HashMap::new();
+    for (id, token) in lex.tokens.iter().enumerate() {
+        if let Some(&first) = first_named.get(token.name.as_str()) {
+            let what = |i: usize| match lex.keywords.iter().find(|k| k.1 as usize == i) {
+                Some((text, _, _)) => format!("the keyword `{text}`"),
+                None => format!("the token `{}`", lex.tokens[i].name),
+            };
+            error(
+                d,
+                token_spans[id],
+                format!(
+                    "{} would be named `{}`, which is {}'s name",
+                    what(id),
+                    token.name,
+                    what(first)
+                ),
+            );
+        } else {
+            first_named.insert(&token.name, id);
         }
     }
 

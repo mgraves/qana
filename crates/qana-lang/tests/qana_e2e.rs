@@ -231,6 +231,28 @@ rule stmt =\n  | S: \"if\" stmt\n  | SE: \"if\" stmt \"else\" stmt\n  | SX: \"x\
     let src = "token A = \"a\" @style(sparkly)\nrule file = File:\n";
     let out = compile_source(&tc, src);
     assert!(out.diags.iter().any(|d| d.msg.contains("sparkly") && d.msg.contains("keyword")));
+
+    // A keyword's token name is made from its text; one that a declared
+    // token already has is refused, at the keyword.
+    let src = "token KW_FN = \"f\"\ntoken ID = /[a-z]+/ @specialize\nkeywords ID = fn\n\
+               rule file = File:\n";
+    let out = compile_source(&tc, src);
+    let diag = out
+        .diags
+        .iter()
+        .find(|d| d.msg.contains("`KW_FN`"))
+        .unwrap_or_else(|| panic!("the clash is reported: {:?}", out.diags));
+    assert!(diag.msg.contains("keyword `fn`") && diag.msg.contains("token `KW_FN`"), "{}", diag.msg);
+    assert_eq!(&src[diag.span.0 as usize..diag.span.1 as usize], "fn");
+
+    // Keywords that differ only in case are two keywords with two names.
+    let src = "token ID = /[a-zA-Z]+/ @specialize\nkeywords ID = self Self\n\
+               rule file = File: x*\nrule x = | A: \"self\" | B: \"Self\"\n";
+    let out = compile_source(&tc, src);
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    let (lexer, _) = certify(&out.def).expect("certifies");
+    let names = &lexer.vocab.names;
+    assert!(names.contains(&"KW_SELF".to_string()) && names.contains(&"KW_Self".to_string()));
 }
 
 /// EBNF sugar desugars to EXACTLY the grammar a careful author writes

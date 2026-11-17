@@ -292,6 +292,16 @@ impl CompiledLexer {
         best
     }
 
+    /// The text of the keyword `id` is, or `None` when `id` is not a
+    /// keyword. A keyword's token name is not its text (`while` is
+    /// `KW_WHILE`), so this is how its text is had back.
+    pub fn keyword_text(&self, id: TokenId) -> Option<&str> {
+        self.keywords
+            .iter()
+            .find(|(_, &kw)| kw == id)
+            .map(|((_, text), _)| text.as_str())
+    }
+
     pub fn is_trivia(&self, id: TokenId) -> bool {
         if id as usize == self.trivia.len() {
             true // Unknown

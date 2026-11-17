@@ -184,7 +184,8 @@ offers a keyword by its text, never by its token's name.
 
 Bare words and quoted strings are both accepted; quote a word when it
 collides with a `.qana` keyword (`language`, `max_stack`, `keywords`,
-`token`, `mode`, `pair`, `prec`, `left`, `right`, `start`, `rule`).
+`token`, `mode`, `pair`, `prec`, `left`, `right`, `nonassoc`, `start`,
+`rule`).
 
 ---
 
@@ -231,15 +232,21 @@ the lexer relexed.
 
 ---
 
-## `prec left|right tok …`
+## `prec left|right|nonassoc tok …`
 
 Precedence levels, lowest first — the same convention as yacc. Each
 declaration binds tighter than the ones before it:
 
 ```
+prec nonassoc "<" ">"
 prec left "+" "-"
 prec left "*" "/"
 ```
+
+`left` groups `a - b - c` as `(a - b) - c`, `right` as `a - (b - c)`.
+`nonassoc` does not group at all: a second operator of the level right
+after the first one's operand is a syntax error, as Rust's comparisons
+are (`a < b < c` must be parenthesized).
 
 A production's precedence defaults to its last terminal; override it per
 alternative with `@precedence(token)`.

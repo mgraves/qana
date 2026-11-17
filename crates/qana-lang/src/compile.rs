@@ -406,9 +406,19 @@ fn lower(tree: &GreenNode, p: &QanaProds, diags: &mut Vec<QanaDiag>) -> FileIr {
             };
             ir.brackets.push((o, c));
         } else if prod == p.prec_decl {
-            let assoc = match d.node(1).map(|a| a.n.prod as usize) {
-                Some(x) if x == p.assoc_right => Assoc::Right,
-                _ => Assoc::Left,
+            let Some(assoc) = d.node(1).map(|a| a.n.prod as usize) else {
+                // A repaired declaration with no associativity: nothing
+                // to declare.
+                continue;
+            };
+            let assoc = if assoc == p.assoc_left {
+                Assoc::Left
+            } else if assoc == p.assoc_right {
+                Assoc::Right
+            } else if assoc == p.assoc_none {
+                Assoc::NonAssoc
+            } else {
+                unreachable!("`assoc` has three productions")
             };
             let mut ops = Vec::new();
             if let Some(list) = d.node(2) {

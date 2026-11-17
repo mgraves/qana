@@ -8,4 +8,4 @@
 ['=' '|' '*' '+' '?' '%'] @operator
 [':' '@' ','] @punctuation.delimiter
 ['(' ')' '{' '}'] @punctuation.bracket
-['language' 'max_stack' 'keywords' 'token' 'mode' 'pair' 'prec' 'left' 'right' 'start' 'rule'] @keyword
+['language' 'max_stack' 'keywords' 'token' 'mode' 'pair' 'prec' 'left' 'right' 'nonassoc' 'start' 'rule'] @keyword

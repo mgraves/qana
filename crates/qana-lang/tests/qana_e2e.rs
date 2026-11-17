@@ -474,3 +474,41 @@ rule expr =
         _ => panic!("expected a node"),
     }
 }
+
+/// `prec nonassoc`: operators of the level do not chain. Rust's
+/// comparisons and ranges are this way (`a == b == c` is a syntax error,
+/// not `(a == b) == c`): the automaton has no action for a second
+/// operator of the level after the first one's right operand, so the
+/// parse reports it rather than grouping it.
+#[test]
+fn a_nonassoc_level_does_not_chain() {
+    const PREC: &str = r#"
+language Cmp
+
+token WS   = /\s+/ @trivia
+token NUM  = /\d+/ @style(number)
+token LT   = "<" @style(operator)
+token PLUS = "+" @style(operator)
+
+prec nonassoc "<"
+prec left "+"
+
+start expr
+
+rule expr =
+  | Lt:   expr "<" expr
+  | Add:  expr "+" expr
+  | Lit:  NUM
+"#;
+    let tc = QanaToolchain::new();
+    let out = compile_source(&tc, PREC);
+    assert!(out.diags.is_empty(), "grammar compiles: {:?}", out.diags);
+    let (lexer, tables) = certify(&out.def).expect("precedence keeps it deterministic");
+
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, "1 + 2 < 3").unwrap();
+    assert!(session.last_repairs.is_empty(), "one comparison parses");
+    assert_eq!(out.def.sg.prod_name(session.tree().unwrap().prod as usize), "Lt");
+
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, "1 < 2 < 3").unwrap();
+    assert!(!session.last_repairs.is_empty(), "a second comparison is a syntax error, which recovery repairs");
+}

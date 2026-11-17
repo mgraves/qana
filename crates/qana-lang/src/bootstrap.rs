@@ -18,7 +18,7 @@ use qana_grammar::Vocab;
 /// style class of the same name in attribute arguments.)
 pub const RG_KEYWORDS: &[&str] = &[
     "language", "max_stack", "keywords", "token", "mode", "pair", "prec", "left", "right",
-    "start", "rule",
+    "nonassoc", "start", "rule",
 ];
 
 pub struct QanaIds {
@@ -214,6 +214,7 @@ pub struct QanaProds {
     pub tok_str: usize,
     pub assoc_left: usize,
     pub assoc_right: usize,
+    pub assoc_none: usize,
     pub alt: usize,
     pub sym_name: usize,
     pub sym_str: usize,
@@ -342,6 +343,7 @@ pub fn qana_syn_grammar(ids: &QanaIds, vocab: &Vocab) -> (SynGrammar, QanaProds)
 
     let p_assoc_left = sg.prod_named(assoc, "AssocLeft", vec![k("left")]);
     let p_assoc_right = sg.prod_named(assoc, "AssocRight", vec![k("right")]);
+    let p_assoc_none = sg.prod_named(assoc, "AssocNone", vec![k("nonassoc")]);
 
     sg.prod_named(prec_ops, "PrecOpsFirst", vec![n(tok_ref)]);
     sg.prod_named(prec_ops, "PrecOpsMore", vec![n(prec_ops), n(tok_ref)]);
@@ -400,6 +402,7 @@ pub fn qana_syn_grammar(ids: &QanaIds, vocab: &Vocab) -> (SynGrammar, QanaProds)
         tok_str: p_tok_str,
         assoc_left: p_assoc_left,
         assoc_right: p_assoc_right,
+        assoc_none: p_assoc_none,
         alt: p_alt,
         sym_name: p_sym_name,
         sym_str: p_sym_str,

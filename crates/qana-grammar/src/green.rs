@@ -75,7 +75,39 @@ pub struct GreenNode {
     /// Contains error material (an ERROR node or missing token) anywhere
     /// beneath — such nodes never splice; salvage dissolves them.
     pub has_err: bool,
+    /// Where the node's parse began and ended in the LR automaton, when
+    /// a parse beginning there rebuilds it exactly (see [`LrEnds`]):
+    /// `None` when how it ended was bound up with a recovery decision, or
+    /// (a run of a list) it does not begin and end at whole repetition
+    /// units in the list's state. An incremental parse reuses a node only
+    /// where these hold.
+    pub lr_ends: Option<LrEnds>,
     pub children: Vec<GreenChild>,
+    /// How error recovery built this node, when it holds an error and an
+    /// incremental parse can reuse it whole (see
+    /// [`Recovery`](crate::incremental::Recovery)); `None` otherwise.
+    pub recovery: Option<Arc<crate::incremental::Recovery>>,
+}
+
+/// Where a node's parse began and ended in the LR automaton. A parse
+/// that stands in `begin` with the node's tokens next rebuilds the node
+/// exactly, as far as its last reductions: the automaton is deterministic,
+/// and nothing but the node's tokens decided what it did, except the
+/// terminal after them, on which its last reductions (the node's own, and
+/// those of every node ending where it ends) were decided. Each such node
+/// records the state its last reduction was decided in (`end`) and the
+/// production it reduced by (`prod`): the node is rebuilt exactly before
+/// any terminal on which each of those states calls for that reduction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LrEnds {
+    /// The state on top of the stack beneath the node when its parse
+    /// began.
+    pub begin: u16,
+    /// The state its last reduction was decided in.
+    pub end: u16,
+    /// The production that reduction reduced by (for a list, its seed or
+    /// its repetition).
+    pub prod: u16,
 }
 
 impl GreenNode {
@@ -220,7 +252,10 @@ fn build_node(
                 n_toks,
                 // The PNode path parses error-free by construction.
                 has_err: false,
+                // Built outside the incremental parser, with no states.
+                lr_ends: None,
                 children: out,
+                recovery: None,
             })))
         }
     }
@@ -342,6 +377,11 @@ pub fn semantic_eq(a: &GreenNode, b: &GreenNode) -> bool {
         return false;
     }
     if !al && a.prod != b.prod {
+        return false;
+    }
+    // Where a node's parse began, and how recovery built it, are part of
+    // what the parse built: an incremental parse reuses the node by them.
+    if a.lr_ends != b.lr_ends || a.recovery != b.recovery {
         return false;
     }
     let fa = flat_children(a);

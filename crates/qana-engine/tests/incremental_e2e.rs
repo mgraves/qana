@@ -6,7 +6,8 @@ use qana_engine::*;
 use qana_grammar::demo::{demo_grammar, demo_syn_grammar};
 use qana_grammar::demo_ast as ast;
 use qana_grammar::{
-    batch_parse_green, build_lr, AstNode, CompiledLexer, LrTables, NodeRef, SynGrammar,
+    batch_parse_green, build_lr, AstNode, CompiledLexer, GreenChild, GreenNode, LrTables, NodeRef,
+    SynGrammar,
 };
 
 struct Rng(u64);
@@ -243,26 +244,45 @@ fn multi_site_batch_holds_the_gate() {
 }
 
 #[test]
-fn fragile_breakdown_prevents_wrong_splice() {
+fn a_node_is_not_reused_when_the_terminal_after_it_changes() {
     // Multi-line expression: `1 + 2` sits alone on a clean line as a
     // complete Add subtree. Changing the NEXT line's operator from + to *
     // changes how that subtree must associate: batch of `1 + 2 * 9` is
-    // Add(1, Mul(2, 9)). A naive nonterminal splice of the old Add(1, 2)
-    // would yield Mul(Add(1, 2), 9) — the Wagner §6 wrong-splice. The
-    // fragile-production breakdown must prevent it; the full-equality
-    // gate proves it.
+    // Add(1, Mul(2, 9)). Splicing the old Add(1, 2) would yield
+    // Mul(Add(1, 2), 9), the Wagner §6 wrong splice. Its last reduction
+    // read the `+` after it, so with that terminal changed it is not
+    // reused: no node of the old `1 + 2` is in the new tree. The
+    // full-equality gate proves the tree.
     let (lexer, sg, tables) = pipeline();
     let src = "let a =\n1 + 2\n+ 9;\n";
     let mut s = IncSession::new(&lexer, &sg, &tables, src).unwrap();
-    let out = s
-        .edit(&sg, &tables, &[LineEdit {
-            start: 2,
-            end: 3,
-            replacement: vec![Line::new("* 9;", LineTerm::Lf)],
-        }])
-        .unwrap();
+    let mut old_nodes = Vec::new();
+    fn nodes_over(n: &std::sync::Arc<GreenNode>, text: &str, out: &mut Vec<std::sync::Arc<GreenNode>>) {
+        if n.text().trim() == text {
+            out.push(n.clone());
+        }
+        for c in &n.children {
+            if let GreenChild::Node(m) = c {
+                nodes_over(m, text, out);
+            }
+        }
+    }
+    nodes_over(s.tree().unwrap(), "1 + 2", &mut old_nodes);
+    assert!(!old_nodes.is_empty(), "the old tree has the Add(1, 2) subtree");
+    s.edit(&sg, &tables, &[LineEdit {
+        start: 2,
+        end: 3,
+        replacement: vec![Line::new("* 9;", LineTerm::Lf)],
+    }])
+    .unwrap();
     assert_gate(&s, &sg, &tables);
-    assert!(out.stats.breakdowns > 0, "fragile breakdown must trigger: {:?}", out.stats);
+    fn holds(n: &std::sync::Arc<GreenNode>, old: &std::sync::Arc<GreenNode>) -> bool {
+        std::sync::Arc::ptr_eq(n, old)
+            || n.children.iter().any(|c| matches!(c, GreenChild::Node(m) if holds(m, old)))
+    }
+    for old in &old_nodes {
+        assert!(!holds(s.tree().unwrap(), old), "the old `1 + 2` was reused");
+    }
 
     // And assert the SHAPE explicitly via the typed AST: Add(1, Mul(2,9)).
     let tree = s.tree().unwrap();

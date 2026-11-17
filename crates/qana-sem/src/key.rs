@@ -87,7 +87,9 @@ mod tests {
             terms: 0,
             n_toks: 0,
             has_err: false,
+            lr_ends: None,
             children: Vec::<GreenChild>::new(),
+            recovery: None,
         })
     }
 

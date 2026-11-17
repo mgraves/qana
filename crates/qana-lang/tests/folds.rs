@@ -225,6 +225,17 @@ fn kept_folds_are_fresh_folds_rust() {
     }
 }
 
+/// C, through broken and mended code. Folds come from the tokens, so they
+/// are the fresh document's whatever recovery makes of the tree. (Seed 7
+/// used to stop at step 109 on an incremental-parser assertion; see
+/// `edit_scripts.rs`.)
+#[test]
+fn kept_folds_are_fresh_folds_c() {
+    for seed in [7, 11] {
+        kept_equals_fresh(C, C_DEMO, seed, 150);
+    }
+}
+
 /// C's directives are a line-bounded mode: one ends with its line and
 /// folds nothing, unless a backslash carries it on, and then the whole
 /// directive is one fold, named for the style of the `#` that opens it.

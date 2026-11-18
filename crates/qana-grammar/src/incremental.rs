@@ -26,7 +26,7 @@ use crate::green::{
 use crate::lr::{LrAct, LrTables};
 use crate::model::TokenId;
 use crate::syn::{SynGrammar, EOF};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 /// One input item of the sentential form.
@@ -94,6 +94,11 @@ struct ListBuilder {
     /// The state its last reduction (seed or unit) was decided in, and the
     /// production it reduced by.
     last: (u16, u16),
+    /// The upper levels of the reused lists it absorbed, by their first
+    /// child: a level regrouped from the same children, with the same
+    /// ends, is the same node, and is handed back rather than built again
+    /// (see [`ListBuilder::finalize`]).
+    uppers: HashMap<usize, Arc<GreenNode>>,
 }
 
 /// A piece of a list under construction.
@@ -148,7 +153,7 @@ fn is_structure(c: &GreenChild) -> bool {
 
 impl ListBuilder {
     fn new(nt: u16, seed_settled: bool, last: (u16, u16)) -> Self {
-        ListBuilder { nt, pieces: Vec::new(), seed_settled, last }
+        ListBuilder { nt, pieces: Vec::new(), seed_settled, last, uppers: HashMap::new() }
     }
 
     /// Absorb a salvaged LIST or RUN node whose parse began where this
@@ -168,6 +173,13 @@ impl ListBuilder {
             };
             self.pieces.push(Piece::Leaf(run));
             return;
+        }
+        // An upper level (or the list itself) over runs only: remembered,
+        // in case the list regroups the same runs into it.
+        if let Some(GreenChild::Node(first)) = n.children.first() {
+            if n.children.iter().all(|c| matches!(c, GreenChild::Node(m) if m.prod == RUN_PROD)) {
+                self.uppers.insert(Arc::as_ptr(first) as usize, n.clone());
+            }
         }
         for c in &n.children {
             match c {
@@ -205,6 +217,26 @@ impl ListBuilder {
     /// holding a piece that entered unsettled.
     fn finalize(self, g: &SynGrammar, t: &LrTables, s0: u16, c: u16) -> Arc<GreenNode> {
         let nt = self.nt;
+        // A node grouping exactly the children `children` with `ends`, if
+        // a reused list already had one: the same node, so whatever keeps
+        // a subtree by identity (the parse that splices it again, an
+        // editor's structure) keeps it across the edit. An edit inside a
+        // list of 20,000 elements builds the levels on its path again, and
+        // not the hundreds beside it.
+        let uppers = &self.uppers;
+        let reused = |prod: u16, children: &[Arc<GreenNode>], ends: Option<LrEnds>| {
+            let old = uppers.get(&(Arc::as_ptr(children.first()?) as usize))?;
+            let same = old.prod == prod
+                && old.nt == nt
+                && old.lr_ends == ends
+                && old.children.len() == children.len()
+                && old.children.iter().zip(children.iter()).all(
+                    |(o, n): (&GreenChild, &Arc<GreenNode>)| {
+                        matches!(o, GreenChild::Node(m) if Arc::ptr_eq(m, n))
+                    },
+                );
+            same.then(|| old.clone())
+        };
         let shape = *t.lists.get(&nt).expect("a list builder builds a list nonterminal");
         let seed_len = g.prods[shape.seed as usize].rhs.len();
         let alpha_len = g.prods[shape.cons as usize].rhs.len() - 1;
@@ -376,12 +408,15 @@ impl ListBuilder {
                     }
                     _ => None,
                 };
-                let children = chunk.iter().cloned().map(GreenChild::Node).collect();
-                next.push(make_node(nt, RUN_PROD, children, ends));
+                next.push(reused(RUN_PROD, chunk, ends).unwrap_or_else(|| {
+                    make_node(nt, RUN_PROD, chunk.iter().cloned().map(GreenChild::Node).collect(), ends)
+                }));
             }
             level = next;
         }
-        make_node(nt, LIST_PROD, level.into_iter().map(GreenChild::Node).collect(), list_ends)
+        reused(LIST_PROD, &level, list_ends).unwrap_or_else(|| {
+            make_node(nt, LIST_PROD, level.into_iter().map(GreenChild::Node).collect(), list_ends)
+        })
     }
 }
 
@@ -1926,9 +1961,10 @@ pub fn incremental_parse(
                 // nothing can be set aside for it, a repair keeping it must
                 // get as far as deleting it would.
                 let found = found.filter(|f| {
-                    !la_wanted_below
-                        || unwind.is_some()
-                        || f.reached >= 1 + simulate(g, t, &states, &far[1..])
+                    !la_wanted_below || unwind.is_some() || {
+                        let deleting = 1 + simulate(g, t, &states, &far[1..]);
+                        f.reached >= deleting
+                    }
                 });
                 if std::env::var_os("QANA_TRACE_REPAIR").is_some() {
                     let top = match stack.last() {

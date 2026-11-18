@@ -76,7 +76,11 @@ state its last unit's symbols lead to from `c`, computed when the list is
 finalized. The chunk holding the seed began with no list open, so no open
 list can continue with it: it has no `lr_ends`, and neither does a chunk
 cut inside an oversized unit or holding an unsettled piece. A whole list
-is reused through its GOTO from the state it began in.
+is reused through its GOTO from the state it began in. An upper level
+regrouped from the same children, with the same ends, is the node it
+was: in a list of 20,000 elements only the levels on an edit's path are
+new, and the others stay the subtrees they were for whatever keeps
+subtrees by identity (an editor's outline and folds).
 
 ## Nodes carrying an error
 

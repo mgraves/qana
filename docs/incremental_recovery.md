@@ -119,19 +119,29 @@ precede its first symbol), or when it made no repair of its own.
 
 ## Ranking repairs
 
-A repair is up to three steps at the error, each inserting a token before
-the lookahead or deleting it (`search_repairs`). A repair is complete when
-the parse then validates at least one of the next K terminals; one that
-does not is extended by a step (repairs leaving the same stack at the same
-point are extended once). Of the complete repairs, the winner is the one
-under which the parse gets furthest through the next `FAR` terminals, a
-deleted terminal counting as passed, and then:
+A repair is up to three steps at the error (`search_repairs`), each one of:
+
+* inserting a token before the lookahead;
+* deleting the lookahead;
+* setting the construct in progress aside as error material, its top
+  entries popped until a state beneath acts on the lookahead (only as a
+  first step, and only for a lookahead a construct beneath wants; see
+  below).
+
+A repair is complete when the parse then validates at least one of the
+next K terminals; one that does not is extended by a step (repairs leaving
+the same stack at the same point are extended once). Of the complete
+repairs, the winner is the one under which the parse gets furthest
+through the next `FAR` terminals, a deleted terminal counting as passed,
+and then:
 
 1. the cheaper (fewer steps);
-2. the one deleting fewer of the user's tokens;
-3. the one leaving the stack shallower (a fabricated body or parameter
+2. the one inserting fewer brackets;
+3. the one giving up fewer of the user's terminals (deleted, or in the
+   entries set aside);
+4. the one leaving the stack shallower (a fabricated body or parameter
    list absorbs unboundedly);
-4. the smaller sequence, insertions before deletions and tokens in order,
+5. the smaller sequence, insertions before deletions and tokens in order,
    so the choice never depends on the order repairs were found.
 
 A complete repair reaching the end of the `FAR` terminals cannot be beaten
@@ -144,26 +154,39 @@ validates `, c ]` and then closes the array at the real `]`, and the
 rest of a 20,000-element table broke into 200 repairs. Replacing the `,`
 costs a step more and validates everything after it.
 
+An inserted bracket is a claim about structure past the window: every
+real bracket after it pairs differently. After `for p in v {x` and before
+`match p { … }`, inserting `;` and inserting `}` read equally far, and
+`}` leaves the stack shallower; but it closes the loop's body, the loop's
+own `}` then closes the function, and the rest of the file came apart.
+So fewer inserted brackets comes before the depth.
+
 A terminal shifted in a permissive state, one that shifts or reduces on
 every terminal the grammar uses except the closing brackets (a token
-tree's), validates nothing: the simulation feeds it on without counting
-it. Otherwise inserting `! {` after a stray name would make the rest of
-the file valid inside a macro invocation, and a token tree in the way
-(`#[serde(rename = "…")]` after `struct P {x`) would end the reading of
-every candidate at the same place, leaving the choice between `: T }` and
-`: T ,` to the tie-breaks. `LrTables::permissive` is computed with the
-tables, from the grammar's bracket pairs.
+tree's), validates only what its brackets do. Inside a nest of token
+trees one of whose openers the repair inserted it validates nothing, and
+the simulation feeds it on without counting it: otherwise inserting `! (`
+after a stray name would make the rest of the file valid inside a macro
+invocation, the real brackets in it nested trees of their own. Inside
+trees the user opened it is read as written, so a macro call in the way
+(`debug_assert!(…)`, `#[serde(rename = "…")]`) neither ends a reading
+nor leaves it short of the end of the window, where the search stops.
+`LrTables::permissive` is computed with the tables, from the grammar's
+bracket pairs.
 
 A lookahead some construct beneath the top still wants (a closer, a
 separator) is never deleted: deleting the `}` of a struct hands what
 follows to the member in progress, a catastrophe the window cannot see.
-If deleting it would get further than the best repair keeping it, the
-construct in progress is set aside as error material instead. A bracket
-opened on the stack and not yet closed holds everything up to its closer:
-nothing beneath it wants a token that is not that closer
-(`LrTables::opens` marks the states entered by an opener). In
-`x[b, c]` inside an array, the `,` belongs to the index, whatever the
-array would take.
+Setting the construct in progress aside is a step of its own, ranked with
+the rest: after `}x` before an impl's closing `}`, setting `x` aside
+reads on as written, where inserting `! {` makes the real `}` the closer
+of a fabricated macro call and leaves the impl open. Where nothing can be
+set aside, a repair keeping the lookahead must get as far as deleting it
+would, and otherwise the lookahead is deleted. A bracket opened on the
+stack and not yet closed holds everything up to its closer: nothing
+beneath it wants a token that is not that closer (`LrTables::opens` marks
+the states entered by an opener). In `x[b, c]` inside an array, the `,`
+belongs to the index, whatever the array would take.
 
 ## Material in front of a node
 

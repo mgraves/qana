@@ -684,7 +684,7 @@ fn peek_terms(input: &VecDeque<Item>, k: usize) -> Vec<TokenId> {
 /// States-only LR run over a terminal feed; returns how many feed tokens
 /// were consumed before erroring (Accept counts as consuming the rest).
 fn simulate(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) -> usize {
-    simulate_depth(g, t, base, feed).0
+    simulate_depth(g, t, base, &[], feed).0
 }
 
 /// Like [`simulate`], but also reports the stack depth WHERE THE FEED
@@ -695,15 +695,24 @@ fn simulate(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) -> usi
 /// after `(`, inside a fabricated parameter list) — both of which
 /// absorb unboundedly. The final depth is the tell.
 ///
-/// What it counts is the terminals the feed validates: one shifted in a
+/// What it counts is the terminals the feed validates. One shifted in a
 /// permissive state (a token tree's, which takes any token) validates
-/// nothing, and is fed on without being counted. Inserting `! {` after a
-/// stray name would otherwise make every token after it valid, inside a
-/// macro invocation that swallows the rest of the file; and a token tree
-/// in the way (`#[serde(…)]`) would otherwise end a reading that goes on
-/// past it.
-fn simulate_depth(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) -> (usize, usize) {
+/// only what the brackets around it do: a tree the user opened is read
+/// as written, but inside one opened by a token the repair inserted
+/// (`fab`, the stack positions of the openers it inserted), however
+/// deeply, a terminal validates nothing, and is fed on without being
+/// counted. Inserting `! (` after a stray name would otherwise make every
+/// token after it valid, inside a macro invocation that swallows the
+/// rest of the file, the real brackets in it nested trees of its own.
+fn simulate_depth(
+    g: &SynGrammar,
+    t: &LrTables,
+    base: &[u16],
+    fab: &[usize],
+    feed: &[TokenId],
+) -> (usize, usize) {
     let mut states = base.to_vec();
+    let mut fab = fab.to_vec();
     let mut i = 0usize;
     let mut counted = 0usize;
     let mut steps = 0usize;
@@ -712,7 +721,8 @@ fn simulate_depth(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) 
         let s = *states.last().unwrap();
         match t.action[s as usize].get(&feed[i]).copied() {
             Some(LrAct::Shift(n)) => {
-                if !t.permissive[s as usize] {
+                let validates = !t.permissive[s as usize] || !in_fabricated_tree(t, &states, &fab);
+                if validates {
                     counted += 1;
                 }
                 states.push(n);
@@ -725,6 +735,7 @@ fn simulate_depth(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) 
                     return (counted, states.len());
                 }
                 states.truncate(states.len() - k);
+                fab.retain(|&at| at < states.len());
                 let top = *states.last().unwrap();
                 match t.goto_[top as usize].get(&prod.lhs) {
                     Some(&n) => states.push(n),
@@ -738,9 +749,37 @@ fn simulate_depth(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) 
     (counted, states.len())
 }
 
-/// Apply one insertion on a cloned state stack (reduces, then the shift).
-fn apply_insert_sim(g: &SynGrammar, t: &LrTables, base: &[u16], x: TokenId) -> Option<Vec<u16>> {
+/// Whether the top of `states` stands in a nest of token trees one of
+/// whose openers the repair inserted (`fab`): walking down through the
+/// token trees' states and openers, to the first state that is neither.
+fn in_fabricated_tree(t: &LrTables, states: &[u16], fab: &[usize]) -> bool {
+    if fab.is_empty() {
+        return false;
+    }
+    for (at, &st) in states.iter().enumerate().rev() {
+        let opener = t.opens[st as usize].is_some();
+        if opener && fab.contains(&at) {
+            return true;
+        }
+        if !opener && !t.permissive[st as usize] {
+            return false;
+        }
+    }
+    false
+}
+
+/// Apply one insertion on a cloned state stack (reduces, then the shift),
+/// with `fab` the stack positions of the openers the repair has inserted:
+/// those its reductions close are dropped, and `x` is added if it opens.
+fn apply_insert_sim(
+    g: &SynGrammar,
+    t: &LrTables,
+    base: &[u16],
+    fab: &[usize],
+    x: TokenId,
+) -> Option<(Vec<u16>, Vec<usize>)> {
     let mut states = base.to_vec();
+    let mut fab = fab.to_vec();
     let mut steps = 0usize;
     loop {
         steps += 1;
@@ -751,7 +790,10 @@ fn apply_insert_sim(g: &SynGrammar, t: &LrTables, base: &[u16], x: TokenId) -> O
         match t.action[s as usize].get(&x).copied() {
             Some(LrAct::Shift(n)) => {
                 states.push(n);
-                return Some(states);
+                if matches!(g.bracket(x), Some((_, true))) {
+                    fab.push(states.len() - 1);
+                }
+                return Some((states, fab));
             }
             Some(LrAct::Reduce(p)) => {
                 let prod = &g.prods[p as usize];
@@ -760,6 +802,7 @@ fn apply_insert_sim(g: &SynGrammar, t: &LrTables, base: &[u16], x: TokenId) -> O
                     return None;
                 }
                 states.truncate(states.len() - k);
+                fab.retain(|&at| at < states.len());
                 let top = *states.last().unwrap();
                 match t.goto_[top as usize].get(&prod.lhs) {
                     Some(&n) => states.push(n),
@@ -772,13 +815,16 @@ fn apply_insert_sim(g: &SynGrammar, t: &LrTables, base: &[u16], x: TokenId) -> O
 }
 
 /// One step of a repair: a token pretended into existence before the
-/// lookahead, or the lookahead skipped as error material. Insertions order
+/// lookahead, the lookahead skipped as error material, or the construct in
+/// progress set aside as error material (its top `k` stack entries) so a
+/// token an enclosing construct wants can act for it. Insertions order
 /// first, so that between repairs equal in every other respect the one
 /// keeping the user's tokens wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Op {
     Insert(TokenId),
     Delete,
+    Unwind(usize),
 }
 
 /// Whether a construct beneath the top of `states` still wants `x` (a
@@ -807,26 +853,32 @@ struct Found {
     /// How far into `far` the parse gets: the terminals deleted and those
     /// the parse then validates (see [`simulate_depth`]).
     reached: usize,
+    /// The brackets it inserts.
+    brackets: usize,
+    /// The user's terminals it gives up: those it deletes, and those of
+    /// the entries it sets aside.
     deletes: usize,
     /// The stack depth after the window's terminals.
     depth: usize,
 }
 
 impl Found {
-    /// Further first, then cheaper, then keeping more of the user's
-    /// tokens, then leaving the following text shallower, then the
-    /// smaller sequence (determinism).
+    /// Further first, then cheaper, then inserting fewer brackets, then
+    /// keeping more of the user's tokens, then leaving the following text
+    /// shallower, then the smaller sequence (determinism).
     fn beats(&self, other: &Found) -> bool {
         use std::cmp::Reverse;
         (
             self.reached,
             Reverse(self.ops.len()),
+            Reverse(self.brackets),
             Reverse(self.deletes),
             Reverse(self.depth),
             Reverse(&self.ops),
         ) > (
             other.reached,
             Reverse(other.ops.len()),
+            Reverse(other.brackets),
             Reverse(other.deletes),
             Reverse(other.depth),
             Reverse(&other.ops),
@@ -834,14 +886,16 @@ impl Found {
     }
 }
 
-/// Bounded search for a REPAIR at the error: up to three steps, each
-/// inserting a token before the lookahead or deleting it (`Op`), that let
-/// the parse validate at least one of the next `window` terminals after
-/// them — the mini-CPCT+ core. A repair that does is complete; one that
-/// does not is extended by a step. Of the complete ones, the one under
-/// which the parse gets furthest through `far` (the next `FAR` terminals)
-/// wins, a deleted terminal counting as passed; then the cheaper, the one
-/// deleting fewer, the one leaving the stack shallower, and the smaller
+/// Bounded search for a REPAIR at the error: up to three steps (`Op`),
+/// each inserting a token before the lookahead, deleting it, or (first)
+/// setting the construct in progress aside, that let the parse validate
+/// at least one of the next `window` terminals after them — the mini-
+/// CPCT+ core. A repair that does is complete; one that does not is
+/// extended by a step. Of the complete ones, the one under which the
+/// parse gets furthest through `far` (the next `FAR` terminals) wins, a
+/// deleted terminal counting as passed; then the cheaper, the one
+/// inserting fewer brackets, the one giving up fewer of the user's
+/// terminals, the one leaving the stack shallower, and the smaller
 /// sequence.
 ///
 /// The window says whether a repair works; it often cannot say which.
@@ -853,33 +907,50 @@ impl Found {
 /// them. And the cheapest repair can be the wrong one: in
 /// `[a, x[b, c], d]` (an `x` typed into an array of pairs) inserting `]`
 /// before the index's `,` validates `, c ]` and then closes the array at
-/// the real `]`; deleting `, c` costs a step more and validates everything
-/// after it. So the window decides validity, and the far reading decides
+/// the real `]`; replacing the `,` costs a step more and validates
+/// everything after it. So the window decides validity, and the far reading decides
 /// between valid repairs of any cost.
 ///
+/// An inserted bracket is a claim about structure past the window: every
+/// real bracket after it pairs differently. After `for p in v {x` and
+/// before `match p { … }`, inserting `;` and inserting `}` both read as
+/// far as the window goes, and `}` leaves the stack shallower; but it
+/// closes the loop's body, the loop's own `}` then closes the function,
+/// and the rest of the file comes apart. Between repairs reading equally
+/// far at equal cost, the one inserting fewer brackets wins.
+///
 /// A token a construct beneath still wants is never deleted
-/// ([`wanted_below`]); the caller weighs deleting the lookahead against
-/// the best repair itself when it is. A complete repair reaching the end
-/// of `far` cannot be beaten by a costlier one, and ends the search.
+/// ([`wanted_below`]). Setting the construct in progress aside instead
+/// (`unwind`: how many entries, holding how many terminals) is a step
+/// like the others, ranked by how far the parse then gets: after `}x`
+/// before an impl's closing `}`, setting `x` aside reads on as written,
+/// where inserting `! {` makes the real `}` the closer of a fabricated
+/// macro call and leaves the impl open. A complete repair reaching the
+/// end of `far` cannot be beaten by a costlier one, and ends the search.
 fn search_repairs(
     g: &SynGrammar,
     t: &LrTables,
     base: &[u16],
     far: &[TokenId],
     window: usize,
+    unwind: Option<(usize, usize)>,
 ) -> Option<Found> {
     // Every step the configuration takes is tried: none is left out for
     // its token number. Repairs that leave the parse in the same
     // configuration (`: u8` and `: r#a` both end a type) have the same
     // future, so only the first (in step order) goes on to the next
     // length. The budget bounds the work on a pathological table.
-    let mut frontier: Vec<(Vec<Op>, Vec<u16>, usize)> = vec![(Vec::new(), base.to_vec(), 0)];
-    let mut seen: std::collections::HashSet<(Vec<u16>, usize)> = std::collections::HashSet::new();
+    // A configuration: the steps so far, the stack, the openers they
+    // inserted (stack positions), and how many of `far` they deleted.
+    type Config = (Vec<Op>, Vec<u16>, Vec<usize>, usize);
+    let mut frontier: Vec<Config> = vec![(Vec::new(), base.to_vec(), Vec::new(), 0)];
+    let mut seen: std::collections::HashSet<(Vec<u16>, Vec<usize>, usize)> =
+        std::collections::HashSet::new();
     let mut budget = 4000usize;
     let mut best: Option<Found> = None;
     for _len in 1..=3usize {
-        let mut next: Vec<(Vec<Op>, Vec<u16>, usize)> = Vec::new();
-        for (ops, states, pos) in &frontier {
+        let mut next: Vec<Config> = Vec::new();
+        for (ops, states, fab, pos) in &frontier {
             let s = *states.last().unwrap();
             let mut steps: Vec<Op> = t.action[s as usize]
                 .keys()
@@ -890,36 +961,51 @@ fn search_repairs(
             if *pos < far.len() && !wanted_below(g, t, states, far[*pos]) {
                 steps.push(Op::Delete);
             }
+            if let (true, Some((k, _))) = (ops.is_empty(), unwind) {
+                steps.push(Op::Unwind(k));
+            }
             steps.sort_unstable();
             for step in steps {
                 if budget == 0 {
                     break;
                 }
                 budget -= 1;
-                let (states2, pos2) = match step {
-                    Op::Insert(c) => match apply_insert_sim(g, t, states, c) {
-                        Some(states2) => (states2, *pos),
+                let (states2, fab2, pos2) = match step {
+                    Op::Insert(c) => match apply_insert_sim(g, t, states, fab, c) {
+                        Some((states2, fab2)) => (states2, fab2, *pos),
                         None => continue,
                     },
-                    Op::Delete => (states.clone(), *pos + 1),
+                    Op::Delete => (states.clone(), fab.clone(), *pos + 1),
+                    Op::Unwind(k) => (states[..states.len() - k].to_vec(), Vec::new(), *pos),
                 };
                 let mut ops2 = ops.clone();
                 ops2.push(step);
                 let rest = &far[pos2..];
                 let (score, depth) =
-                    simulate_depth(g, t, &states2, &rest[..rest.len().min(window)]);
+                    simulate_depth(g, t, &states2, &fab2, &rest[..rest.len().min(window)]);
                 if score >= 1 {
                     let found = Found {
-                        reached: pos2 + simulate_depth(g, t, &states2, rest).0,
-                        deletes: ops2.iter().filter(|&&o| o == Op::Delete).count(),
+                        reached: pos2 + simulate_depth(g, t, &states2, &fab2, rest).0,
+                        brackets: ops2
+                            .iter()
+                            .filter(|o| matches!(o, Op::Insert(x) if g.bracket(*x).is_some()))
+                            .count(),
+                        deletes: ops2
+                            .iter()
+                            .map(|o| match o {
+                                Op::Insert(_) => 0,
+                                Op::Delete => 1,
+                                Op::Unwind(_) => unwind.map_or(0, |(_, terms)| terms),
+                            })
+                            .sum(),
                         ops: ops2,
                         depth,
                     };
                     if best.as_ref().is_none_or(|b| found.beats(b)) {
                         best = Some(found);
                     }
-                } else if seen.insert((states2.clone(), pos2)) {
-                    next.push((ops2, states2, pos2));
+                } else if seen.insert((states2.clone(), fab2.clone(), pos2)) {
+                    next.push((ops2, states2, fab2, pos2));
                 }
             }
         }
@@ -1519,6 +1605,29 @@ pub fn incremental_parse(
         }};
     }
 
+    // Set the top `k` stack entries aside as error material, each in an
+    // ERROR node of its own, in front of what is pending.
+    macro_rules! unwind_entries {
+        ($k:expr) => {{
+            repairs.push(Repair { at_terminal: consumed_terms, kind: RepairKind::Unwound });
+            for _ in 0..$k {
+                let e = stack.pop().expect("an entry to set aside");
+                let c = states.pop().expect("an entry has its state");
+                let s0 = *states.last().expect("the start state stays");
+                let kids = entry_children(e, g, t, s0, c);
+                pending.insert(
+                    0,
+                    GreenChild::Node(make_node(
+                        crate::green::ERROR_NT,
+                        crate::green::ERROR_PROD,
+                        kids,
+                        None,
+                    )),
+                );
+            }
+        }};
+    }
+
     macro_rules! delete_la {
         () => {{
             match input.pop_front() {
@@ -1767,16 +1876,58 @@ pub fn incremental_parse(
                 // K-terminal validation is exactly what a repair
                 // spiral exploits (and the BFS is the expensive part
                 // of a repair storm).
+                // Wanted below: how far to set the in-progress item aside
+                // (pop into an error node) for the wanted token to act for
+                // its enclosing construct. EMPTY lists are transparent — an
+                // ε-seeded builder (the ptrs list of `struct P { i }`'s
+                // half-born declarator) protects nothing. A list WITH
+                // elements pops only as the LANDING step — when the wanted
+                // token acts directly beneath it, the list is the broken
+                // construct's own sub-structure (the spec+ holding `int` in
+                // `struct P { int }`). The probe never hunts PAST a
+                // non-empty list: elements at an outer level are good
+                // parses (a statement list, a field list of completed
+                // fields), and a wanted token belonging somewhere deeper
+                // never justifies dumping them.
+                let unwind_depth = match (la_wanted_below, la) {
+                    (true, Some(x)) => {
+                        let mut k = 0usize;
+                        loop {
+                            if k >= stack.len() {
+                                break None;
+                            }
+                            let nonempty_list = match &stack[stack.len() - 1 - k].sym {
+                                SymSlot::List(b) => !b.pieces.is_empty(),
+                                _ => false,
+                            };
+                            k += 1;
+                            let exposed = states[states.len() - 1 - k];
+                            if t.action[exposed as usize].contains_key(&x) {
+                                break Some(k);
+                            }
+                            if nonempty_list {
+                                break None;
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                // The terminals the entries set aside took.
+                let unwind = unwind_depth.map(|k| {
+                    let first = stack[stack.len() - k].span.at.consumed_terms;
+                    (k, consumed_terms.saturating_sub(first))
+                });
                 let found = if escalated || at_list_boundary {
                     None
                 } else {
-                    search_repairs(g, t, &states, &far, peeked.len())
+                    search_repairs(g, t, &states, &far, peeked.len(), unwind)
                 };
-                // Deleting a wanted lookahead is weighed, never made: if
-                // it would get further than the best repair keeping it,
-                // the in-progress item is set aside instead.
+                // Deleting a wanted lookahead is weighed, never made. Where
+                // nothing can be set aside for it, a repair keeping it must
+                // get as far as deleting it would.
                 let found = found.filter(|f| {
                     !la_wanted_below
+                        || unwind.is_some()
                         || f.reached >= 1 + simulate(g, t, &states, &far[1..])
                 });
                 if std::env::var_os("QANA_TRACE_REPAIR").is_some() {
@@ -1822,6 +1973,7 @@ pub fn incremental_parse(
                                 .map(|o| match o {
                                     Op::Insert(x) => g.term_name(*x).to_string(),
                                     Op::Delete => "-".to_string(),
+                                    Op::Unwind(k) => format!("^{k}"),
                                 })
                                 .collect::<Vec<_>>(),
                             f.reached
@@ -1843,69 +1995,18 @@ pub fn incremental_parse(
                                     expose_terminal!();
                                     delete_la!();
                                 }
+                                Op::Unwind(k) => unwind_entries!(k),
                             }
                         }
                     }
-                    _ => {
-                        // Wanted below and no completing insert: set
-                        // the in-progress item aside (pop into an
-                        // error node) until the wanted token can act
-                        // for its enclosing construct. EMPTY lists
-                        // are transparent — an ε-seeded builder (the
-                        // ptrs list of `struct P { i }`'s half-born
-                        // declarator) protects nothing. A list WITH
-                        // elements pops only as the LANDING step —
-                        // when the wanted token acts directly beneath
-                        // it, the list is the broken construct's own
-                        // sub-structure (the spec+ holding `int` in
-                        // `struct P { int }`). The probe never hunts
-                        // PAST a non-empty list: elements at an outer
-                        // level are good parses (a statement list, a
-                        // field list of completed fields), and a
-                        // wanted token belonging somewhere deeper
-                        // never justifies dumping them.
-                        let mut popped = false;
-                        if let (true, Some(x)) = (la_wanted_below, la) {
-                            let mut k = 0usize;
-                            let depth = loop {
-                                if k >= stack.len() {
-                                    break None;
-                                }
-                                let nonempty_list = match &stack[stack.len() - 1 - k].sym {
-                                    SymSlot::List(b) => !b.pieces.is_empty(),
-                                    _ => false,
-                                };
-                                k += 1;
-                                let exposed = states[states.len() - 1 - k];
-                                if t.action[exposed as usize].contains_key(&x) {
-                                    break Some(k);
-                                }
-                                if nonempty_list {
-                                    break None;
-                                }
-                            };
-                            if let Some(k) = depth {
-                                repairs.push(Repair {
-                                    at_terminal: consumed_terms,
-                                    kind: RepairKind::Unwound,
-                                });
-                                for _ in 0..k {
-                                    let e = stack.pop().expect("counted above");
-                                    let c = states.pop().expect("an entry has its state");
-                                    let s0 = *states.last().expect("the start state stays");
-                                    let kids = entry_children(e, g, t, s0, c);
-                                    pending.insert(
-                                        0,
-                                        GreenChild::Node(make_node(crate::green::ERROR_NT, crate::green::ERROR_PROD, kids, None)),
-                                    );
-                                }
-                                popped = true;
-                            }
-                        }
-                        if !popped {
-                            delete_la!(); // skip: guaranteed progress
-                        }
-                    }
+                    // No repair: set the in-progress item aside where a
+                    // wanted token can act for its enclosing construct,
+                    // and otherwise skip the lookahead (guaranteed
+                    // progress).
+                    None => match unwind_depth {
+                        Some(k) => unwind_entries!(k),
+                        None => delete_la!(),
+                    },
                 }
             }
         }};

@@ -205,20 +205,26 @@ pub struct Painter {
     /// Emitted (overlaid) runs per line — what the editor is showing.
     shown: Vec<Vec<Run>>,
     rev: u64,
-    /// Per-line widths (chars incl. terminator), maintained by splice —
-    /// the identity-cached overlay path's coordinate backbone.
+    /// Per-line widths (chars incl. terminator), maintained by splice on
+    /// every update — the identity-cached overlay path's coordinate
+    /// backbone, and how it knows where the text after an edit was.
     widths: Vec<u32>,
     /// The identity-cached overlay: per item in document order, its
     /// paint key and derived marks (item-relative spans). An item whose
     /// `(frag_uid, res_uid)` pair reappears re-uses its marks by `Arc`
     /// clone; only misses re-derive, and only their lines repaint.
     /// `None` until the first typeless-grammar update populates it.
-    cache: Option<Vec<(qana_sem::PaintKey, Arc<Vec<((u32, u32), u8)>>)>>,
+    cache: Option<Vec<(qana_sem::PaintKey, ItemMarks)>>,
     /// How many items the last update had to look up or derive: the
     /// window between the items an edit left in place. See
     /// [`Painter::window_items`].
     window_items: usize,
 }
+
+/// One item's marks: (span, bits), spans item-relative, in document
+/// order. Shared by `Arc` between frames while the item's paint identity
+/// holds.
+type ItemMarks = Arc<Vec<((u32, u32), u8)>>;
 
 /// One item's marks from its paint facts — the bits mapping shared by
 /// the identity-cached path (and gated to equal the composed-view path
@@ -241,18 +247,24 @@ fn item_marks(ip: &qana_sem::ItemPaint) -> Vec<((u32, u32), u8)> {
         };
         out.push((span, bits));
     }
+    // In document order, so that a line finds the marks that start on it
+    // by a binary search instead of reading all of a large item's.
+    out.sort_by_key(|&((start, _), _)| start);
     out
 }
 
 impl Painter {
     /// Paint everything once. `db` brings wave 1; `None` is the pure
-    /// lexical painter (the first frame of a huge file, or a grammar
-    /// with no binding tier).
+    /// lexical painter (the first frame of a huge file). A database that
+    /// declares nothing (no binding, no type tier: see
+    /// [`SemDb::declares_nothing`]) has no wave 1 to bring, and paints as
+    /// `None` does, here and in every update.
     pub fn new(
         session: &IncSession<'_>,
         styles: &Styles,
         db: Option<(&mut SemDb, &str)>,
     ) -> (Painter, Paint) {
+        let db = db.filter(|(db, _)| !db.declares_nothing());
         let widths = line_widths(&session.buf);
         let base: Vec<Vec<Run>> = session
             .buf
@@ -299,8 +311,11 @@ impl Painter {
     ) -> PaintDelta {
         self.rev += 1;
         let mut delta = PaintDelta { rev: self.rev, splice: None, repaints: Vec::new() };
+        let db = db.filter(|(db, _)| !db.declares_nothing());
 
         // ---- wave 0: splice the damaged window ----
+        // (How many chars the window's lines held before the edit.)
+        let mut old_chars = 0u32;
         let window = if damage.regions.is_empty() {
             None
         } else {
@@ -319,13 +334,22 @@ impl Painter {
                 })
                 .collect();
             self.base.splice(old_lo..old_hi, fresh.clone());
+            old_chars = self.widths[old_lo..old_hi].iter().sum();
+            let fresh_widths: Vec<u32> = (new_lo..new_hi)
+                .map(|li| {
+                    let l = &session.buf.lines[li];
+                    (l.text.len() + l.term.as_str().len()) as u32
+                })
+                .collect();
+            self.widths.splice(old_lo..old_hi, fresh_widths);
             Some((old_lo, old_hi, new_lo, new_hi))
         };
+        debug_assert_eq!(self.widths.len(), self.base.len());
 
         match db {
             None => {
-                // Lexical-only consumer: shown IS base; the delta is
-                // the splice alone. (Semantic bits, if any were shown
+                // Lexical-only consumer, or a database that declares
+                // nothing: shown IS base; the delta is the splice alone. (Semantic bits, if any were shown
                 // before, are the caller's concern — mixing modes on
                 // one painter is not supported.)
                 if let Some((old_lo, old_hi, new_lo, new_hi)) = window {
@@ -343,7 +367,7 @@ impl Painter {
                 // O(window + changed items). What still grows with the
                 // document is flat: an identity compared per item, and
                 // an addition per line for the line starts.
-                self.overlay_via_items(session, window, db, uri, &mut delta);
+                self.overlay_via_items(window, old_chars, db, uri, &mut delta);
             }
             Some((db, uri)) => {
                 let trace = std::env::var_os("QANA_TRACE_EDIT").is_some();
@@ -409,34 +433,18 @@ impl Painter {
 
     /// The identity-cached overlay path (typeless grammars). See the
     /// dispatch site in [`update`](Self::update) for the contract.
-    #[allow(clippy::too_many_arguments)]
+    /// `old_chars` is how many chars the damaged window's lines held
+    /// before the edit (`widths` already holds what they hold now).
     fn overlay_via_items(
         &mut self,
-        session: &IncSession<'_>,
         window: Option<(usize, usize, usize, usize)>,
+        old_chars: u32,
         db: &mut SemDb,
         uri: &str,
         delta: &mut PaintDelta,
     ) {
         let trace = std::env::var_os("QANA_TRACE_EDIT").is_some();
         let t0 = StageClock::start(trace);
-
-        // Widths follow the window by splice; a missing or drifted
-        // cache rebuilds them whole (first update, or a resync).
-        match window {
-            Some((old_lo, old_hi, new_lo, new_hi))
-                if self.widths.len() == self.base.len() + (old_hi - old_lo) - (new_hi - new_lo) =>
-            {
-                let fresh: Vec<u32> = (new_lo..new_hi)
-                    .map(|li| {
-                        let l = &session.buf.lines[li];
-                        (l.text.len() + l.term.as_str().len()) as u32
-                    })
-                    .collect();
-                self.widths.splice(old_lo..old_hi, fresh);
-            }
-            _ => self.widths = line_widths(&session.buf),
-        }
         debug_assert_eq!(self.widths.len(), self.base.len());
 
         // Line starts, absolute — O(lines) of u32 adds.
@@ -459,7 +467,7 @@ impl Painter {
         // new has them derived. (Every item used to go through a hash map
         // rebuilt for each keystroke.)
         let keys = db.paint_sync(uri);
-        let mut items: Vec<(qana_sem::PaintKey, Arc<Vec<((u32, u32), u8)>>)> =
+        let mut items: Vec<(qana_sem::PaintKey, ItemMarks)> =
             self.cache.take().unwrap_or_default();
         let same = |a: &qana_sem::PaintKey, b: &qana_sem::PaintKey| {
             a.frag_uid == b.frag_uid && a.res_uid == b.res_uid
@@ -477,17 +485,18 @@ impl Painter {
             suffix += 1;
         }
         let (old_hi, new_hi) = (old_len - suffix, new_len - suffix);
-        let moved: std::collections::HashMap<(u64, u64), Arc<Vec<((u32, u32), u8)>>> = items
-            [lo..old_hi]
+        // The window's old items, by identity, with where they started.
+        // Those a new item takes up again are taken out; what is left was
+        // replaced, and its marks are cleared from wherever they now are.
+        let mut moved: std::collections::HashMap<(u64, u64), (u32, ItemMarks)> = items[lo..old_hi]
             .iter()
-            .map(|(k, m)| ((k.frag_uid, k.res_uid), m.clone()))
+            .map(|(k, m)| ((k.frag_uid, k.res_uid), (k.start, m.clone())))
             .collect();
         let mut misses: Vec<usize> = Vec::new();
-        let mut between: Vec<(qana_sem::PaintKey, Arc<Vec<((u32, u32), u8)>>)> =
-            Vec::with_capacity(new_hi - lo);
+        let mut between: Vec<(qana_sem::PaintKey, ItemMarks)> = Vec::with_capacity(new_hi - lo);
         for (i, k) in keys.iter().enumerate().take(new_hi).skip(lo) {
-            match moved.get(&(k.frag_uid, k.res_uid)) {
-                Some(m) => between.push((*k, m.clone())),
+            match moved.remove(&(k.frag_uid, k.res_uid)) {
+                Some((_, m)) => between.push((*k, m)),
                 None => {
                     let ip = db.item_paint(uri, i as u32);
                     between.push((*k, Arc::new(item_marks(&ip))));
@@ -509,9 +518,12 @@ impl Painter {
         }
         let t_sync = t0.elapsed();
 
-        // Touched lines: the damaged window plus every miss item's
-        // line range (an item's span runs to the next item's start —
-        // the trivia gap carries no marks, so over-coverage is safe).
+        // Touched lines: the damaged window, every line a miss item has a
+        // mark on, and every line a replaced item had one on. Nothing else
+        // can look different: outside the window every line holds the text
+        // it held, and every other item's marks stand on it as they stood.
+        // (Marks are token spans, and a token stays on one line (L1): the
+        // line a mark starts on is the line it is on.)
         let t1 = StageClock::start(trace);
         let line_of = |off: u32| -> usize {
             match starts.binary_search(&off.min(total)) {
@@ -519,24 +531,35 @@ impl Painter {
                 Err(i) => i - 1,
             }
         };
-        let mut touched: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         let (old_lo, old_hi, new_lo, new_hi) = window.unwrap_or((0, 0, 0, 0));
-        if window.is_some() {
-            touched.extend(new_lo..new_hi);
-        }
-        for &i in &misses {
-            let a = items[i].0.start;
-            let b = if i + 1 < items.len() { items[i + 1].0.start } else { total };
-            if b > a && !self.widths.is_empty() {
-                touched.extend(line_of(a)..=line_of(b.saturating_sub(1)));
+        // Where a char of the last frame is now: before the window, where
+        // it was; after it, moved by the window's change in length; inside
+        // it, on a line that is rebuilt anyway.
+        let (win_start, win_end) = (starts[new_lo], starts[new_hi]);
+        let old_win_end = win_start + old_chars;
+        let now_at = |off: u32| -> Option<u32> {
+            if window.is_none() || off < win_start {
+                Some(off)
+            } else if off >= old_win_end {
+                Some(off - old_win_end + win_end)
+            } else {
+                None
             }
+        };
+        let mut touched: Vec<usize> = Vec::new();
+        for &i in &misses {
+            let a0 = items[i].0.start;
+            touched.extend(items[i].1.iter().map(|&((ra, _), _)| line_of(a0 + ra)));
         }
+        for (start, marks) in moved.values() {
+            touched.extend(marks.iter().filter_map(|&((ra, _), _)| now_at(start + ra)).map(line_of));
+        }
+        touched.sort_unstable();
+        touched.dedup();
 
-        // Rebuild each touched line from its wave-0 base plus the marks
-        // of every item intersecting it.
-        let rebuild = |li: usize,
-                       items: &[(qana_sem::PaintKey, Arc<Vec<((u32, u32), u8)>>)]|
-         -> Vec<Run> {
+        // Rebuild a line from its wave-0 base plus the marks that start on
+        // it, of every item it intersects.
+        let rebuild = |li: usize, items: &[(qana_sem::PaintKey, ItemMarks)]| -> Vec<Run> {
             let mut fresh = self.base[li].clone();
             let (ls, le) = (starts[li], starts[li] + self.widths[li]);
             let mut ii = items.partition_point(|(k, _)| k.start <= ls);
@@ -546,14 +569,16 @@ impl Painter {
                 if a0 >= le {
                     break;
                 }
-                let b0 = if ii + 1 < items.len() { items[ii + 1].0.start } else { total };
-                if b0 > ls {
-                    for &((ra, rb), bits) in items[ii].1.iter() {
-                        let (a, b) = (a0 + ra, a0 + rb);
-                        let (a, b) = (a.max(ls), b.min(le));
-                        if b > a {
-                            mark(&mut fresh, a - ls, b - ls, bits);
-                        }
+                let marks = &items[ii].1;
+                let first = marks.partition_point(|&((ra, _), _)| a0 + ra < ls);
+                for &((ra, rb), bits) in &marks[first..] {
+                    let a = a0 + ra;
+                    if a >= le {
+                        break;
+                    }
+                    let b = (a0 + rb).min(le);
+                    if b > a {
+                        mark(&mut fresh, a - ls, b - ls, bits);
                     }
                 }
                 ii += 1;

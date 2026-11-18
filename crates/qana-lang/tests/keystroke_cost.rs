@@ -22,11 +22,12 @@
 
 use qana_engine::{IncSession, Line, LineEdit, LineTerm};
 use qana_lang::EmbeddedLang;
-use qana_sem::{SemDb, SemStats};
+use qana_sem::{SemDb, SemStats, PIECE_BYTES};
 use qana_services::paint::Painter;
 use linework::PaintDelta;
 
 const C_QANA: &str = include_str!("../../../examples/c/c.qana");
+const RUST_QANA: &str = include_str!("../../../examples/rust/rust.qana");
 const URI: &str = "cost.c";
 
 /// A C file of `functions` functions. Each calls the one before it and
@@ -104,6 +105,8 @@ fn since(before: SemStats, after: SemStats) -> SemStats {
         name_set_builds: after.name_set_builds - before.name_set_builds,
         top_index_builds: after.top_index_builds - before.top_index_builds,
         top_scans: after.top_scans - before.top_scans,
+        bytes_walked: after.bytes_walked - before.bytes_walked,
+        fragments_kept: after.fragments_kept - before.fragments_kept,
     }
 }
 
@@ -229,4 +232,118 @@ fn renaming_an_early_definition_resolves_the_rest_from_one_set() {
     let mut fresh = Doc::open(&lang, &now);
     assert_eq!(doc.db.resolve(URI), fresh.db.resolve(URI));
     assert_eq!(doc.painter.frame().lines, fresh.painter.frame().lines);
+}
+
+/// A function of thousands of lines.
+fn one_large_function(statements: usize) -> String {
+    let mut s = String::from("#define LIMIT 100\n\nstatic int big(int a, int b) {\n");
+    for i in 0..statements {
+        s.push_str(&format!("    int v{i} = a + b + LIMIT;\n"));
+    }
+    s.push_str("    return a;\n}\n\nstatic int after(void) { return 1; }\n");
+    s
+}
+
+/// A function of thousands of lines is one item. Typing in it walks the
+/// piece of it typed in, and puts the rest of its fragment together from
+/// the parts the last revision read: the function is not walked again.
+#[test]
+fn a_keystroke_in_a_large_function_walks_a_piece_or_two() {
+    let text = one_large_function(3000);
+    let mut doc = Doc::open(&c_lang(), &text);
+    let opened = doc.db.stats;
+    assert!(
+        opened.bytes_walked as usize > text.len() * 9 / 10,
+        "open walks the file, {} bytes of {}",
+        opened.bytes_walked,
+        text.len()
+    );
+
+    let line = doc.line_of("int v1500 = ");
+    let mut typed = String::from("    int v1500 = a + b + LIMIT");
+    for keystroke in 0..10 {
+        typed.push_str(" + 1");
+        let before = doc.db.stats;
+        let delta = doc.retype(line, &format!("{typed};"));
+        let cost = since(before, doc.db.stats);
+        assert_eq!(cost.fragments_computed, 1, "keystroke {keystroke}: one item was built");
+        assert!(
+            cost.bytes_walked <= 2 * PIECE_BYTES as u64,
+            "keystroke {keystroke}: a piece or two walked, {} bytes of a {}-byte function",
+            cost.bytes_walked,
+            text.len()
+        );
+        assert!(delta.repaints.is_empty(), "keystroke {keystroke}: nothing else repaints");
+    }
+
+    // And what was put together is what the open of the same text says.
+    let now = doc.session.buf.reproduce();
+    let mut fresh = Doc::open(&c_lang(), &now);
+    assert_eq!(*doc.db.symbols(URI), *fresh.db.symbols(URI));
+    assert_eq!(doc.db.resolve(URI), fresh.db.resolve(URI));
+    assert_eq!(doc.painter.frame().lines, fresh.painter.frame().lines);
+}
+
+/// A keystroke that leaves an item declaring and referring to exactly
+/// what it did, where it did (a number changed for another of the same
+/// width), leaves the item's fragment as it was: same identity, same
+/// resolution. Nothing is resolved, the painter has no item to look up,
+/// and only the line typed on is painted.
+#[test]
+fn a_keystroke_that_changes_no_name_keeps_the_items_fragment() {
+    let mut doc = Doc::open(&c_lang(), &one_large_function(3000));
+    let line = doc.line_of("int v1500 = ");
+    for (keystroke, digit) in ['7', '8', '9'].into_iter().enumerate() {
+        let before = doc.db.stats;
+        let delta = doc.retype(line, &format!("    int v1500 = a + b + LIMIT + {digit};"));
+        let cost = since(before, doc.db.stats);
+        if keystroke == 0 {
+            // The first one adds a token: the item changes.
+            assert_eq!(cost.fragments_kept, 0);
+            continue;
+        }
+        assert_eq!(cost.fragments_computed, 1, "keystroke {keystroke}: the item was built again");
+        assert_eq!(cost.fragments_kept, 1, "keystroke {keystroke}: and was the fragment it had");
+        assert_eq!(cost.item_resolves_computed, 0, "keystroke {keystroke}: its resolution was kept");
+        assert_eq!(doc.painter.window_items(), 0, "keystroke {keystroke}: no item to look up");
+        let (lo, hi) = delta.splice.as_ref().map(|((lo, hi), _)| (*lo, *hi)).expect("a splice");
+        assert_eq!((lo as usize, hi as usize), (line, line + 1), "the damage is the line typed in");
+        assert!(delta.repaints.is_empty(), "keystroke {keystroke}: nothing else repaints");
+    }
+}
+
+/// Rust's grammar declares no binding. Its items declare nothing, and
+/// nothing is walked to find that out: not at open, not on a keystroke
+/// inside a module that is one item of a hundred thousand lines. Each
+/// keystroke's fragment is the one the item had, so nothing is resolved
+/// and the painter has nothing to look up.
+#[test]
+fn a_grammar_without_binding_walks_nothing() {
+    let lang = EmbeddedLang::from_qana_source(RUST_QANA).expect("rust.qana certifies");
+    assert!(
+        lang.binding.defs.is_empty() && lang.binding.refs.is_empty() && lang.binding.scopes.is_empty(),
+        "the grammar declares no binding"
+    );
+    let mut text = String::from("pub mod m {\n");
+    for i in 0..2000 {
+        text.push_str(&format!("    pub fn f{i}(a: u8) -> u8 {{\n        a + {i}\n    }}\n\n"));
+    }
+    text.push_str("}\n");
+    let mut doc = Doc::open(&lang, &text);
+    assert_eq!(doc.db.stats.bytes_walked, 0, "open walks nothing");
+
+    let line = doc.line_of("a + 1000");
+    let mut typed = String::from("        a + 1000");
+    for keystroke in 0..10 {
+        typed.push_str(" + a");
+        let before = doc.db.stats;
+        let delta = doc.retype(line, &typed);
+        let cost = since(before, doc.db.stats);
+        assert_eq!(cost.bytes_walked, 0, "keystroke {keystroke}: nothing walked");
+        assert!(cost.fragments_computed >= 1, "keystroke {keystroke}: the module was built again");
+        assert_eq!(cost.fragments_kept, cost.fragments_computed, "keystroke {keystroke}: and kept");
+        assert_eq!(cost.item_resolves_computed, 0, "keystroke {keystroke}: nothing resolved");
+        assert_eq!(doc.painter.window_items(), 0, "keystroke {keystroke}: no item to look up");
+        assert!(delta.repaints.is_empty(), "keystroke {keystroke}: nothing else repaints");
+    }
 }

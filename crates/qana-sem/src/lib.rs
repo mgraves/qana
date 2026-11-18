@@ -10,6 +10,14 @@
 //!    with ITEM-RELATIVE spans, fragment-local scopes and order, plus
 //!    env-independent local resolution — a ref either resolves inside
 //!    the fragment (inner scopes shadow everything outside) or ESCAPES.
+//!    Below the item, what each subtree declares is kept by the
+//!    subtree's pointer too, at every depth (a PART): an item built
+//!    again walks only the subtrees the edit rebuilt, so typing in one
+//!    function of a module that is a single 100,000-line item walks a
+//!    piece of it, and a grammar that declares no binding walks nothing.
+//!    A fragment built again that declares exactly what the one it
+//!    replaces declared IS that fragment still: same identity, same
+//!    resolution, nothing repainted.
 //! 2. **Item resolution** (keyed by pointer + environment fingerprint +
 //!    foreign fingerprint): each escaped ref is CLASSIFIED — top-level
 //!    (some earlier item defines the name), foreign (another file
@@ -27,7 +35,8 @@
 //! One bounded adjacency: the newline ENDING an item is trivia attached
 //! inside the NEXT item's leading spine (losslessness), so an edit that
 //! re-lexes it re-anchors the right neighbor's Arc — at most one extra
-//! fragment walk per edit, and the recomputed fragment is value-equal.
+//! fragment built per edit, and the rebuilt fragment is value-equal, so
+//! it keeps its identity.
 
 use crate::key::NodeKey;
 use qana_grammar::green::{ERROR_NT, LIST_PROD, RUN_PROD};
@@ -487,214 +496,510 @@ fn next_paint_uid() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-fn build_fragment(item: &GreenNode, cfg: &BindingConfig) -> Fragment {
-    let mut f = Fragment {
-        uid: next_paint_uid(),
-        defs: Vec::new(),
-        refs: Vec::new(),
-        scope_parents: vec![0],
-        scope_unordered: vec![cfg.unordered],
-        scope_barrier: vec![false],
-        top_defs: Vec::new(),
-        top_sigs: Vec::new(),
-        local: Vec::new(),
-        modules: Vec::new(),
-        quals: Vec::new(),
-    };
-    let mut order = 0u32;
-    walk(item, 0, 0, cfg, &mut f, &mut order);
-    for (i, d) in f.defs.iter().enumerate() {
-        if d.scope == 0 {
-            f.top_defs.push(i as u32);
+// ---------------------------------------------------------------------------
+// Parts: what a subtree declares, kept by the subtree, at every depth
+// ---------------------------------------------------------------------------
+//
+// An item's fragment used to come from walking every node of the item
+// again whenever the item changed. A keystroke changes one item, and an
+// item is usually small; but an item is a top-level construct, and one of
+// those can be a module of 100,000 lines. Typing in it walked all of it.
+//
+// What a subtree declares depends on nothing outside it, once it is said
+// relative to the subtree: spans from where it starts, scopes from the
+// one it is entered in, orders from its first declaration. So it is kept
+// by the subtree, as a PART, and the incremental parser hands back the
+// same subtrees, by pointer, for everything an edit did not rebuild. A
+// subtree up to `PIECE_BYTES` is walked whole; a larger one is read child
+// by child, each child a part of its own. Building an item's fragment
+// again walks the chain of subtrees the edit rebuilt and the pieces at
+// its end, and copies what every other part declares into place.
+//
+// A configuration that annotates nothing declares nothing anywhere, and
+// walks nothing.
+
+/// A subtree up to this many bytes is walked whole; a larger one is read
+/// child by child. Small enough that walking one again is cheap next to a
+/// keystroke, large enough that a document of megabytes is a few thousand
+/// of them.
+pub const PIECE_BYTES: u32 = 4096;
+
+/// What a run of nodes declares, RELATIVE to the subtree it was read
+/// from: spans from the subtree's start; scope 0 is the scope the subtree
+/// is entered in, and scope `k ≥ 1` the k-th it opens; orders count from
+/// 1 within it; a module's def index counts from its first def, `-1`
+/// being the last def declared before it. Nothing here depends on where
+/// the subtree stands or what is around it.
+#[derive(Clone, Debug, Default)]
+struct Facts {
+    /// `top_level` is false here: what is top level depends on the scope
+    /// the subtree is entered in, and is decided when it is put in place.
+    defs: Vec<Def>,
+    refs: Vec<Ref>,
+    /// The scopes opened, in order (scope `k` is entry `k - 1`): parent,
+    /// unordered, barrier.
+    scopes: Vec<(ScopeId, bool, bool)>,
+    modules: Vec<(i64, (u32, u32))>,
+    quals: Vec<((u32, u32), u32)>,
+}
+
+impl Facts {
+    /// How many facts there are, of every kind.
+    fn len(&self) -> usize {
+        self.defs.len() + self.refs.len() + self.scopes.len() + self.modules.len() + self.quals.len()
+    }
+}
+
+/// What one subtree declares: see [`Facts`].
+#[derive(Debug, Default)]
+struct Part {
+    /// For a subtree walked whole, everything in it. For one read child by
+    /// child, what its own node declares (the scope it opens, its def, its
+    /// refs, its module and its qualified name).
+    facts: Facts,
+    /// The scope (relative) the node's children are entered in: the one
+    /// it opens, or the one it was entered in.
+    inner: ScopeId,
+    /// For a subtree read child by child, its node children in order: each
+    /// one's offset within the subtree and its own part.
+    kids: Vec<Kid>,
+    /// How many facts the whole subtree holds. A part holding none puts
+    /// nothing in place, and is passed over.
+    total: usize,
+}
+
+/// A child subtree of a part read child by child.
+#[derive(Debug)]
+struct Kid {
+    off: u32,
+    /// The subtree: its identity, and what keeps that identity from being
+    /// handed to another subtree while the part is kept.
+    key: NodeKey,
+    part: Arc<Part>,
+}
+
+/// Span of the k-th SYMBOL child (token or rule), relative to `base`.
+fn child_span(n: &GreenNode, base: u32, k: usize) -> Option<(u32, u32)> {
+    let mut off = 0u32;
+    let mut idx = 0usize;
+    for c in &n.children {
+        let w = c.width();
+        let is_symbol = match c {
+            GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+            GreenChild::Node(m) => m.nt != ERROR_NT,
+        };
+        if is_symbol {
+            if idx == k {
+                return Some((base + off, base + off + w));
+            }
+            idx += 1;
+        }
+        off += w;
+    }
+    None
+}
+
+/// The text and offset of the k-th SYMBOL child, when it is a token.
+fn name_child(n: &GreenNode, k: usize) -> Option<(String, u32)> {
+    let mut off = 0u32;
+    let mut idx = 0usize;
+    for c in &n.children {
+        let w = c.width();
+        let is_symbol = match c {
+            GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+            GreenChild::Node(m) => m.nt != ERROR_NT,
+        };
+        if is_symbol {
+            if idx == k {
+                if let GreenChild::Token(t) = c {
+                    return Some((t.text.clone(), off));
+                }
+                return None;
+            }
+            idx += 1;
+        }
+        off += w;
+    }
+    None
+}
+
+/// What node `n` itself declares, appended to `facts`: `n` stands at
+/// `base` and is entered in `scope`. Returns the scope its children are
+/// entered in. Its children are not read.
+fn node_facts(n: &GreenNode, base: u32, scope: ScopeId, cfg: &BindingConfig, facts: &mut Facts) -> ScopeId {
+    let mut scope = scope;
+    // When a production BOTH defines and opens a scope, the def
+    // belongs to the ENCLOSING scope — function-name semantics:
+    // `macro m(x) => …` puts `m` outside and `x` inside. (Nothing
+    // else is sensible: a def inside its own scope is invisible.)
+    let outer = scope;
+    if n.prod != RUN_PROD {
+        if let Some(&(_, _, unordered, barrier)) =
+            cfg.scopes.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
+        {
+            facts.scopes.push((scope, unordered, barrier));
+            scope = facts.scopes.len() as ScopeId;
         }
     }
-    f.top_sigs = f
-        .top_defs
+    // A production's declared namespace covers its def and refs.
+    let node_ns = cfg
+        .namespaces
         .iter()
-        .map(|&di| name_sig(&f.defs[di as usize].ns, &f.defs[di as usize].name))
-        .collect();
-    // Env-independent local resolution: candidates are fragment defs in
-    // VISIBLE scopes (barriers stop the walk). Ordering is a per-scope
-    // property: unordered scopes resolve forward — and NAMED namespaces
-    // resolve forward in EVERY scope (per-namespace ordering: hoisted).
-    // Root-scope candidates defer to the environment when the root is
-    // unordered OR the def is namespaced (a later ITEM may hold the
-    // namespace's def); barrier scopes are fragment-complete, so their
-    // resolution is final here.
-    let mut by_name: HashMap<(&str, &str), Vec<u32>> = HashMap::new();
-    for (i, d) in f.defs.iter().enumerate() {
-        by_name.entry((d.ns.as_str(), d.name.as_str())).or_default().push(i as u32);
-    }
-    let depths: Vec<u32> = (0..f.scope_parents.len() as u32).map(|s| f.scope_depth(s)).collect();
-    for r in &f.refs {
-        let mut best: Option<(u32, u32, u32)> = None; // (depth, order, idx)
-        // Imports resolve against other files' exports ONLY; qualified
-        // names resolve among their base's members at query time.
-        if r.kind != RefKind::Import && r.kind != RefKind::Qualified {
-        if let Some(cands) = by_name.get(&(r.ns.as_str(), r.name.as_str())) {
-            for &i in cands {
-                let d = &f.defs[i as usize];
-                if (f.scope_unordered[0] || !d.ns.is_empty()) && d.scope == 0 {
-                    continue; // top-level forward world: environment decides
-                }
-                if (f.scope_unordered[d.scope as usize] || !d.ns.is_empty() || d.order < r.order)
-                    && f.visible(d.scope, r.scope)
-                {
-                    let key = (depths[d.scope as usize], d.order, i);
-                    if best.map_or(true, |b| (key.0, key.1) > (b.0, b.1)) {
-                        best = Some(key);
-                    }
-                }
-            }
+        .find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
+        .map(|t| t.2.as_str())
+        .unwrap_or("");
+    // Every def and ref takes the next order: the count of those before
+    // it, plus one.
+    let next_order = |facts: &Facts| (facts.defs.len() + facts.refs.len()) as u32 + 1;
+    if let Some(&(_, _, k)) = cfg.defs.iter().find(|&&(nt, p, _)| nt == n.nt && p == n.prod) {
+        if let Some((name, off)) = name_child(n, k) {
+            let order = next_order(facts);
+            facts.defs.push(Def {
+                span: (base + off, base + off + name.len() as u32),
+                name,
+                scope: outer,
+                order,
+                top_level: false,
+                exported: cfg.exports.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
+                ns: node_ns.to_string(),
+            });
         }
-        }
-        f.local.push(match best {
-            Some((_, _, i)) => LocalRes::Def(i),
-            None if f.escapes(r.scope) => LocalRes::Escape,
-            None => LocalRes::Contained,
-        });
     }
-    return f;
-
-    /// Span of the k-th SYMBOL child (token or rule), item-relative.
-    fn child_span(n: &GreenNode, base: u32, k: usize) -> Option<(u32, u32)> {
-        let mut off = 0u32;
-        let mut idx = 0usize;
-        for c in &n.children {
-            let w = c.width();
-            let is_symbol = match c {
-                GreenChild::Token(t) => !t.trivia && !t.is_missing(),
-                GreenChild::Node(m) => m.nt != ERROR_NT,
-            };
-            if is_symbol {
-                if idx == k {
-                    return Some((base + off, base + off + w));
-                }
-                idx += 1;
-            }
-            off += w;
+    // A production may carry SEVERAL references (a qualified path
+    // has a base @ref and a @qualify name), so collect all entries.
+    for &(nt2, p2, k, kind) in cfg.refs.iter() {
+        if nt2 != n.nt || p2 != n.prod {
+            continue;
         }
-        None
-    }
-
-    fn name_child(n: &GreenNode, k: usize) -> Option<(String, u32)> {
-        let mut off = 0u32;
-        let mut idx = 0usize;
-        for c in &n.children {
-            let w = c.width();
-            let is_symbol = match c {
-                GreenChild::Token(t) => !t.trivia && !t.is_missing(),
-                GreenChild::Node(m) => m.nt != ERROR_NT,
-            };
-            if is_symbol {
-                if idx == k {
-                    if let GreenChild::Token(t) = c {
-                        return Some((t.text.clone(), off));
-                    }
-                    return None;
-                }
-                idx += 1;
-            }
-            off += w;
+        if let Some((name, off)) = name_child(n, k) {
+            let order = next_order(facts);
+            facts.refs.push(Ref {
+                span: (base + off, base + off + name.len() as u32),
+                name,
+                scope,
+                order,
+                kind,
+                ns: node_ns.to_string(),
+            });
         }
-        None
     }
-
-    fn walk(
-        n: &GreenNode,
-        base: u32,
-        scope: ScopeId,
-        cfg: &BindingConfig,
-        f: &mut Fragment,
-        order: &mut u32,
-    ) {
-        let mut scope = scope;
-        // When a production BOTH defines and opens a scope, the def
-        // belongs to the ENCLOSING scope — function-name semantics:
-        // `macro m(x) => …` puts `m` outside and `x` inside. (Nothing
-        // else is sensible: a def inside its own scope is invisible.)
-        let outer = scope;
-        if n.prod != RUN_PROD {
-            if let Some(&(_, _, unordered, barrier)) =
-                cfg.scopes.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
+    if let Some(&(_, _, body)) = cfg.modules.iter().find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod) {
+        if let Some(span) = child_span(n, base, body) {
+            // The last def declared so far introduces the namespace (the
+            // def this production just declared, when it declared one);
+            // members are the defs inside `span`. `-1` here is the last
+            // def before the subtree, if there is one: decided when the
+            // subtree is put in place.
+            facts.modules.push((facts.defs.len() as i64 - 1, span));
+        }
+    }
+    if let Some(&(_, _, base_child, _)) =
+        cfg.quals.iter().find(|&&(nt2, p2, _, _)| nt2 == n.nt && p2 == n.prod)
+    {
+        if let Some(bspan) = child_span(n, base, base_child) {
+            // The Qualified ref for this node was pushed just above: no
+            // ref declared before this node has its span inside the node.
+            if let Some(ri) = facts
+                .refs
+                .iter()
+                .rposition(|r| r.kind == RefKind::Qualified && r.span.0 >= base && r.span.0 < base + n.width)
             {
-                let id = f.scope_parents.len() as ScopeId;
-                f.scope_parents.push(scope);
-                f.scope_unordered.push(unordered);
-                f.scope_barrier.push(barrier);
-                scope = id;
+                facts.quals.push((bspan, ri as u32));
             }
         }
-        // A production's declared namespace covers its def and refs.
-        let node_ns = cfg
-            .namespaces
-            .iter()
-            .find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
-            .map(|t| t.2.as_str())
-            .unwrap_or("");
-        if let Some(&(_, _, k)) = cfg.defs.iter().find(|&&(nt, p, _)| nt == n.nt && p == n.prod) {
-            if let Some((name, off)) = name_child(n, k) {
-                *order += 1;
-                f.defs.push(Def {
-                    span: (base + off, base + off + name.len() as u32),
-                    name,
-                    scope: outer,
-                    order: *order,
-                    top_level: outer == 0,
-                    exported: cfg.exports.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
-                    ns: node_ns.to_string(),
-                });
+    }
+    scope
+}
+
+/// Everything subtree `n` declares, appended to `facts`: every node, in
+/// document order, each before its children.
+fn walk_whole(n: &GreenNode, base: u32, scope: ScopeId, cfg: &BindingConfig, facts: &mut Facts) {
+    let inner = node_facts(n, base, scope, cfg, facts);
+    let mut off = base;
+    for c in &n.children {
+        if let GreenChild::Node(m) = c {
+            walk_whole(m, off, inner, cfg, facts);
+        }
+        off += c.width();
+    }
+}
+
+/// Does `cfg` annotate anything? Defs, refs and scopes are what a walk
+/// can find; modules, qualified names, namespaces and exports only ever
+/// add to a def or a ref found on the same node.
+fn annotates_anything(cfg: &BindingConfig) -> bool {
+    !cfg.defs.is_empty() || !cfg.refs.is_empty() || !cfg.scopes.is_empty()
+}
+
+/// A subtree the last revision read: its identity and its part.
+type Read<'a> = (&'a NodeKey, &'a Arc<Part>);
+
+/// Reads parts, reusing the last revision's where the subtree is the same.
+struct Parts<'a> {
+    cfg: &'a BindingConfig,
+    /// The size up to which a subtree is walked whole: see
+    /// `SemDb::piece_bytes`.
+    piece: u32,
+    /// The part of a subtree that declares nothing: one, shared.
+    empty: &'a Arc<Part>,
+    /// Bytes of subtrees walked whole.
+    walked: u64,
+}
+
+impl Parts<'_> {
+    /// Is `node` walked whole?
+    fn whole(&self, node: &GreenNode) -> bool {
+        node.width <= self.piece || !node.children.iter().any(|c| matches!(c, GreenChild::Node(_)))
+    }
+
+    /// The part of `node`. The last revision's subtrees that may be among
+    /// its own, or among their children, are `old`.
+    fn part(&mut self, node: &GreenNode, old: &[Read<'_>]) -> Arc<Part> {
+        if self.whole(node) {
+            self.walked += node.width as u64;
+            let mut facts = Facts::default();
+            walk_whole(node, 0, 0, self.cfg, &mut facts);
+            let total = facts.len();
+            if total == 0 {
+                return self.empty.clone();
+            }
+            return Arc::new(Part { facts, inner: 0, kids: Vec::new(), total });
+        }
+        let mut facts = Facts::default();
+        let inner = node_facts(node, 0, 0, self.cfg, &mut facts);
+
+        // Last revision's subtrees, and their children, by identity: the
+        // edit rebuilt the chain of subtrees above it, and the subtrees on
+        // either side of that chain are the ones it held before, one level
+        // down or up at most where a list regrouped its runs.
+        let mut known: HashMap<&NodeKey, &Arc<Part>> = HashMap::new();
+        for &(key, part) in old {
+            known.insert(key, part);
+            for kid in &part.kids {
+                known.insert(&kid.key, &kid.part);
             }
         }
-        // A production may carry SEVERAL references (a qualified path
-        // has a base @ref and a @qualify name), so collect all entries.
-        for &(nt2, p2, k, kind) in cfg.refs.iter() {
-            if nt2 != n.nt || p2 != n.prod {
-                continue;
-            }
-            if let Some((name, off)) = name_child(n, k) {
-                *order += 1;
-                f.refs.push(Ref {
-                    span: (base + off, base + off + name.len() as u32),
-                    name,
-                    scope,
-                    order: *order,
-                    kind,
-                    ns: node_ns.to_string(),
-                });
-            }
-        }
-        if let Some(&(_, _, body)) =
-            cfg.modules.iter().find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
-        {
-            if let (false, Some(span)) = (f.defs.is_empty(), child_span(n, base, body)) {
-                // The def this production just pushed introduces the
-                // namespace; members are the defs inside `span`.
-                f.modules.push(((f.defs.len() - 1) as u32, span));
-            }
-        }
-        if let Some(&(_, _, base_child, _)) =
-            cfg.quals.iter().find(|&&(nt2, p2, _, _)| nt2 == n.nt && p2 == n.prod)
-        {
-            if let Some(bspan) = child_span(n, base, base_child) {
-                // The Qualified ref for this node was pushed just above.
-                if let Some(ri) = f
-                    .refs
-                    .iter()
-                    .rposition(|r| r.kind == RefKind::Qualified && r.span.0 >= base && r.span.0 < base + n.width)
-                {
-                    f.quals.push((bspan, ri as u32));
-                }
-            }
-        }
-        let mut off = base;
-        for c in &n.children {
+        let mut kids: Vec<Kid> = Vec::new();
+        let mut fresh: Vec<usize> = Vec::new();
+        let mut off = 0u32;
+        for c in &node.children {
             if let GreenChild::Node(m) = c {
-                walk(m, off, scope, cfg, f, order);
+                let key = NodeKey::new(m.clone());
+                let part = match known.remove(&key) {
+                    Some(part) => part.clone(),
+                    None => {
+                        fresh.push(kids.len());
+                        self.empty.clone()
+                    }
+                };
+                kids.push(Kid { off, key, part });
             }
             off += c.width();
         }
+        if !fresh.is_empty() {
+            // What is left of the last revision, read child by child, may
+            // hold the subtrees of the children read again.
+            let left: Vec<Read<'_>> =
+                known.into_iter().filter(|(_, part)| !part.kids.is_empty()).collect();
+            for i in fresh {
+                let part = self.part(kids[i].key.node(), &left);
+                kids[i].part = part;
+            }
+        }
+        // Kept even when nothing beneath declares anything: the children
+        // are what the next edit finds its subtrees among.
+        let total = facts.len() + kids.iter().map(|k| k.part.total).sum::<usize>();
+        Arc::new(Part { facts, inner, kids, total })
     }
+}
+
+/// An item's facts in place: spans item-relative, scopes the fragment's
+/// (0 = the file's root scope), orders from 1 — the fragment, without
+/// what is derived from it.
+#[derive(Debug, PartialEq)]
+struct ItemFacts {
+    defs: Vec<Def>,
+    refs: Vec<Ref>,
+    scope_parents: Vec<ScopeId>,
+    scope_unordered: Vec<bool>,
+    scope_barrier: Vec<bool>,
+    modules: Vec<(u32, (u32, u32))>,
+    quals: Vec<((u32, u32), u32)>,
+}
+
+impl ItemFacts {
+    fn new(cfg: &BindingConfig) -> ItemFacts {
+        ItemFacts {
+            defs: Vec::new(),
+            refs: Vec::new(),
+            scope_parents: vec![0],
+            scope_unordered: vec![cfg.unordered],
+            scope_barrier: vec![false],
+            modules: Vec::new(),
+            quals: Vec::new(),
+        }
+    }
+
+    /// Put `facts`, read from a subtree that stands at `at` and is entered
+    /// in scope `enter`, in place after everything put so far. Returns the
+    /// scope in place of relative scope `inner`.
+    fn put(&mut self, facts: std::borrow::Cow<'_, Facts>, at: u32, enter: ScopeId, inner: ScopeId) -> ScopeId {
+        let scope_base = self.scope_parents.len() as ScopeId;
+        let def_base = self.defs.len();
+        let ref_base = self.refs.len();
+        let order_base = (def_base + ref_base) as u32;
+        let place = |rel: ScopeId| if rel == 0 { enter } else { scope_base + rel - 1 };
+        let Facts { defs, refs, scopes, modules, quals } = facts.into_owned();
+        for (parent, unordered, barrier) in scopes {
+            self.scope_parents.push(place(parent));
+            self.scope_unordered.push(unordered);
+            self.scope_barrier.push(barrier);
+        }
+        self.defs.extend(defs.into_iter().map(|mut d| {
+            d.span = (d.span.0 + at, d.span.1 + at);
+            d.scope = place(d.scope);
+            d.order += order_base;
+            d.top_level = d.scope == 0;
+            d
+        }));
+        self.refs.extend(refs.into_iter().map(|mut r| {
+            r.span = (r.span.0 + at, r.span.1 + at);
+            r.scope = place(r.scope);
+            r.order += order_base;
+            r
+        }));
+        for (def, span) in modules {
+            // The last def before the subtree, when there is none, is
+            // no def: the module is not declared.
+            let def = def_base as i64 + def;
+            if def >= 0 {
+                self.modules.push((def as u32, (span.0 + at, span.1 + at)));
+            }
+        }
+        self.quals.extend(quals.into_iter().map(|(span, ri)| ((span.0 + at, span.1 + at), ri + ref_base as u32)));
+        place(inner)
+    }
+
+    /// Put a part, and everything beneath it, in place.
+    fn put_part(&mut self, part: &Part, at: u32, enter: ScopeId) {
+        if part.total == 0 {
+            return;
+        }
+        let inner = self.put(std::borrow::Cow::Borrowed(&part.facts), at, enter, part.inner);
+        for kid in &part.kids {
+            self.put_part(&kid.part, at + kid.off, inner);
+        }
+    }
+
+    /// Does `frag` hold exactly these facts?
+    fn same_as(&self, frag: &Fragment) -> bool {
+        self.defs == frag.defs
+            && self.refs == frag.refs
+            && self.scope_parents == frag.scope_parents
+            && self.scope_unordered == frag.scope_unordered
+            && self.scope_barrier == frag.scope_barrier
+            && self.modules == frag.modules
+            && self.quals == frag.quals
+    }
+
+    /// The fragment of these facts: what is derived from them, and a new
+    /// identity.
+    fn finish(self) -> Fragment {
+        let ItemFacts { defs, refs, scope_parents, scope_unordered, scope_barrier, modules, quals } = self;
+        let mut f = Fragment {
+            uid: next_paint_uid(),
+            defs,
+            refs,
+            scope_parents,
+            scope_unordered,
+            scope_barrier,
+            top_defs: Vec::new(),
+            top_sigs: Vec::new(),
+            local: Vec::new(),
+            modules,
+            quals,
+        };
+        for (i, d) in f.defs.iter().enumerate() {
+            if d.scope == 0 {
+                f.top_defs.push(i as u32);
+            }
+        }
+        f.top_sigs = f
+            .top_defs
+            .iter()
+            .map(|&di| name_sig(&f.defs[di as usize].ns, &f.defs[di as usize].name))
+            .collect();
+        // Env-independent local resolution: candidates are fragment defs in
+        // VISIBLE scopes (barriers stop the walk). Ordering is a per-scope
+        // property: unordered scopes resolve forward — and NAMED namespaces
+        // resolve forward in EVERY scope (per-namespace ordering: hoisted).
+        // Root-scope candidates defer to the environment when the root is
+        // unordered OR the def is namespaced (a later ITEM may hold the
+        // namespace's def); barrier scopes are fragment-complete, so their
+        // resolution is final here.
+        let mut by_name: HashMap<(&str, &str), Vec<u32>> = HashMap::new();
+        for (i, d) in f.defs.iter().enumerate() {
+            by_name.entry((d.ns.as_str(), d.name.as_str())).or_default().push(i as u32);
+        }
+        let depths: Vec<u32> = (0..f.scope_parents.len() as u32).map(|s| f.scope_depth(s)).collect();
+        let mut local = Vec::with_capacity(f.refs.len());
+        for r in &f.refs {
+            let mut best: Option<(u32, u32, u32)> = None; // (depth, order, idx)
+            // Imports resolve against other files' exports ONLY; qualified
+            // names resolve among their base's members at query time.
+            if r.kind != RefKind::Import && r.kind != RefKind::Qualified {
+                if let Some(cands) = by_name.get(&(r.ns.as_str(), r.name.as_str())) {
+                    for &i in cands {
+                        let d = &f.defs[i as usize];
+                        if (f.scope_unordered[0] || !d.ns.is_empty()) && d.scope == 0 {
+                            continue; // top-level forward world: environment decides
+                        }
+                        if (f.scope_unordered[d.scope as usize] || !d.ns.is_empty() || d.order < r.order)
+                            && f.visible(d.scope, r.scope)
+                        {
+                            let key = (depths[d.scope as usize], d.order, i);
+                            if best.map_or(true, |b| (key.0, key.1) > (b.0, b.1)) {
+                                best = Some(key);
+                            }
+                        }
+                    }
+                }
+            }
+            local.push(match best {
+                Some((_, _, i)) => LocalRes::Def(i),
+                None if f.escapes(r.scope) => LocalRes::Escape,
+                None => LocalRes::Contained,
+            });
+        }
+        drop(by_name);
+        f.local = local;
+        f
+    }
+}
+
+/// An item's facts, read through `parts`: walked whole when the item is
+/// small, and then no part is kept; otherwise put together from its part,
+/// which is returned to be kept with the item. `old` are the last
+/// revision's items this one may hold subtrees of.
+fn item_facts(
+    item: &GreenNode,
+    parts: &mut Parts<'_>,
+    old: &[Read<'_>],
+) -> (ItemFacts, Option<Arc<Part>>) {
+    let mut out = ItemFacts::new(parts.cfg);
+    if !annotates_anything(parts.cfg) {
+        return (out, None);
+    }
+    if parts.whole(item) {
+        parts.walked += item.width as u64;
+        let mut facts = Facts::default();
+        walk_whole(item, 0, 0, parts.cfg, &mut facts);
+        out.put(std::borrow::Cow::Owned(facts), 0, 0, 0);
+        return (out, None);
+    }
+    let part = parts.part(item, old);
+    out.put_part(&part, 0, 0);
+    (out, Some(part))
 }
 
 // ---------------------------------------------------------------------------
@@ -762,6 +1067,15 @@ pub struct SemStats {
     /// what answers "is this name defined?" for the few items a keystroke
     /// re-resolves or repaints.
     pub top_scans: u64,
+    /// Bytes of subtrees walked node by node to build fragments. Building
+    /// an item again walks what the edit rebuilt and puts every other part
+    /// of it in place without a walk: a keystroke walks a piece or two,
+    /// whatever the size of the item.
+    pub bytes_walked: u64,
+    /// Fragments built again that declare exactly what the fragment they
+    /// replace declared, and so are that fragment still: its identity, and
+    /// its resolution, carry over, and nothing downstream sees a change.
+    pub fragments_kept: u64,
 }
 
 struct ItemSlot {
@@ -774,6 +1088,9 @@ struct ItemSlot {
     /// (`paint_sync`, once per keystroke) opens no fragment.
     frag_uid: u64,
     frag: Arc<Fragment>,
+    /// How the fragment was put together, for the next revision to reuse:
+    /// see [`Part`]. `None` for an item walked whole.
+    part: Option<Arc<Part>>,
     /// (env fp, foreign fp, resolutions) — carried ACROSS revisions by
     /// the positional diff in set_tree, validated by fingerprint
     /// compare (two u64s, no hashing) in ensure_resolved.
@@ -800,7 +1117,7 @@ struct FileEntry {
     /// their fragments); swept exactly, from the positional diff. The
     /// key owns the subtree, so a swept entry's address cannot come
     /// back as someone else's.
-    frag_cache: HashMap<NodeKey, Arc<Fragment>>,
+    frag_cache: HashMap<NodeKey, Cached>,
     /// Top-level name → occurrence count, maintained EXACTLY from the
     /// per-edit fragment delta — membership answers in O(1), and an
     /// unchanged signature is proven in O(edit).
@@ -816,6 +1133,12 @@ struct FileEntry {
     /// (tree_rev); rebuilt lazily.
     env_fps: Option<Vec<u64>>,
     resolved_under: Option<u64 /* foreign fp */>,
+}
+
+/// An item's fragment, kept by the item's identity, and its part.
+struct Cached {
+    frag: Arc<Fragment>,
+    part: Option<Arc<Part>>,
 }
 
 pub struct SemDb {
@@ -843,6 +1166,12 @@ pub struct SemDb {
     revision: u64,
     files: HashMap<String, FileEntry>,
     pub stats: SemStats,
+    /// The part of every subtree that declares nothing.
+    empty_part: Arc<Part>,
+    /// The size up to which a subtree is walked whole: [`PIECE_BYTES`].
+    /// (The tests read finer, down to every node a part, to put every
+    /// fragment together from every shape of part.)
+    piece_bytes: u32,
 }
 
 fn fnv(h: u64, bytes: &[u8]) -> u64 {
@@ -868,6 +1197,8 @@ impl SemDb {
             revision: 0,
             files: HashMap::new(),
             stats: SemStats::default(),
+            empty_part: Arc::new(Part::default()),
+            piece_bytes: PIECE_BYTES,
         }
     }
 
@@ -883,6 +1214,12 @@ impl SemDb {
     /// edit left alone, and an offset stored per item. An item left
     /// alone keeps its slot: nothing is allocated, cloned or hashed for
     /// it.
+    ///
+    /// An item the edit rebuilt is put together from the parts of the
+    /// items it replaced (see `Part`): what is walked is the chain of
+    /// subtrees the edit rebuilt and the pieces at its end. What grows
+    /// with the ITEM is copying its facts into place; that is nothing
+    /// for an item that declares nothing.
     pub fn set_tree(&mut self, uri: &str, tree: Arc<GreenNode>) {
         self.revision += 1;
         let rev = self.revision;
@@ -957,28 +1294,59 @@ impl SemDb {
         }
         let (old_hi, new_hi) = (old_len - suffix, n_new - suffix);
 
+        // The window: each new item there is one the last revision had too
+        // (it moved, and keeps its fragment), or one built again, from the
+        // parts of the items it replaced wherever it holds their subtrees.
+        let new_keys: Vec<NodeKey> =
+            items[lo..new_hi].iter().map(|&(node, _)| NodeKey::new(node.clone())).collect();
+        let new_mid: HashSet<NodeKey> = new_keys.iter().cloned().collect();
+        let replaced: Vec<usize> = (lo..old_hi).filter(|&i| !new_mid.contains(&slots[i].key)).collect();
+        // Where the edit put one item in the place of one it replaced, the
+        // new one that declares exactly what the old one did IS the old
+        // one's fragment still: same identity, same resolution.
+        let one_for_one = old_hi - lo == new_hi - lo;
+        let mut parts = Parts { cfg, piece: self.piece_bytes, empty: &self.empty_part, walked: 0 };
+        let mut fragments_kept = 0u64;
         let mut window: Vec<ItemSlot> = Vec::with_capacity(new_hi - lo);
-        for &(node, base_off) in &items[lo..new_hi] {
-            let key = NodeKey::new(node.clone());
-            let frag = match e.frag_cache.get(&key) {
-                Some(f) => f.clone(),
-                None => {
-                    let f = Arc::new(build_fragment(key.node(), cfg));
-                    fragments_computed += 1;
-                    for &di in &f.top_defs {
-                        let d = &f.defs[di as usize];
-                        let c = e.top_counts.entry(tkey(&d.ns, &d.name)).or_insert((0, 0));
-                        c.0 += 1;
-                        c.1 += d.exported as i64;
-                        e.sig_dirty = true;
-                    }
-                    e.frag_cache.insert(key.clone(), f.clone());
-                    f
-                }
+        for (j, (key, &(_, base_off))) in new_keys.into_iter().zip(&items[lo..new_hi]).enumerate() {
+            if let Some(c) = e.frag_cache.get(&key) {
+                let (frag, part) = (c.frag.clone(), c.part.clone());
+                window.push(ItemSlot { key, base_off, frag_uid: frag.uid, frag, part, res: None });
+                continue;
+            }
+            let (facts, part) = {
+                let old: Vec<Read<'_>> = replaced
+                    .iter()
+                    .filter_map(|&i| slots[i].part.as_ref().map(|part| (&slots[i].key, part)))
+                    .collect();
+                item_facts(key.node(), &mut parts, &old)
             };
-            window.push(ItemSlot { key, base_off, frag_uid: frag.uid, frag, res: None });
+            fragments_computed += 1;
+            let at = lo + j;
+            let (frag, res) = if one_for_one
+                && !new_mid.contains(&slots[at].key)
+                && facts.same_as(&slots[at].frag)
+            {
+                // The replaced item's fragment passes to this one, its top
+                // names counted once still: the sweep below finds nothing
+                // of it to count out.
+                fragments_kept += 1;
+                e.frag_cache.remove(&slots[at].key);
+                (slots[at].frag.clone(), slots[at].res.take())
+            } else {
+                let f = Arc::new(facts.finish());
+                for &di in &f.top_defs {
+                    let d = &f.defs[di as usize];
+                    let c = e.top_counts.entry(tkey(&d.ns, &d.name)).or_insert((0, 0));
+                    c.0 += 1;
+                    c.1 += d.exported as i64;
+                    e.sig_dirty = true;
+                }
+                (f, None)
+            };
+            e.frag_cache.insert(key.clone(), Cached { frag: frag.clone(), part: part.clone() });
+            window.push(ItemSlot { key, base_off, frag_uid: frag.uid, frag, part, res });
         }
-        let new_mid: HashSet<NodeKey> = window.iter().map(|s| s.key.clone()).collect();
 
         // The signatures follow the items: the runs of the items kept
         // before and after the edit stay, and only the window between
@@ -1012,7 +1380,7 @@ impl SemDb {
         let removed: Vec<ItemSlot> = slots.splice(lo..old_hi, window).collect();
         for slot in &removed {
             if !new_mid.contains(&slot.key) {
-                if let Some(f) = e.frag_cache.remove(&slot.key) {
+                if let Some(Cached { frag: f, .. }) = e.frag_cache.remove(&slot.key) {
                     for &di in &f.top_defs {
                         let d = &f.defs[di as usize];
                         let k = tkey(&d.ns, &d.name);
@@ -1046,6 +1414,8 @@ impl SemDb {
         e.items = slots;
 
         self.stats.fragments_computed += fragments_computed;
+        self.stats.fragments_kept += fragments_kept;
+        self.stats.bytes_walked += parts.walked;
     }
 
     /// Signature with EARLY CUTOFF, computed on demand from the exact
@@ -1938,6 +2308,14 @@ impl SemDb {
         Arc::new(out)
     }
 
+    /// Does this database declare nothing a document could hold: no
+    /// binding annotation and no type tier? Then every file's fragments
+    /// are empty and its type report is too, whatever its text: there is
+    /// nothing to resolve, and nothing to paint over the lexical runs.
+    pub fn declares_nothing(&self) -> bool {
+        !annotates_anything(&self.cfg) && self.type_cfg.is_none()
+    }
+
     /// Is a type tier declared? (Painters use the answer to pick the
     /// identity-cached overlay path — the type report has no per-item
     /// identity yet, so typed grammars keep the composed-view path.)
@@ -2109,3 +2487,325 @@ pub enum Target {
 }
 
 pub type Resolutions = Vec<Target>;
+
+#[cfg(test)]
+mod part_tests {
+    //! Parts against the walk they replace. After every step of an edit
+    //! script, every item's fragment must declare exactly what the walk
+    //! the parts replaced finds in the item — the walk as it was, kept
+    //! here verbatim as the oracle — however finely the item is read, and
+    //! whatever the last revision's parts it was put together from.
+
+    use super::*;
+    use qana_engine::{IncSession, Line, LineEdit, LineTerm};
+    use qana_grammar::demo::{demo_grammar, demo_syn_grammar};
+    use qana_grammar::{build_lr, CompiledLexer, LrTables};
+
+    struct Pipe {
+        lexer: CompiledLexer,
+        sg: SynGrammar,
+        tables: LrTables,
+    }
+
+    fn pipe() -> Pipe {
+        let (g, ids) = demo_grammar();
+        let lexer = CompiledLexer::build(&g).unwrap();
+        let sg = demo_syn_grammar(&ids, &lexer.vocab);
+        let tables = build_lr(&sg);
+        assert!(tables.conflicts.is_empty());
+        Pipe { lexer, sg, tables }
+    }
+
+    /// Every kind of annotation, on the demo grammar's productions. What
+    /// it means as a language does not matter here: a walk is mechanical
+    /// over (production, child), and this config makes it do all of it —
+    /// nested and barrier scopes, ordered and not, exported defs, two refs
+    /// on one node, a qualified name, a namespace, a module whose def is
+    /// its own, and a module whose def is the last one declared before it
+    /// (in another part, as often as not).
+    fn stress_config(sg: &SynGrammar) -> BindingConfig {
+        let mut cfg = BindingConfig::default();
+        for i in 0..sg.prods.len() {
+            let (nt, prod) = (sg.prods[i].lhs, i as u16);
+            match sg.prod_name(i).as_str() {
+                "LetStmt" => {
+                    cfg.defs.push((nt, prod, 1));
+                    cfg.exports.push((nt, prod));
+                    cfg.modules.push((nt, prod, 3));
+                }
+                "NameRef" => cfg.refs.push((nt, prod, 0, RefKind::Var)),
+                "CallExpr" => {
+                    cfg.refs.push((nt, prod, 0, RefKind::Call));
+                    cfg.refs.push((nt, prod, 0, RefKind::Qualified));
+                    cfg.quals.push((nt, prod, 2, 0));
+                    cfg.namespaces.push((nt, prod, "fn".to_string()));
+                }
+                "Block" => cfg.scopes.push((nt, prod, false, false)),
+                "IfStmt" => cfg.scopes.push((nt, prod, true, true)),
+                "BlockStmt" => cfg.modules.push((nt, prod, 0)),
+                _ => {}
+            }
+        }
+        cfg
+    }
+
+    fn rng(mut seed: u64) -> impl FnMut(usize) -> usize {
+        move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n.max(1) as u64) as usize
+        }
+    }
+
+    /// One line of the demo language, not counting braces that open or
+    /// close a block over lines.
+    fn statement(r: &mut impl FnMut(usize) -> usize) -> String {
+        let n = r(40);
+        match r(8) {
+            0 => format!("let a{n} = a{} + {};", r(40), r(9)),
+            1 => format!("a{n};"),
+            2 => format!("emit(a{n}, {});", r(9)),
+            3 => format!("if (a{n}) {{ let b{n} = a{n}; }}"),
+            4 => format!("if (a{n}) {{ f(b{n}); }} else {{ let c{n} = 2; }}"),
+            5 => format!("{{ let c{n} = {}; c{n}; }}", r(9)),
+            6 => "// a note".to_string(),
+            _ => format!("let a{n} = {};", r(9)),
+        }
+    }
+
+    /// A file of a few small items and one block item of `lines` lines,
+    /// with blocks nested in it over several lines.
+    fn program(r: &mut impl FnMut(usize) -> usize, lines: usize) -> String {
+        let mut out = String::new();
+        for _ in 0..4 {
+            out.push_str(&statement(r));
+            out.push('\n');
+        }
+        out.push_str("{\n");
+        let mut depth = 1usize;
+        for _ in 0..lines {
+            match r(10) {
+                0 if depth < 6 => {
+                    out.push_str("{\n");
+                    depth += 1;
+                }
+                1 if depth > 1 => {
+                    out.push_str("}\n");
+                    depth -= 1;
+                }
+                _ => {
+                    out.push_str(&statement(r));
+                    out.push('\n');
+                }
+            }
+        }
+        for _ in 0..depth {
+            out.push_str("}\n");
+        }
+        for _ in 0..4 {
+            out.push_str(&statement(r));
+            out.push('\n');
+        }
+        out
+    }
+
+    /// What the walk the parts replaced finds in `item`.
+    fn walked(item: &GreenNode, cfg: &BindingConfig) -> ItemFacts {
+        let mut f = ItemFacts::new(cfg);
+        let mut order = 0u32;
+        walk(item, 0, 0, cfg, &mut f, &mut order);
+        for d in &mut f.defs {
+            // The walk said so itself, per def.
+            debug_assert_eq!(d.top_level, d.scope == 0);
+        }
+        f
+    }
+
+    /// Every item of `uri` declares what the walk finds in it.
+    fn hold_to_the_walk(db: &SemDb, uri: &str, what: &str) {
+        let e = &db.files[uri];
+        for (k, slot) in e.items.iter().enumerate() {
+            let expected = walked(slot.key.node(), &db.cfg);
+            assert!(expected.same_as(&slot.frag), "{what}: item {k} declares what the walk finds");
+            // And what is derived from it is derived from that.
+            let derived = expected.finish();
+            assert_eq!(derived.local, slot.frag.local, "{what}: item {k} resolves as the walk's");
+            assert_eq!(derived.top_defs, slot.frag.top_defs);
+            assert_eq!(derived.top_sigs, slot.frag.top_sigs);
+        }
+    }
+
+    /// Opened, read at every size from every node a part to the real
+    /// one: the same fragments as the walk.
+    #[test]
+    fn parts_put_together_what_the_walk_finds() {
+        let p = pipe();
+        let mut r = rng(0x9A27_5EED);
+        let text = program(&mut r, 400);
+        let s = IncSession::new(&p.lexer, &p.sg, &p.tables, &text).unwrap();
+        for cfg in [stress_config(&p.sg), demo_binding_config(&p.sg)] {
+            for piece in [0, 1, 24, 200, 1000, PIECE_BYTES] {
+                let mut db = SemDb::new(cfg.clone());
+                db.piece_bytes = piece;
+                db.set_tree("a", s.tree().unwrap().clone());
+                hold_to_the_walk(&db, "a", &format!("piece {piece}"));
+                assert!(db.files["a"].items.iter().any(|slot| slot.part.is_some()), "the block item is read in parts");
+            }
+        }
+    }
+
+    /// Through an edit script — lines retyped, inserted and deleted
+    /// inside the block item and around it, braces among them, so that
+    /// lists regroup and parses break and recover — each revision put
+    /// together from the last one's parts: the same fragments as the
+    /// walk, and the same answers as a database that never had a last
+    /// revision.
+    #[test]
+    fn parts_kept_across_edits_put_together_what_the_walk_finds() {
+        let p = pipe();
+        for (seed, piece) in [(0x0001_C0DE, 0), (0x0002_C0DE, 48), (0x0003_C0DE, 300), (0x0004_C0DE, PIECE_BYTES)] {
+            let mut r = rng(seed);
+            let text = program(&mut r, 600);
+            let mut s = IncSession::new(&p.lexer, &p.sg, &p.tables, &text).unwrap();
+            let cfg = stress_config(&p.sg);
+            let mut db = SemDb::new(cfg.clone());
+            db.piece_bytes = piece;
+            db.set_tree("a", s.tree().unwrap().clone());
+            hold_to_the_walk(&db, "a", "opened");
+            for step in 0..150 {
+                let n = s.buf.lines.len();
+                let start = r(n.saturating_sub(1).max(1));
+                let line = match r(6) {
+                    0 => "{".to_string(),
+                    1 => "}".to_string(),
+                    _ => statement(&mut r),
+                };
+                let (end, replacement) = match r(4) {
+                    0 => (start, vec![Line::new(line, LineTerm::Lf)]),
+                    1 => (start + 1, vec![]),
+                    2 => {
+                        // The same line, a digit changed for another: the
+                        // facts do not move, and the fragment is kept.
+                        let old = s.buf.lines[start].text.clone();
+                        let swapped: String = old
+                            .chars()
+                            .map(|c| if c.is_ascii_digit() { char::from(b'0' + ((c as u8 - b'0' + 1) % 10)) } else { c })
+                            .collect();
+                        (start + 1, vec![Line::new(swapped, LineTerm::Lf)])
+                    }
+                    _ => (start + 1, vec![Line::new(line, LineTerm::Lf)]),
+                };
+                s.edit(&p.sg, &p.tables, &[LineEdit { start, end, replacement }]).unwrap();
+                db.set_tree("a", s.tree().unwrap().clone());
+                let what = format!("seed {seed:#x} piece {piece} step {step}");
+                hold_to_the_walk(&db, "a", &what);
+                if step % 10 == 0 {
+                    let mut fresh = SemDb::new(cfg.clone());
+                    fresh.set_tree("a", s.tree().unwrap().clone());
+                    assert_eq!(*db.symbols("a"), *fresh.symbols("a"), "{what}: symbols");
+                    assert_eq!(db.resolve("a"), fresh.resolve("a"), "{what}: resolutions");
+                    assert_eq!(db.unresolved("a"), fresh.unresolved("a"), "{what}: unresolved");
+                }
+            }
+            assert!(db.stats.fragments_kept > 0, "seed {seed:#x}: some edit left an item's facts as they were");
+        }
+    }
+
+    /// The walk the parts replaced, verbatim.
+fn walk(
+    n: &GreenNode,
+    base: u32,
+    scope: ScopeId,
+    cfg: &BindingConfig,
+    f: &mut ItemFacts,
+    order: &mut u32,
+) {
+    let mut scope = scope;
+    // When a production BOTH defines and opens a scope, the def
+    // belongs to the ENCLOSING scope — function-name semantics:
+    // `macro m(x) => …` puts `m` outside and `x` inside. (Nothing
+    // else is sensible: a def inside its own scope is invisible.)
+    let outer = scope;
+    if n.prod != RUN_PROD {
+        if let Some(&(_, _, unordered, barrier)) =
+            cfg.scopes.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
+        {
+            let id = f.scope_parents.len() as ScopeId;
+            f.scope_parents.push(scope);
+            f.scope_unordered.push(unordered);
+            f.scope_barrier.push(barrier);
+            scope = id;
+        }
+    }
+    // A production's declared namespace covers its def and refs.
+    let node_ns = cfg
+        .namespaces
+        .iter()
+        .find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
+        .map(|t| t.2.as_str())
+        .unwrap_or("");
+    if let Some(&(_, _, k)) = cfg.defs.iter().find(|&&(nt, p, _)| nt == n.nt && p == n.prod) {
+        if let Some((name, off)) = name_child(n, k) {
+            *order += 1;
+            f.defs.push(Def {
+                span: (base + off, base + off + name.len() as u32),
+                name,
+                scope: outer,
+                order: *order,
+                top_level: outer == 0,
+                exported: cfg.exports.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
+                ns: node_ns.to_string(),
+            });
+        }
+    }
+    // A production may carry SEVERAL references (a qualified path
+    // has a base @ref and a @qualify name), so collect all entries.
+    for &(nt2, p2, k, kind) in cfg.refs.iter() {
+        if nt2 != n.nt || p2 != n.prod {
+            continue;
+        }
+        if let Some((name, off)) = name_child(n, k) {
+            *order += 1;
+            f.refs.push(Ref {
+                span: (base + off, base + off + name.len() as u32),
+                name,
+                scope,
+                order: *order,
+                kind,
+                ns: node_ns.to_string(),
+            });
+        }
+    }
+    if let Some(&(_, _, body)) =
+        cfg.modules.iter().find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
+    {
+        if let (false, Some(span)) = (f.defs.is_empty(), child_span(n, base, body)) {
+            // The def this production just pushed introduces the
+            // namespace; members are the defs inside `span`.
+            f.modules.push(((f.defs.len() - 1) as u32, span));
+        }
+    }
+    if let Some(&(_, _, base_child, _)) =
+        cfg.quals.iter().find(|&&(nt2, p2, _, _)| nt2 == n.nt && p2 == n.prod)
+    {
+        if let Some(bspan) = child_span(n, base, base_child) {
+            // The Qualified ref for this node was pushed just above.
+            if let Some(ri) = f
+                .refs
+                .iter()
+                .rposition(|r| r.kind == RefKind::Qualified && r.span.0 >= base && r.span.0 < base + n.width)
+            {
+                f.quals.push((bspan, ri as u32));
+            }
+        }
+    }
+    let mut off = base;
+    for c in &n.children {
+        if let GreenChild::Node(m) = c {
+            walk(m, off, scope, cfg, f, order);
+        }
+        off += c.width();
+    }
+}
+}

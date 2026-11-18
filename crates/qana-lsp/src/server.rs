@@ -17,8 +17,7 @@ use qana_lang::compile::{certify, compile, QanaDiag};
 use qana_lang::QanaToolchain;
 use qana_sem::SemDb;
 use qana_services::{
-    completion_at, diagnostics, folding_ranges, outline, semantic_tokens_full, FoldKind,
-    SemanticTokens,
+    completion_at, diagnostics, folds, outline, semantic_tokens_full, SemanticTokens,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -246,15 +245,22 @@ impl Server {
             "textDocument/foldingRange" => {
                 let uri = str_at(&params, "/textDocument/uri");
                 let Some(doc) = self.docs.get(&uri) else { return vec![resp(id, json!([]))] };
+                let Some(tree) = doc.session.tree() else { return vec![resp(id, json!([]))] };
                 let pipe = self.pipe_of(doc.lang);
-                let folds: Vec<Value> = folding_ranges(pipe.lexer, &doc.session.buf)
+                // A fold is reported by the lines of its first and last
+                // bytes. Comments are LSP's `comment` kind; a construct
+                // has no kind of LSP's (`region` is a `#region` marker's).
+                let starts = line_starts(doc);
+                let line = |off: u32| starts.partition_point(|&s| s <= off) - 1;
+                let folds: Vec<Value> = folds(tree, &pipe.folds)
                     .into_iter()
                     .map(|f| {
-                        json!({
-                            "startLine": f.start_line,
-                            "endLine": f.end_line,
-                            "kind": match f.kind { FoldKind::Block => "region", FoldKind::Comment => "comment" }
-                        })
+                        let (start, end) = (line(f.span.0), line(f.span.1 - 1));
+                        if f.category == pipe.folds.comment {
+                            json!({ "startLine": start, "endLine": end, "kind": "comment" })
+                        } else {
+                            json!({ "startLine": start, "endLine": end })
+                        }
                     })
                     .collect();
                 vec![resp(id, json!(folds))]
@@ -627,6 +633,17 @@ fn pos_to_offset(doc: &Doc, pos: &Value) -> u32 {
     let line = line.min(doc.session.buf.lines.len().saturating_sub(1));
     let max = doc.session.buf.lines[line].text.len() as u32;
     line_byte_start(doc, line) + ch.min(max)
+}
+
+/// The byte offset each line of `doc` starts at.
+fn line_starts(doc: &Doc) -> Vec<u32> {
+    let mut starts = Vec::with_capacity(doc.session.buf.lines.len());
+    let mut at = 0u32;
+    for l in &doc.session.buf.lines {
+        starts.push(at);
+        at += l.text.len() as u32 + l.term.as_str().len() as u32;
+    }
+    starts
 }
 
 fn offset_to_pos(doc: &Doc, offset: u32) -> Value {

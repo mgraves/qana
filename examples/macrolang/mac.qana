@@ -51,7 +51,7 @@ rule item =
   // `body` child. @scope keeps the parameters out of the file's
   // namespace — and makes body-refs-to-params resolve locally, which
   // is exactly what the expansion engine substitutes on.
-  | MacroDef: "macro" name:IDENT "(" ps:mparams ")" "=>" "{" body:expr "}" @def(name) @macro(ps, body) @scope @outline(name, function)
+  | MacroDef: "macro" name:IDENT "(" ps:mparams ")" "=>" open:"{" body:expr "}" @def(name) @macro(ps, body) @scope @outline(name, function) @fold(block, open)
   | LetDef:   "let" name:IDENT "=" expr ";" @def(name) @outline(name, variable)
 
 rule mparams = mparam* % ","
@@ -66,13 +66,13 @@ rule mparam = MParam: name:IDENT @def(name)
 rule local_bind = LocalBind: "let" name:IDENT "=" expr ";" @def(name)
 
 rule expr =
-  | Scoped:  "{" local_bind expr "}" @scope
+  | Scoped:  "{" local_bind expr "}" @scope @fold(block)
   | Add:     expr "+" expr
   | Mul:     expr "*" expr
   // Expansion may happen HERE and only here: `name!(args)`.
-  | Splice:  name:IDENT "!" "(" args:sargs ")" @ref(name) @splice(name, args)
+  | Splice:  name:IDENT "!" open:"(" args:sargs ")" @ref(name) @splice(name, args) @fold(list, open)
   | NameRef: name:IDENT @ref(name)
   | Num:     NUMBER
-  | Paren:   "(" expr ")"
+  | Paren:   "(" expr ")" @fold(list)
 
 rule sargs = expr* % ","

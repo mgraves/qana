@@ -243,20 +243,6 @@ fn operators_punctuation_and_brackets_are_told_apart() {
     );
 }
 
-/// The declared pairs are what folding reads: a block over lines folds.
-#[test]
-fn a_block_over_lines_folds() {
-    let lexer = lexer_of(GRAMMAR);
-    let src = "fn main() {\n    let v = [\n        1,\n    ];\n}\n";
-    let buffer = LexedBuffer::new(lexer, src);
-    let folds: Vec<(u32, u32)> = qana_services::folding_ranges(lexer, &buffer)
-        .iter()
-        .map(|f| (f.start_line, f.end_line))
-        .collect();
-    assert!(folds.contains(&(0, 4)), "the function's body folds: {folds:?}");
-    assert!(folds.contains(&(1, 3)), "the array folds: {folds:?}");
-}
-
 /// Completion offers a keyword by its text. `Self` and `self` are two
 /// keywords, and each is offered as written, where an expression can
 /// begin.

@@ -76,6 +76,15 @@ The outline: functions, types, traits, impls, modules, constants and
 macro definitions (`@outline`). It declares no binding (`@def`/`@ref`)
 yet.
 
+Folding (`@fold`), wherever one runs over lines: blocks and the bodies of
+modules, structs, enums, unions, traits, impls, `extern` blocks, `match`
+and macro calls and definitions (`block`); parameter, argument, generic
+parameter and pattern lists, `use` groups, arrays, tuples, struct
+literals and the other token trees (`list`); string literals (`string`).
+Comments fold on their own (`comment`): one over lines, and lines in a
+row holding nothing but comments, such as doc comments.
+`cargo test -p qana-lang --test rust_folds` pins them.
+
 qana's style legend has no class for types, functions, macros,
 attributes, lifetimes or doc comments, so those are coloured as names,
 punctuation or comments.

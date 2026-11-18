@@ -52,7 +52,7 @@ rule decl =
   | MaxStackDecl: "max_stack" NUM
   | KwDecl: "keywords" base:NAME "=" kw_list @ref(base)
   | TokenDecl: token_def
-  | ModeDecl: "mode" name:NAME "{" token_defs "}" @outline(name, module)
+  | ModeDecl: "mode" name:NAME open:"{" token_defs "}" @outline(name, module) @fold(block, open)
   | PairDecl: "pair" tok_ref tok_ref
   | PrecDecl: "prec" assoc prec_ops
   | StartDecl: "start" name:NAME @ref(name)
@@ -80,7 +80,7 @@ rule attrs = attr*
 
 rule attr =
   | AttrPlain: "@" NAME
-  | AttrArgs: "@" NAME "(" arg_list ")"
+  | AttrArgs: "@" NAME open:"(" arg_list ")" @fold(list, open)
 
 rule arg_list = arg+ % ","
 

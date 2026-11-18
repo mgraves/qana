@@ -9,7 +9,7 @@
 pub mod bootstrap;
 pub mod compile;
 pub mod expand;
-mod folds;
+mod structure;
 pub mod live;
 pub mod pat_parse;
 pub mod qana_ast;
@@ -71,6 +71,8 @@ pub struct EmbeddedLang {
     pub tables: &'static LrTables,
     pub styles: qana_services::Styles,
     pub outline: qana_services::OutlineConfig,
+    /// What folds: the `@fold` constructs and the comments.
+    pub folds: qana_services::FoldConfig,
     pub binding: qana_sem::BindingConfig,
     /// The declared type tier (empty when the grammar declares none).
     pub types: qana_sem::TypeConfig,
@@ -103,6 +105,7 @@ impl EmbeddedLang {
             tables: Box::leak(Box::new(tables)),
             styles: out.def.styles,
             outline: out.def.outline,
+            folds: out.def.folds,
             binding: out.def.binding,
             types: out.def.types,
             macros: out.def.macros,
@@ -258,6 +261,31 @@ pub fn qana_outline_config(sg: &SynGrammar) -> qana_services::OutlineConfig {
         }
     }
     cfg
+}
+
+/// Folding for grammar files: a mode's body from its `{`, and an
+/// attribute's arguments from their `(`. (A rule folds as the outline
+/// entry it is.)
+pub fn qana_fold_config(
+    sg: &SynGrammar,
+    vocab: &qana_grammar::Vocab,
+    styles: &qana_services::Styles,
+) -> qana_services::FoldConfig {
+    let mut entries: Vec<(u16, u8, Option<usize>, Option<usize>)> = Vec::new();
+    for i in 0..sg.prods.len() {
+        match sg.prod_name(i).as_str() {
+            "ModeDecl" => entries.push((i as u16, 0, Some(2), None)),
+            "AttrArgs" => entries.push((i as u16, 1, Some(2), None)),
+            _ => {}
+        }
+    }
+    qana_services::FoldConfig::new(
+        vec!["block".to_string(), "list".to_string()],
+        &entries,
+        sg.prods.len(),
+        vocab,
+        styles,
+    )
 }
 
 /// Binding for grammar files: token/rule/mode declarations define names,

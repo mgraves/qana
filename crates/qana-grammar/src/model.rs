@@ -170,6 +170,11 @@ pub struct Vocab {
     pub trivia: Vec<bool>,
     pub error: Vec<bool>,
     pub brackets: Vec<Option<(BracketKind, bool)>>,
+    /// The mode each token is read in, by id (0 is the base mode; the
+    /// unknown token's is 0). A token of another mode stands inside a
+    /// construct that runs over tokens of its own, such as a block
+    /// comment's body or a string's.
+    pub modes: Vec<u16>,
     pub unknown: TokenId,
 }
 
@@ -180,11 +185,13 @@ impl Vocab {
         let mut error: Vec<bool> = g.tokens.iter().map(|t| t.error).collect();
         let mut brackets: Vec<Option<(BracketKind, bool)>> =
             g.tokens.iter().map(|t| t.bracket).collect();
+        let mut modes: Vec<u16> = g.tokens.iter().map(|t| t.mode).collect();
         names.push("UNKNOWN".to_string());
         trivia.push(true);
         error.push(false);
         brackets.push(None);
-        Vocab { names, trivia, error, brackets, unknown: g.unknown_id() }
+        modes.push(0);
+        Vocab { names, trivia, error, brackets, modes, unknown: g.unknown_id() }
     }
     pub fn is_trivia(&self, id: TokenId) -> bool {
         self.trivia[id as usize]

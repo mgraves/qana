@@ -5,7 +5,7 @@
 use qana_engine::*;
 use qana_grammar::demo::{demo_grammar, demo_syn_grammar, DemoIds};
 use qana_grammar::{build_lr, CompiledLexer, LrTables, SynGrammar};
-use qana_services::demo_glue::{demo_outline_config, demo_styles};
+use qana_services::demo_glue::{demo_fold_config, demo_outline_config, demo_styles};
 use qana_services::*;
 
 struct Rng(u64);
@@ -92,19 +92,56 @@ fn semantic_token_delta_equals_fresh_full_under_random_edits() {
     }
 }
 
+/// The folds of `src` in the demo language: (kind, text of the span,
+/// text of the head).
+fn demo_folds(src: &str) -> Vec<(String, String, String)> {
+    let (lexer, sg, tables, ids) = pipeline();
+    let styles = demo_styles(&ids);
+    let cfg = demo_fold_config(&sg, &lexer.vocab, &styles);
+    let session = IncSession::new(&lexer, &sg, &tables, src).unwrap();
+    let text = |(s, e): (u32, u32)| src[s as usize..e as usize].to_string();
+    folds(session.tree().unwrap(), &cfg)
+        .into_iter()
+        .map(|f| (cfg.legend[f.category as usize].clone(), text(f.span), text(f.head)))
+        .collect()
+}
+
+fn fold(kind: &str, span: &str, head: &str) -> (String, String, String) {
+    (kind.to_string(), span.to_string(), head.to_string())
+}
+
+/// A construct folds from its first token to its last when it runs over
+/// lines; a comment folds when it does.
 #[test]
 fn folding_covers_blocks_and_comments() {
-    let (lexer, _sg, _tables, _ids) = pipeline();
     let src = "if (x) {\n  y();\n  z();\n}\n/* long\n   comment\n*/\nlet a = 1;\n";
-    let buf = LexedBuffer::new(&lexer, src);
-    let folds = folding_ranges(&lexer, &buf);
-    assert!(
-        folds.contains(&FoldRange { start_line: 0, end_line: 3, kind: FoldKind::Block }),
-        "block fold: {folds:?}"
+    assert_eq!(
+        demo_folds(src),
+        [
+            fold("block", "{\n  y();\n  z();\n}", "{"),
+            fold("comment", "/* long\n   comment\n*/", "/*"),
+        ]
     );
-    assert!(
-        folds.iter().any(|f| f.kind == FoldKind::Comment && f.start_line == 4 && f.end_line >= 6),
-        "comment fold: {folds:?}"
+}
+
+/// A construct on one line folds nothing; a call folds from its `(`.
+#[test]
+fn folding_takes_constructs_over_lines_only() {
+    let src = "f(1, 2);\ng(\n  1,\n  [2,\n   3]\n);\n{ x; }\n";
+    assert_eq!(
+        demo_folds(src),
+        [fold("list", "(\n  1,\n  [2,\n   3]\n)", "("), fold("list", "[2,\n   3]", "[")]
+    );
+}
+
+/// Two or more lines in a row holding only comments fold together; a
+/// comment after code, or alone, does not; a blank line ends a run.
+#[test]
+fn folding_runs_comment_lines() {
+    let src = "// a\n// b\nlet c = 1; // d\n// e\n\n// f\n// g\n// h\nlet i = 2;\n";
+    assert_eq!(
+        demo_folds(src),
+        [fold("comment", "// a\n// b", "// a"), fold("comment", "// f\n// g\n// h", "// f")]
     );
 }
 

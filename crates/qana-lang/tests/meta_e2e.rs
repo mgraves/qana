@@ -449,7 +449,7 @@ fn substitution_is_syntax_aware() {
     // And the honest refusal: a grammar with no grouping production
     // cannot be parenthesized, so the expander says so instead of
     // silently changing the meaning.
-    let no_parens = MAC_RG.replace("  | Paren:   \"(\" expr \")\"\n", "");
+    let no_parens = MAC_RG.replace("  | Paren:   \"(\" expr \")\" @fold(list)\n", "");
     assert_ne!(no_parens, MAC_RG, "probe edit took");
     let tc = QanaToolchain::new();
     let probe = compile_source(&tc, &no_parens);

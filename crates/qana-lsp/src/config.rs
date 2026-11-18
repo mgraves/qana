@@ -112,6 +112,8 @@ pub struct Pipeline {
     pub tables: &'static LrTables,
     pub styles: Styles,
     pub outline_cfg: OutlineConfig,
+    /// What folds (see `qana_services::folds`).
+    pub folds: qana_services::FoldConfig,
     pub binding: BindingConfig,
     /// The declared type tier (empty for languages that declare none —
     /// the legacy toml config and the `.qana` surface itself).
@@ -147,6 +149,7 @@ pub fn build_pipeline(cfg: &LangConfig) -> Result<Pipeline, String> {
     }
     let styles = demo_styles(&ids);
     let outline_cfg = demo_outline_config(&sg);
+    let folds = qana_services::demo_glue::demo_fold_config(&sg, &lexer.vocab, &styles);
     let binding = demo_binding_config(&sg);
     Ok(Pipeline {
         lexer: Box::leak(Box::new(lexer)),
@@ -154,6 +157,7 @@ pub fn build_pipeline(cfg: &LangConfig) -> Result<Pipeline, String> {
         tables: Box::leak(Box::new(tables)),
         styles,
         outline_cfg,
+        folds,
         binding,
         types: qana_sem::TypeConfig::default(),
     })
@@ -176,6 +180,7 @@ pub fn build_pipeline_qana(tc: &QanaToolchain, text: &str) -> Result<Pipeline, V
         tables: Box::leak(Box::new(tables)),
         styles: out.def.styles,
         outline_cfg: out.def.outline,
+        folds: out.def.folds,
         binding: out.def.binding,
         types: out.def.types,
     })
@@ -200,11 +205,13 @@ pub fn qana_parse_diags(
 /// dogfood loop: grammar files get qana-powered highlighting, outline,
 /// navigation, and live envelope diagnostics.
 pub fn qana_service_pipeline(tc: &'static QanaToolchain) -> Pipeline {
+    let styles = qana_styles(&tc.ids);
     Pipeline {
         lexer: &tc.lexer,
         sg: &tc.sg,
         tables: &tc.tables,
-        styles: qana_styles(&tc.ids),
+        folds: qana_lang::qana_fold_config(&tc.sg, &tc.lexer.vocab, &styles),
+        styles,
         outline_cfg: qana_outline_config(&tc.sg),
         binding: qana_binding_config(&tc.sg),
         types: qana_sem::TypeConfig::default(),

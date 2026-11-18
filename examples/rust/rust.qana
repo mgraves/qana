@@ -296,9 +296,9 @@ rule attr_input =
 // ---- token trees (macro input) ----
 
 rule delim_tt =
-  | ParenTt:   "(" tts ")"
-  | BracketTt: "[" tts "]"
-  | BraceTt:   "{" tts "}"
+  | ParenTt:   "(" tts ")" @fold(list)
+  | BracketTt: "[" tts "]" @fold(list)
+  | BraceTt:   "{" tts "}" @fold(block)
 
 rule tts = tt*
 
@@ -548,16 +548,16 @@ rule item_kind =
 rule vis_item_kind =
   | Use:          "use" use_tree ";"
   | ModDecl:      mod_head n:name ";" @outline(n, module)
-  | ModDef:       mod_head n:name "{" inner_attrs_opt items_opt "}" @outline(n, module)
+  | ModDef:       mod_head n:name open:"{" inner_attrs_opt items_opt "}" @outline(n, module) @fold(block, open)
   | Fn:           fn_def
   | Struct:       struct_def
-  | Enum:         "enum" n:name generics_opt where_opt "{" variants_opt "}" @outline(n, struct)
-  | Union:        KW_UNION n:name generics_opt where_opt "{" fields_opt "}" @outline(n, struct)
+  | Enum:         "enum" n:name generics_opt where_opt open:"{" variants_opt "}" @outline(n, struct) @fold(block, open)
+  | Union:        KW_UNION n:name generics_opt where_opt open:"{" fields_opt "}" @outline(n, struct) @fold(block, open)
   | Const:        const_def
   | Static:       static_def
   | TypeAlias:    type_alias
-  | Trait:        trait_head n:name generics_opt colon_bounds_opt where_opt "{" inner_attrs_opt assoc_items_opt "}" @outline(n, class)
-  | ExternBlock:  extern_head "{" inner_attrs_opt foreign_items_opt "}"
+  | Trait:        trait_head n:name generics_opt colon_bounds_opt where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(n, class) @fold(block, open)
+  | ExternBlock:  extern_head open:"{" inner_attrs_opt foreign_items_opt "}" @fold(block, open)
   | ExternCrate:  "extern" "crate" n:crate_name rename_opt ";" @outline(n, module)
 
 rule mod_head =
@@ -590,13 +590,13 @@ rule use_tree =
   | UseGlob:       name path_sep STAR
   | UseMultiGlob:  name_path_multi path_sep STAR
   | UseKwGlob:     kw_path path_sep STAR
-  | UseGroup:      name path_sep "{" use_trees_opt "}"
-  | UseMultiGroup: name_path_multi path_sep "{" use_trees_opt "}"
-  | UseKwGroup:    kw_path path_sep "{" use_trees_opt "}"
+  | UseGroup:      name path_sep open:"{" use_trees_opt "}" @fold(list, open)
+  | UseMultiGroup: name_path_multi path_sep open:"{" use_trees_opt "}" @fold(list, open)
+  | UseKwGroup:    kw_path path_sep open:"{" use_trees_opt "}" @fold(list, open)
   | UseRootGlob:   STAR
   | UseGlobalGlob: path_sep STAR
-  | UseRootGroup:  "{" use_trees_opt "}"
-  | UseGlobalGroup: path_sep "{" use_trees_opt "}"
+  | UseRootGroup:  "{" use_trees_opt "}" @fold(list)
+  | UseGlobalGroup: path_sep open:"{" use_trees_opt "}" @fold(list, open)
 
 rule use_trees_opt =
   | UseTreesNone:
@@ -609,7 +609,7 @@ rule use_tree_list = use_tree+ % ","
 // prefix would ask the parser to decide it is absent before it sees what
 // the `unsafe` or `const` it is reading begins (an `unsafe impl`, a
 // `const` item), which one token cannot tell.
-rule fn_def = FnDef: fn_head n:name generics_opt "(" params_opt ")" fn_ret_opt where_opt fn_body @outline(n, function)
+rule fn_def = FnDef: fn_head n:name generics_opt open:"(" params_opt close:")" fn_ret_opt where_opt fn_body @outline(n, function) @fold(list, open, close)
 
 rule fn_body =
   | FnBlock: block_body
@@ -677,8 +677,8 @@ rule fn_ret_nb = FnRetNb: MINUS_ARROW GT type_nb
 
 // Structs.
 rule struct_def =
-  | NamedStruct: "struct" n:name generics_opt where_opt "{" fields_opt "}" @outline(n, struct)
-  | TupleStruct: "struct" n:name generics_opt "(" tuple_fields_opt ")" where_opt ";" @outline(n, struct)
+  | NamedStruct: "struct" n:name generics_opt where_opt open:"{" fields_opt "}" @outline(n, struct) @fold(block, open)
+  | TupleStruct: "struct" n:name generics_opt open:"(" tuple_fields_opt close:")" where_opt ";" @outline(n, struct) @fold(list, open, close)
   | UnitStruct:  "struct" n:name generics_opt where_opt ";" @outline(n, struct)
 
 rule fields_opt =
@@ -719,8 +719,8 @@ rule variant_list = variant+ % ","
 
 rule variant =
   | Variant:       outer_attrs_opt vis_opt n:name discriminant_opt @outline(n, constant)
-  | TupleVariant:  outer_attrs_opt vis_opt n:name "(" tuple_fields_opt ")" discriminant_opt @outline(n, constant)
-  | StructVariant: outer_attrs_opt vis_opt n:name "{" fields_opt "}" discriminant_opt @outline(n, constant)
+  | TupleVariant:  outer_attrs_opt vis_opt n:name open:"(" tuple_fields_opt close:")" discriminant_opt @outline(n, constant) @fold(list, open, close)
+  | StructVariant: outer_attrs_opt vis_opt n:name open:"{" fields_opt close:"}" discriminant_opt @outline(n, constant) @fold(block, open, close)
 
 rule discriminant_opt = discriminant?
 
@@ -780,14 +780,14 @@ rule impl_rest =
   | ImplGenerics:  generics impl_target
 
 rule impl_target_plain =
-  | InherentTargetPlain: t:impl_type where_opt "{" inner_attrs_opt assoc_items_opt "}" @outline(t, class)
-  | TraitTargetPlain:    tr:unq_type_path "for" t:type where_opt "{" inner_attrs_opt assoc_items_opt "}" @outline(t, class)
-  | NegTargetPlain:      BANG tr:type_path "for" t:type where_opt "{" inner_attrs_opt assoc_items_opt "}" @outline(t, class)
+  | InherentTargetPlain: t:impl_type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
+  | TraitTargetPlain:    tr:unq_type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
+  | NegTargetPlain:      BANG tr:type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
 
 rule impl_target =
-  | InherentTarget: t:type where_opt "{" inner_attrs_opt assoc_items_opt "}" @outline(t, class)
-  | TraitTarget:    tr:type_path "for" t:type where_opt "{" inner_attrs_opt assoc_items_opt "}" @outline(t, class)
-  | NegTarget:      BANG tr:type_path "for" t:type where_opt "{" inner_attrs_opt assoc_items_opt "}" @outline(t, class)
+  | InherentTarget: t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
+  | TraitTarget:    tr:type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
+  | NegTarget:      BANG tr:type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
 
 rule impl_head =
   | ImplKw:        "impl"
@@ -829,25 +829,25 @@ rule foreign_vis_kind =
 // definition form (`macro_rules! name { … }`); in brackets or parentheses
 // a `;` ends it.
 rule item_macro =
-  | MacroItemBrace:   plain_path BANG "{" tts "}"
-  | MacroItemParen:   plain_path BANG "(" tts ")" ";"
-  | MacroItemBracket: plain_path BANG "[" tts "]" ";"
+  | MacroItemBrace:   plain_path BANG open:"{" tts "}" @fold(block, open)
+  | MacroItemParen:   plain_path BANG open:"(" tts close:")" ";" @fold(list, open, close)
+  | MacroItemBracket: plain_path BANG open:"[" tts close:"]" ";" @fold(list, open, close)
 
 rule macro_def = MacroDef: plain_path BANG n:name delim_tt_def @outline(n, function)
 
 rule delim_tt_def =
-  | MacroDefBrace:   "{" tts "}"
-  | MacroDefParen:   "(" tts ")" ";"
-  | MacroDefBracket: "[" tts "]" ";"
+  | MacroDefBrace:   "{" tts "}" @fold(block)
+  | MacroDefParen:   open:"(" tts close:")" ";" @fold(list, open, close)
+  | MacroDefBracket: open:"[" tts close:"]" ";" @fold(list, open, close)
 
 // ---- generics and bounds ----
 
 rule generics_opt = generics?
 
 rule generics =
-  | GenericsEmpty: lt gt
-  | Generics:      lt generic_param_list gt
-  | GenericsTrail: lt generic_param_list "," gt
+  | GenericsEmpty: lt gt @fold(list)
+  | Generics:      lt generic_param_list gt @fold(list)
+  | GenericsTrail: lt generic_param_list "," gt @fold(list)
 
 rule generic_param_list = generic_param+ % ","
 
@@ -1044,10 +1044,10 @@ rule pat_nr_nomut =
   | LitPat:         literal
   | NegLitPat:      MINUS literal
   | PathPat:        pat_path
-  | TupleStructPat: pat_head "(" pats_opt ")"
-  | StructPat:      pat_head "{" pat_fields_opt "}"
-  | TuplePat:       "(" pats_opt ")"
-  | SlicePat:       "[" pats_opt "]"
+  | TupleStructPat: pat_head open:"(" pats_opt ")" @fold(list, open)
+  | StructPat:      pat_head open:"{" pat_fields_opt "}" @fold(list, open)
+  | TuplePat:       "(" pats_opt ")" @fold(list)
+  | SlicePat:       "[" pats_opt "]" @fold(list)
   | RefPat:         amp pat_nr_nomut
   | RefMutPat:      amp "mut" pat_nr
   | MacroPat:       plain_path BANG delim_tt
@@ -1110,11 +1110,11 @@ rule literal =
   | False:    "false"
 
 rule str_lit =
-  | Str:  STR_OPEN str_parts S_CLOSE
-  | Raw0: RAW0_OPEN raw0_parts R0_CLOSE
-  | Raw1: RAW1_OPEN raw1_parts R1_CLOSE
-  | Raw2: RAW2_OPEN raw2_parts R2_CLOSE
-  | Raw3: RAW3_OPEN raw3_parts R3_CLOSE
+  | Str:  STR_OPEN str_parts S_CLOSE @fold(string)
+  | Raw0: RAW0_OPEN raw0_parts R0_CLOSE @fold(string)
+  | Raw1: RAW1_OPEN raw1_parts R1_CLOSE @fold(string)
+  | Raw2: RAW2_OPEN raw2_parts R2_CLOSE @fold(string)
+  | Raw3: RAW3_OPEN raw3_parts R3_CLOSE @fold(string)
 
 rule str_parts = str_part*
 rule str_part = | StrText: S_TEXT | StrEsc: S_ESC | StrBackslash: S_BACKSLASH
@@ -1129,10 +1129,10 @@ rule raw3_part = | Raw3Text: R3_TEXT | Raw3Quote: R3_QUOTE
 
 // ---- blocks and statements ----
 
-rule block = Block: "{" inner_attrs_opt stmts_opt tail_opt "}"
+rule block = Block: "{" inner_attrs_opt stmts_opt tail_opt "}" @fold(block)
 
 // A function's body: the same as a block.
-rule block_body = BlockBody: "{" inner_attrs_opt stmts_opt tail_opt "}"
+rule block_body = BlockBody: "{" inner_attrs_opt stmts_opt tail_opt "}" @fold(block)
 
 rule stmts_opt = stmt*
 
@@ -1168,14 +1168,14 @@ rule block_like =
   | ConstBlock:     "const" block
   | LabeledBlock:   label block
   | If:             if_expr
-  | Match:          "match" cond "{" inner_attrs_opt arms_opt "}"
+  | Match:          "match" cond open:"{" inner_attrs_opt arms_opt "}" @fold(block, open)
   | Loop:           "loop" block
   | LabeledLoop:    label "loop" block
   | While:          "while" cond block
   | LabeledWhile:   label "while" cond block
   | For:            "for" pat "in" cond block
   | LabeledFor:     label "for" pat "in" cond block
-  | BraceMacro:     plain_path BANG "{" tts "}"
+  | BraceMacro:     plain_path BANG open:"{" tts "}" @fold(block, open)
 
 rule label = Label: lifetime COLON
 
@@ -1212,17 +1212,17 @@ rule guard = Guard: "if" expr
 rule atom =
   | Lit:        literal
   | PathExpr:   expr_path
-  | MacroCall:  plain_path BANG "(" tts ")"
-  | MacroIndex: plain_path BANG "[" tts "]"
-  | Unit:       "(" ")"
-  | Paren:      "(" elem ")"
-  | TupleOne:   "(" elem "," ")"
-  | Tuple:      "(" elem "," expr_list ")"
-  | TupleTrail: "(" elem "," expr_list "," ")"
-  | ArrayEmpty: "[" "]"
-  | Array:      "[" expr_list "]"
-  | ArrayTrail: "[" expr_list "," "]"
-  | ArrayRepeat: "[" elem ";" expr "]"
+  | MacroCall:  plain_path BANG open:"(" tts ")" @fold(list, open)
+  | MacroIndex: plain_path BANG open:"[" tts "]" @fold(list, open)
+  | Unit:       "(" ")" @fold(list)
+  | Paren:      "(" elem ")" @fold(list)
+  | TupleOne:   "(" elem "," ")" @fold(list)
+  | Tuple:      "(" elem "," expr_list ")" @fold(list)
+  | TupleTrail: "(" elem "," expr_list "," ")" @fold(list)
+  | ArrayEmpty: "[" "]" @fold(list)
+  | Array:      "[" expr_list "]" @fold(list)
+  | ArrayTrail: "[" expr_list "," "]" @fold(list)
+  | ArrayRepeat: "[" elem ";" expr "]" @fold(list)
   | Continue:   "continue"
   | ContinueLabel: "continue" lifetime
 
@@ -1243,7 +1243,7 @@ rule args_opt =
   | ArgsTrail: expr_list ","
 
 rule struct_lit =
-  | StructLit:      expr_path "{" struct_fields_opt "}"
+  | StructLit:      expr_path open:"{" struct_fields_opt "}" @fold(list, open)
 
 rule struct_fields_opt =
   | StructFieldsNone:
@@ -1285,8 +1285,8 @@ rule member =
   | MemberIndex:     INT
   | MemberIndex2:    FLOAT
   | MemberAwait:     "await"
-  | MemberMethod:    name "(" args_opt ")"
-  | MemberTurbofish: name path_sep generic_args "(" args_opt ")"
+  | MemberMethod:    name open:"(" args_opt ")" @fold(list, open)
+  | MemberTurbofish: name path_sep generic_args open:"(" args_opt ")" @fold(list, open)
 
 // ---- expressions: the full tier ----
 
@@ -1304,8 +1304,8 @@ rule expr =
   | BreakLabelValue: "break" lifetime expr @precedence("return")
   | Member:      expr DOT member @precedence(DOT)
   | SplitMember: expr DOT FLOAT_DOT member @precedence(DOT)
-  | Call:        expr "(" args_opt ")"
-  | Index:       expr "[" expr "]"
+  | Call:        expr open:"(" args_opt ")" @fold(list, open)
+  | Index:       expr open:"[" expr "]" @fold(list, open)
   | Try:         expr QMARK
   | Neg:         MINUS expr @precedence(BANG)
   | Not:         BANG expr
@@ -1373,8 +1373,8 @@ rule cond =
   | CBreakLabelValue: "break" lifetime cond @precedence("return")
   | CMember:      cond DOT member @precedence(DOT)
   | CSplitMember: cond DOT FLOAT_DOT member @precedence(DOT)
-  | CCall:        cond "(" args_opt ")"
-  | CIndex:       cond "[" expr "]"
+  | CCall:        cond open:"(" args_opt ")" @fold(list, open)
+  | CIndex:       cond open:"[" expr "]" @fold(list, open)
   | CTry:         cond QMARK
   | CNeg:         MINUS cond @precedence(BANG)
   | CNot:         BANG cond
@@ -1438,8 +1438,8 @@ rule stmt_expr =
   | SBreakLabelValue: "break" lifetime expr @precedence("return")
   | SMember:      stmt_expr DOT member @precedence(DOT)
   | SSplitMember: stmt_expr DOT FLOAT_DOT member @precedence(DOT)
-  | SCall:        stmt_expr "(" args_opt ")"
-  | SIndex:       stmt_expr "[" expr "]"
+  | SCall:        stmt_expr open:"(" args_opt ")" @fold(list, open)
+  | SIndex:       stmt_expr open:"[" expr "]" @fold(list, open)
   | STry:         stmt_expr QMARK
   | SNeg:         MINUS expr @precedence(BANG)
   | SNot:         BANG expr

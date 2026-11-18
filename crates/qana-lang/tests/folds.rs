@@ -1,6 +1,7 @@
 //! The folds channel of a live document (`Limner::folds_shared`): what
-//! it finds, that it nests, and that the folds kept across edits are
-//! the folds of the document opened afresh.
+//! it finds (the constructs a grammar marks `@fold`, and comments over
+//! lines), that it nests, and that the folds kept across edits are the
+//! folds of the document opened afresh, broken text included.
 
 use linework::{Limner, LineEdit, Mark};
 use qana_lang::live::LiveDoc;
@@ -30,6 +31,22 @@ fn spelled(doc: &mut LiveDoc, text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The folds of `text` read from its whole tree in one walk, as marks.
+fn walked(lang: &EmbeddedLang, text: &str) -> Vec<Mark> {
+    let session = lang.session(text);
+    qana_services::folds(session.tree().expect("total"), &lang.folds)
+        .into_iter()
+        .map(|f| Mark {
+            category: f.category,
+            start: f.span.0,
+            end: f.span.1,
+            name_start: f.head.0,
+            name_end: f.head.1,
+            name: String::new(),
+        })
+        .collect()
+}
+
 /// Document order, and containment: a fold that starts inside another
 /// ends inside it.
 fn assert_nested(folds: &[Mark], what: &str) {
@@ -37,6 +54,7 @@ fn assert_nested(folds: &[Mark], what: &str) {
     for (i, f) in folds.iter().enumerate() {
         assert!(f.start < f.end, "{what}: fold {i} is not empty");
         assert!(f.name_start == f.start && f.name_start < f.name_end && f.name_end <= f.end);
+        assert!(f.name.is_empty(), "{what}: a fold has no name");
         if i > 0 {
             assert!(folds[i - 1].start <= f.start, "{what}: fold {i} is in document order");
         }
@@ -74,12 +92,12 @@ lines\";
     let mut doc = LiveDoc::open(lang(RUST), "t.rs", src);
     let folds = spelled(&mut doc, src);
     let want: Vec<(&str, &str)> = vec![
-        ("comment lines", "//! Two lines\n//! of module docs."),
-        ("brace", &src[src.find("{\n    let v").unwrap()..src.rfind('}').unwrap() + 1]),
-        ("bracket", "[\n        1, 2,\n    ]"),
+        ("comment", "//! Two lines\n//! of module docs."),
+        ("block", &src[src.find("{\n    let v").unwrap()..src.rfind('}').unwrap() + 1]),
+        ("list", "[\n        1, 2,\n    ]"),
         ("string", "\"over\nlines\""),
         ("comment", "/* a block\n       /* nested */\n       comment */"),
-        ("paren", "(a,\n         b)"),
+        ("list", "(a,\n         b)"),
     ];
     let want: Vec<(String, String)> =
         want.into_iter().map(|(c, t)| (c.to_string(), t.to_string())).collect();
@@ -87,29 +105,24 @@ lines\";
     assert_nested(&doc.folds_shared(), "the example");
 }
 
+/// Broken code folds as recovery reads it, and recovery keeps the damage
+/// where it was typed: a call left open inside one function leaves the
+/// next function's body folding as before.
 #[test]
-fn a_close_takes_the_nearest_open_of_its_kind() {
-    // The `(` is never closed: the `}` passes over it to its `{`.
+fn broken_code_folds_as_its_tree_reads() {
     let src = "fn f() {\n    g(1,\n}\nfn h() {\n    x\n}\n";
     let mut doc = LiveDoc::open(lang(RUST), "t.rs", src);
     let folds = spelled(&mut doc, src);
-    assert_eq!(
-        folds,
-        vec![
-            ("brace".to_string(), "{\n    g(1,\n}".to_string()),
-            ("brace".to_string(), "{\n    x\n}".to_string()),
-        ]
+    assert!(
+        folds.contains(&("block".to_string(), "{\n    x\n}".to_string())),
+        "the next function's body still folds: {folds:?}"
     );
+    assert_nested(&doc.folds_shared(), "the broken example");
 
-    // A stray close is ignored, and the blocks around it still pair.
-    let src = "fn f() {\n    ]\n}\n";
-    let mut doc = LiveDoc::open(lang(RUST), "t.rs", src);
-    assert_eq!(spelled(&mut doc, src), vec![("brace".to_string(), "{\n    ]\n}".to_string())]);
-
-    // An open never closed folds nothing.
+    // A construct never closed folds as far as its tree goes.
     let src = "fn f() {\n    x\n";
     let mut doc = LiveDoc::open(lang(RUST), "t.rs", src);
-    assert!(doc.folds_shared().is_empty());
+    assert_eq!(spelled(&mut doc, src), vec![("block".to_string(), "{\n    x".to_string())]);
 }
 
 #[test]
@@ -214,6 +227,7 @@ fn kept_equals_fresh(grammar: &str, start_text: &str, seed: u64, steps: usize) {
         let kept = doc.folds_shared();
         let fresh = LiveDoc::open(lang.clone(), "t", &text).folds_shared();
         assert_eq!(*kept, *fresh, "step {step} (seed {seed}): kept folds are fresh folds");
+        assert_eq!(*kept, walked(&lang, &text), "step {step} (seed {seed}): and the whole tree's");
         assert_nested(&kept, &format!("step {step}"));
     }
 }
@@ -225,10 +239,9 @@ fn kept_folds_are_fresh_folds_rust() {
     }
 }
 
-/// C, through broken and mended code. Folds come from the tokens, so they
-/// are the fresh document's whatever recovery makes of the tree. (Seed 7
-/// used to stop at step 109 on an incremental-parser assertion; see
-/// `edit_scripts.rs`.)
+/// C, through broken and mended code: the incremental tree is the batch
+/// tree (`edit_scripts.rs`), and the folds kept across edits are read
+/// from it again only where it changed.
 #[test]
 fn kept_folds_are_fresh_folds_c() {
     for seed in [7, 11] {
@@ -236,9 +249,8 @@ fn kept_folds_are_fresh_folds_c() {
     }
 }
 
-/// C's directives are a line-bounded mode: one ends with its line and
-/// folds nothing, unless a backslash carries it on, and then the whole
-/// directive is one fold, named for the style of the `#` that opens it.
+/// A C directive ends with its line and folds nothing, unless a backslash
+/// carries it on; then the whole `#define` is one `directive` fold.
 #[test]
 fn a_c_directive_folds_when_a_backslash_carries_it_over_lines() {
     let src = "\
@@ -256,15 +268,15 @@ int f(void) {
     let folds = spelled(&mut doc, src);
     let directive = &src[src.find("#define TWO").unwrap()..src.find("(b))").unwrap() + 4];
     let want: Vec<(String, String)> = vec![
-        ("regexp".to_string(), directive.to_string()),
+        ("directive".to_string(), directive.to_string()),
         ("comment".to_string(), "/* a block\n   comment */".to_string()),
-        ("brace".to_string(), "{\n    return TWO(ONE, 2);\n}".to_string()),
+        ("block".to_string(), "{\n    return TWO(ONE, 2);\n}".to_string()),
     ];
     assert_eq!(folds, want);
     assert_nested(&doc.folds_shared(), "the C example");
 }
 
-/// In `)(` one token's end is the next one's start. Typing between them
+/// In `)(` one call's end is the next one's start. Typing between them
 /// moves the second and not the first, and the folds kept across the
 /// edit are still those of the text opened afresh.
 #[test]
@@ -274,7 +286,7 @@ fn typing_between_a_close_and_an_open_moves_only_the_open() {
     let mut doc = LiveDoc::open(lang.clone(), "t.rs", src);
     let before = spelled(&mut doc, src);
     assert_eq!(
-        before.iter().filter(|(c, _)| c == "paren").count(),
+        before.iter().filter(|(c, _)| c == "list").count(),
         2,
         "both calls fold: {before:?}"
     );
@@ -282,6 +294,39 @@ fn typing_between_a_close_and_an_open_moves_only_the_open() {
     let text = doc.text();
     let kept = spelled(&mut doc, &text);
     assert_eq!(kept, spelled(&mut LiveDoc::open(lang, "t.rs", &text), &text));
-    assert!(kept.contains(&("paren".to_string(), "(1,\n      2)".to_string())));
-    assert!(kept.contains(&("paren".to_string(), "(3,\n      4)".to_string())));
+    assert!(kept.contains(&("list".to_string(), "(1,\n      2)".to_string())));
+    assert!(kept.contains(&("list".to_string(), "(3,\n      4)".to_string())));
+}
+
+/// A construct can end in trivia when recovery inserts a token after it:
+/// here the declaration `struct A` is closed by a `;` the parser
+/// inserted after the comment lines. The comment run is then still open
+/// when the construct's piece ends, and what comes after decides it. The
+/// end of the document closes it into a fold; a declaration typed after
+/// it does too. Through edits on either side, the folds kept are the
+/// fresh document's.
+#[test]
+fn a_comment_run_left_open_by_a_construct_is_decided_after_it() {
+    let lang = lang(C);
+    let src = "int x;\nstruct A\n// c1\n// c2\n";
+    let mut doc = LiveDoc::open(lang.clone(), "t.c", src);
+    assert_eq!(spelled(&mut doc, src), vec![("comment".to_string(), "// c1\n// c2".to_string())]);
+    let edits: [(u32, u32, &[&str]); 4] = [
+        (4, 4, &["int y;"]),
+        (0, 1, &["int x, z;"]),
+        (4, 5, &[]),
+        (3, 4, &["// c2 longer", "// c3"]),
+    ];
+    for (step, (start, end, lines)) in edits.into_iter().enumerate() {
+        let lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        doc.edit(&LineEdit { start, end, lines });
+        let text = doc.text();
+        let kept = doc.folds_shared();
+        assert_eq!(*kept, *LiveDoc::open(lang.clone(), "t.c", &text).folds_shared(), "step {step}");
+        assert_eq!(*kept, walked(&lang, &text), "step {step}");
+        assert!(
+            spelled(&mut doc, &text).iter().any(|(k, t)| k == "comment" && t.starts_with("// c1")),
+            "step {step}: the run folds: {text:?}"
+        );
+    }
 }

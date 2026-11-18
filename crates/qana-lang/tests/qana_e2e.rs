@@ -19,7 +19,8 @@ use qana_lang::compile::{
     certify, dump_binding, dump_lex, dump_outline, dump_styles, dump_syn, dump_tables,
 };
 use qana_lang::{
-    compile_source, qana_binding_config, qana_outline_config, qana_styles, QanaToolchain,
+    compile_source, qana_binding_config, qana_fold_config, qana_outline_config, qana_styles,
+    QanaToolchain,
 };
 use qana_sem::{demo_binding_config, SemDb};
 use qana_services::demo_glue::{demo_outline_config, demo_styles};
@@ -53,6 +54,11 @@ fn self_host_fixed_point() {
         dump_outline(&out.def.outline),
         dump_outline(&qana_outline_config(&tc.sg)),
         "outline fixed point"
+    );
+    assert_eq!(
+        out.def.folds,
+        qana_fold_config(&tc.sg, &tc.lexer.vocab, &qana_styles(&boot_ids)),
+        "folds fixed point"
     );
     assert_eq!(
         dump_binding(&out.def.binding),
@@ -554,4 +560,48 @@ rule expr =
 
     let session = IncSession::new(&lexer, &out.def.sg, &tables, "1 < 2 < 3").unwrap();
     assert!(!session.last_repairs.is_empty(), "a second comparison is a syntax error, which recovery repairs");
+}
+
+/// `@fold` refuses what cannot fold: the start rule (its construct is the
+/// whole document), a kind that is not a lowercase name, a label the
+/// alternative does not have, and an end before the start.
+#[test]
+fn a_fold_is_refused_where_it_cannot_be() {
+    let grammar = |item: &str, start_attr: &str| {
+        format!(
+            r#"
+language Folds
+
+token WS = /\s+/ @trivia
+token NAME = /[a-z]+/ @style(variable)
+token LB = "{{" @style(bracket)
+token RB = "}}" @style(bracket)
+
+start file
+rule file = File: items {start_attr}
+rule items = item*
+rule item = {item}
+"#
+        )
+    };
+    let tc = QanaToolchain::new();
+    let diags = |src: String| -> Vec<String> {
+        compile_source(&tc, &src).diags.into_iter().map(|d| d.msg).collect()
+    };
+
+    let fine = grammar(r#"Item: NAME open:"{" items close:"}" @fold(block, open, close)"#, "");
+    assert!(diags(fine).is_empty(), "a fold from a label to a label compiles");
+
+    let start = diags(grammar(r#"Item: NAME "{" items "}" @fold(block)"#, "@fold(block)"));
+    assert!(start.iter().any(|m| m.contains("start rule does not fold")), "{start:?}");
+
+    let kind = diags(grammar(r#"Item: NAME "{" items "}" @fold(Block)"#, ""));
+    assert!(kind.iter().any(|m| m.contains("a fold kind is a lowercase name")), "{kind:?}");
+
+    let label = diags(grammar(r#"Item: NAME "{" items "}" @fold(block, open)"#, ""));
+    assert!(label.iter().any(|m| m.contains("no symbol labeled `open`")), "{label:?}");
+
+    let order =
+        diags(grammar(r#"Item: NAME open:"{" items close:"}" @fold(block, close, open)"#, ""));
+    assert!(order.iter().any(|m| m.contains("a fold ends after it begins")), "{order:?}");
 }

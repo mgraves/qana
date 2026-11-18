@@ -61,7 +61,7 @@ rule stmt =
   | IfStmt: "if" "(" expr ")" block
   | IfElseStmt: "if" "(" expr ")" block "else" block
 
-rule block = Block: "{" stmts "}" @scope
+rule block = Block: "{" stmts "}" @scope @fold(block)
 
 rule expr =
   | AddExpr: expr "+" expr @type(sig, Num, Num, Num)
@@ -71,9 +71,9 @@ rule expr =
   | NumLit: NUMBER @type(Num)
   | StrLit: STRING @type(Str)
   | NameRef: name:IDENT @ref(name) @type(ref)
-  | CallExpr: callee:IDENT "(" args ")" @ref(callee, call)
-  | ParenExpr: "(" e:expr ")" @type(of, e)
-  | ListExpr: "[" args "]"
+  | CallExpr: callee:IDENT open:"(" args ")" @ref(callee, call) @fold(list, open)
+  | ParenExpr: "(" e:expr ")" @type(of, e) @fold(list)
+  | ListExpr: "[" args "]" @fold(list)
 
 // `expr* % ","` — possibly-empty comma-separated list: desugars to the
 // wrapper (ArgsNone/ArgsSome) plus a nonempty inner rule `args_ne`.

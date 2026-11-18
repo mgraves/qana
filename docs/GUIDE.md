@@ -438,8 +438,9 @@ let tree = session.tree().expect("parsing is total");
 ```
 
 `session` is an incremental session: feed it `LineEdit`s and it splices
-the tree. `lang.styles`, `lang.outline`, and `lang.binding` drive
-highlighting, outline, and navigation exactly as they do over LSP.
+the tree. `lang.styles`, `lang.outline`, `lang.folds` and `lang.binding`
+drive highlighting, outline, folding and navigation exactly as they do
+over LSP.
 
 A worked integration lives outside this repo: `synkro_qana` in the
 Synkro workspace implements that GUI framework's `TokenProvider` and

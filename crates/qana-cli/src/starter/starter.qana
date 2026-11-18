@@ -1,5 +1,6 @@
 // {NAME} — a starter grammar. This one file IS the language: tokens,
-// keywords, precedence, syntax, highlighting, outline, and navigation.
+// keywords, precedence, syntax, highlighting, outline, folding, and
+// navigation.
 //
 // Edit it and run `qana check` — or just save it with the editor
 // extension running, and open documents re-derive in milliseconds.
@@ -72,8 +73,10 @@ rule stmt =
 rule args = expr+ % ","
 
 // `@scope` makes a block its own namespace: names declared inside are
-// invisible outside, and go-to-definition respects that.
-rule block = Block: "{" stmts "}" @scope
+// invisible outside, and go-to-definition respects that. `@fold(block)`
+// lets an editor fold a block that runs over lines (comments over lines
+// fold without being asked).
+rule block = Block: "{" stmts "}" @scope @fold(block)
 
 // ---------------------------------------------------------------------
 // The type tier
@@ -93,7 +96,7 @@ rule expr =
   | SubExpr:   expr "-" expr @type(sig, Num, Num, Num)
   | MulExpr:   expr "*" expr @type(sig, Num, Num, Num)
   | DivExpr:   expr "/" expr @type(sig, Num, Num, Num)
-  | ParenExpr: "(" e:expr ")" @type(of, e)
+  | ParenExpr: "(" e:expr ")" @type(of, e) @fold(list)
   | NumLit:    NUMBER @type(Num)
   | StrLit:    STRING @type(Str)
   | NameRef:   name:IDENT @ref(name) @type(ref)

@@ -4,7 +4,7 @@
 use qana_engine::*;
 use qana_grammar::demo::{demo_grammar, demo_syn_grammar};
 use qana_grammar::{build_lr, CompiledLexer};
-use qana_services::demo_glue::{demo_outline_config, demo_styles};
+use qana_services::demo_glue::{demo_fold_config, demo_outline_config, demo_styles};
 use qana_services::*;
 use std::time::{Duration, Instant};
 
@@ -81,8 +81,9 @@ fn main() {
     assert!(cache == fresh, "DELTA GATE FAILED AT SCALE");
     println!("delta gate at scale:             verified   (200 edits, cache == fresh encode)");
 
-    let (folds, d) = time(|| folding_ranges(&lexer, &session.buf));
-    println!("folding ranges:              {:>10}   ({} ranges)", fmt_dur(d), folds.len());
+    let fold_cfg = demo_fold_config(&sg, &lexer.vocab, &styles);
+    let (found, d) = time(|| folds(session.tree().unwrap(), &fold_cfg));
+    println!("folds:                       {:>10}   ({} folds)", fmt_dur(d), found.len());
 
     let cfg = demo_outline_config(&sg);
     let (syms, d) = time(|| outline(session.tree().unwrap(), &cfg));

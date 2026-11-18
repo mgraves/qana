@@ -30,7 +30,7 @@ rule task_list = task_def*
 
 rule task_def = TaskDef: "task" name:STRING body @outline(name)
 
-rule body = Body: "{" prop* "}" @scope
+rule body = Body: "{" prop* "}" @scope @fold(block)
 
 rule prop =
   | Due: "due" NUMBER ";"

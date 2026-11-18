@@ -14,7 +14,7 @@ use qana_grammar::pat::Pat;
 use qana_grammar::syn::{Assoc, Sym, SynGrammar};
 use qana_grammar::{build_lr, CompiledLexer, GreenChild, GreenNode, GreenToken, LrTables, Vocab};
 use qana_sem::{BindingConfig, RefKind, TyTerm, TypeConfig, TypeRule};
-use qana_services::{OutlineConfig, OutlineEntry, Styles, LEGEND};
+use qana_services::{FoldConfig, OutlineConfig, OutlineEntry, Styles, LEGEND};
 use std::collections::HashMap;
 
 /// Outline kinds a grammar may declare (closed set, `&'static` for the
@@ -46,6 +46,8 @@ pub struct LangDef {
     pub macros: qana_sem::macros::MacroConfig,
     pub styles: Styles,
     pub outline: OutlineConfig,
+    /// What folds: the `@fold` constructs and the comments.
+    pub folds: FoldConfig,
     /// Token id → span of its declaring name (keywords: the item span).
     pub token_spans: Vec<(u32, u32)>,
     /// Production index → span of its alternative label.
@@ -945,6 +947,17 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
     let mut macros = qana_sem::macros::MacroConfig::default();
     let mut type_cfg = TypeConfig::default();
     let mut outline = OutlineConfig::default();
+    // `@fold`s, and the kinds in the order they are first used.
+    struct FoldDecl {
+        nt: u16,
+        prod: u16,
+        category: u8,
+        from: Option<usize>,
+        to: Option<usize>,
+        span: (u32, u32),
+    }
+    let mut fold_entries: Vec<FoldDecl> = Vec::new();
+    let mut fold_kinds: Vec<String> = Vec::new();
     let mut prod_spans: Vec<(u32, u32)> = Vec::new();
     let mut labels_seen: HashMap<String, ()> = HashMap::new();
 
@@ -1142,6 +1155,65 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                         };
                         binding.scopes.push((nt, prod, unordered, false));
                     }
+                    "fold" => {
+                        if a.args.is_empty() || a.args.len() > 3 {
+                            error(
+                                d,
+                                a.name_span,
+                                "@fold takes a kind, and the labels it begins and ends at".into(),
+                            );
+                        } else {
+                            let (kind, kind_span, is_string) = &a.args[0];
+                            let well_formed = kind.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                                && kind.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+                            if *is_string || !well_formed {
+                                error(
+                                    d,
+                                    *kind_span,
+                                    format!("a fold kind is a lowercase name (`block`, `list`), not `{kind}`"),
+                                );
+                            } else {
+                                let from = match a.args.get(1) {
+                                    None => Some(None),
+                                    Some(label) => pos_of(d, label).map(Some),
+                                };
+                                let to = match a.args.get(2) {
+                                    None => Some(None),
+                                    Some(label) => pos_of(d, label).map(Some),
+                                };
+                                if let (Some(Some(f)), Some(Some(t))) = (from, to) {
+                                    if t < f {
+                                        error(d, a.args[2].1, "a fold ends after it begins".into());
+                                    }
+                                }
+                                let category = match fold_kinds.iter().position(|k| k == kind) {
+                                    Some(i) => Some(i),
+                                    None if fold_kinds.len() < u8::MAX as usize - 1 => {
+                                        fold_kinds.push(kind.clone());
+                                        Some(fold_kinds.len() - 1)
+                                    }
+                                    None => {
+                                        error(d, *kind_span, "a grammar has at most 254 fold kinds".into());
+                                        None
+                                    }
+                                };
+                                if let (Some(from), Some(to), Some(category)) = (from, to, category) {
+                                    if fold_entries.iter().any(|e| e.prod == prod) {
+                                        error(d, a.name_span, "an alternative folds once".into());
+                                    } else {
+                                        fold_entries.push(FoldDecl {
+                                            nt,
+                                            prod,
+                                            category: category as u8,
+                                            from,
+                                            to,
+                                            span: a.name_span,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "outline" => {
                         if a.args.is_empty() || a.args.len() > 2 {
                             error(d, a.name_span, "@outline takes a label and an optional kind".into());
@@ -1270,7 +1342,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                         d,
                         a.name_span,
                         format!(
-                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @precedence, @type, @export, @import, @module, @qualify, @ns, @macro, @splice)"
+                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @fold, @precedence, @type, @export, @import, @module, @qualify, @ns, @macro, @splice)"
                         ),
                     ),
                 }
@@ -1763,6 +1835,17 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
     if ir.rules.is_empty() {
         error(d, (0, 0), "a grammar needs at least one rule".into());
     }
+    // The start rule's construct is the whole document, which is no
+    // fold.
+    for e in &fold_entries {
+        if e.nt == sg.start {
+            error(
+                d,
+                e.span,
+                "the start rule does not fold: its construct is the whole document".into(),
+            );
+        }
+    }
 
     // `@scope(unordered)` on the START rule means the FILE's own scope is
     // unordered — a declaration language, where top-level names see each
@@ -1779,6 +1862,15 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             // tier's def sites: an @outline whose label names a NODE
             // child means "the name is the first def inside it".
             let outline = OutlineConfig { defs: binding.defs.clone(), ..outline };
+            let fold_entries: Vec<(u16, u8, Option<usize>, Option<usize>)> =
+                fold_entries.iter().map(|e| (e.prod, e.category, e.from, e.to)).collect();
+            let folds = FoldConfig::new(
+                fold_kinds,
+                &fold_entries,
+                sg.prods.len(),
+                &Vocab::of(&lex),
+                &styles,
+            );
             LangDef {
                 lex,
                 sg,
@@ -1787,6 +1879,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                 macros,
                 styles,
                 outline,
+                folds,
                 token_spans,
                 prod_spans,
             }

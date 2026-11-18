@@ -9,6 +9,7 @@
 //! * `tokens`  — the lex
 //! * `parse`   — the lossless green tree (total, even when broken)
 //! * `outline` — derived document symbols
+//! * `folds`   — derived folding: the `@fold` constructs and the comments
 //! * `defs`    — derived binding: definitions, references, unresolved
 //! * `edit`    — incremental reparse: what got reused, and how fast
 //! * `ts`      — export a tree-sitter grammar
@@ -47,6 +48,8 @@ COMMANDS
                             show the lossless parse tree and any repairs
     outline <grammar.qana> <file>
                             derived document symbols
+    folds <grammar.qana> <file>
+                            derived folding: what folds, over which lines
     defs <grammar.qana> <file>
                             derived binding: defs, refs, unresolved
     types <grammar.qana> <file> [--all]
@@ -78,6 +81,7 @@ fn main() {
         "tokens" => cmd_tokens(&args),
         "parse" => cmd_parse(&args),
         "outline" => cmd_outline(&args),
+        "folds" => cmd_folds(&args),
         "defs" => cmd_defs(&args),
         "types" => cmd_types(&args),
         "expand" => cmd_expand(&args),
@@ -365,6 +369,14 @@ fn cmd_check(args: &Args) {
     row("highlight classes", &classes.iter().copied().collect::<Vec<_>>().join(", "));
     row("outline entries", &def.outline.entries.len().to_string());
     row(
+        "fold entries",
+        &format!(
+            "{}  {}",
+            def.folds.by_prod.iter().flatten().count(),
+            dim(&format!("({})", def.folds.legend.join(", ")))
+        ),
+    );
+    row(
         "binding sites",
         &format!(
             "{} defs, {} refs, {} scopes",
@@ -526,6 +538,31 @@ fn cmd_outline(args: &Args) {
     for sym in &syms {
         let (line, col) = s.line_col(sym.selection.0);
         println!("{:<10} {:<24} {}", dim(sym.kind), bold(&sym.name), dim(&format!("{line}:{col}")));
+    }
+}
+
+fn cmd_folds(args: &Args) {
+    let lang = load(args.at(0, "grammar.qana"));
+    let doc_path = args.at(1, "file");
+    let text = read_file(doc_path);
+    let session = session_for(&lang, &text);
+    let s = Src::new(doc_path, &text);
+    let folds = qana_services::folds(session.tree().expect("total"), &lang.def.folds);
+
+    if folds.is_empty() {
+        println!("{}", dim("no folds — add @fold(kind) to a rule alternative"));
+        return;
+    }
+    for f in &folds {
+        let (first, col) = s.line_col(f.head.0);
+        let (last, _) = s.line_col(f.span.1 - 1);
+        let head = &text[f.head.0 as usize..f.head.1 as usize];
+        println!(
+            "{:<10} {:<24} {}",
+            dim(&lang.def.folds.legend[f.category as usize]),
+            bold(head),
+            dim(&format!("{first}:{col}..{last}"))
+        );
     }
 }
 

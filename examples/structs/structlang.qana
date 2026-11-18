@@ -51,19 +51,19 @@ rule decl =
   // Modules exist to give documents NESTED structure: scopes for the
   // binding tier and depth for every outline consumer (breadcrumbs,
   // structure views, folding).
-  | ModDecl:    "mod" name:IDENT "{" ds:decls "}" @def(name) @outline(name, module) @scope(unordered)
+  | ModDecl:    "mod" name:IDENT open:"{" ds:decls "}" @def(name) @outline(name, module) @scope(unordered) @fold(block, open)
   | StructDecl: "struct" name:IDENT b:struct_body @def(name) @outline(name, struct) @type(deftype, b)
   | FnDecl:     "fn" name:IDENT t:fn_tail @def(name) @outline(name, function) @type(def, t)
   | LetDecl:    "let" name:IDENT ti:typed_init ";" @def(name) @outline(name) @type(def, ti)
   // The META tier meets the TYPE tier. A macro's body is a real expr;
   // its two parameters bind per-MEMBER when spliced through @reflect.
-  | MacroDecl:  "macro" name:IDENT "(" ps:mparams ")" "=>" "{" body:expr "}" @def(name) @macro(ps, body) @scope @outline(name, function)
+  | MacroDecl:  "macro" name:IDENT "(" ps:mparams ")" "=>" open:"{" body:expr "}" @def(name) @macro(ps, body) @scope @outline(name, function) @fold(block, open)
 
 rule mparams = mparam* % ","
 
 rule mparam = MParam: name:IDENT @def(name)
 
-rule struct_body = StructBody: "{" fields "}" @scope
+rule struct_body = StructBody: "{" fields "}" @scope @fold(block)
 
 rule fields = field* % ","
 
@@ -78,7 +78,7 @@ rule field = Field: name:IDENT ":" t:ty @def(name) @outline(name, field) @type(d
 // annotation; `@type(def, t)` above hands it to the fn NAME, so calls
 // check arity and arguments (`@type(apply, a)`) and `return` statements
 // check against the declaration (`@type(returns, e)`).
-rule fn_tail = FnTail: "(" p:params ")" "->" rt:ty block @scope @type(fn, p, rt)
+rule fn_tail = FnTail: open:"(" p:params close:")" "->" rt:ty block @scope @type(fn, p, rt) @fold(list, open, close)
 
 rule params = param* % ","
 
@@ -96,7 +96,7 @@ rule ty =
 // is reported on the exact initializer.
 rule typed_init = TypedInit: ":" t:ty "=" e:expr @type(sig, t, t, t)
 
-rule block = Block: "{" stmts "}" @scope
+rule block = Block: "{" stmts "}" @scope @fold(block)
 
 rule stmts = stmt*
 
@@ -108,7 +108,7 @@ rule stmt =
 rule expr =
   | AddExpr:   expr "+" expr @type(sig, Num, Num, Num)
   | FieldExpr: b:expr "." m:IDENT @type(member, b, m)
-  | CallExpr:  callee:IDENT "(" a:args ")" @ref(callee, call) @type(apply, a)
+  | CallExpr:  callee:IDENT open:"(" a:args ")" @ref(callee, call) @type(apply, a) @fold(list, open)
   | NewExpr:   "new" name:IDENT @ref(name) @type(named)
   // REFLECTION: `sum!{Point}` substitutes the macro's body once per
   // declared member of Point — parameter 1 is the member's NAME
@@ -119,7 +119,7 @@ rule expr =
   // An ordinary macro call, `m!(args)`. Substituting at a member
   // position needs a NAME, so `pick!(x)` works and `pick!(1 + 2)` is
   // refused rather than emitted as `origin.(1 + 2)`.
-  | Splice:    name:IDENT "!" "(" a:args ")" @ref(name) @splice(name, a)
+  | Splice:    name:IDENT "!" open:"(" a:args ")" @ref(name) @splice(name, a) @fold(list, open)
   | Reflect:   name:IDENT "!" "{" ty:IDENT "}" @ref(name) @ref(ty) @splice(name) @reflect(ty, " + ")
   // The same reflection with a richer FACET list: this macro's three
   // parameters bind to each member's name, its declared type, and its
@@ -129,6 +129,6 @@ rule expr =
   | NumLit:    NUMBER @type(Num)
   | StrLit:    STRING @type(Str)
   | NameRef:   name:IDENT @ref(name) @type(ref)
-  | ParenExpr: "(" e:expr ")" @type(of, e)
+  | ParenExpr: "(" e:expr ")" @type(of, e) @fold(list)
 
 rule args = expr* % ","

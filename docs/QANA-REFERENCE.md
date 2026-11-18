@@ -212,23 +212,13 @@ keeps a line's entry state a small value the engine can cache.
 
 ## `pair OPEN CLOSE`
 
-Declares a bracket pair by token name or literal. Pairs drive folding
-and the incremental skeleton that lets the engine find a damaged
-region's enclosing block without reparsing.
-
-A live document's folds (`Limner::folds_shared`) come from the tokens
-alone, so a grammar with no syntax folds too:
-
-* a block between a pair that opens and closes on different lines. A
-  close takes the nearest open of its kind and leaves the opens it
-  passes unclosed, so one stray bracket does not unpair the rest;
-* a mode entered from the base mode and left on a later line (a block
-  comment, a string), named for the style of the token that enters it;
-* two or more lines in a row with nothing on them but trivia and at
-  least one comment.
-
-The folds are kept per line, and an edit reads again only the lines
-the lexer relexed.
+Declares a bracket pair by token name or literal. Pairs drive the
+incremental skeleton that lets the engine find a damaged region's
+enclosing block without reparsing, and error recovery's reading of
+structure: a repair that inserts a bracket claims how every real bracket
+after it pairs, and a bracket opened and not yet closed holds the tokens
+up to its closer (see `docs/incremental_recovery.md`). Folding comes from
+the syntax (`@fold`, below), not from pairs.
 
 ---
 
@@ -345,6 +335,7 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@scope` | This node opens a lexical scope (names inside are invisible outside) |
 | `@scope(unordered)` | A scope where forward references are legal (declaration languages) |
 | `@outline(label)` / `@outline(label, kind)` | Contribute a document symbol named by the symbol at `label`: a token's text, or for a rule, the first `@def` inside it, and failing that its text (`Point<T>`); kinds are `variable` (default), `constant`, `function`, `struct`, `module`, `class` |
+| `@fold(kind)` / `@fold(kind, from)` / `@fold(kind, from, to)` | The construct folds when it runs over lines: from its first token, or the first token of the symbol labelled `from`, to its last token, or the last token of the symbol labelled `to` (see **Folding** below) |
 | `@precedence(token)` | Override this alternative's precedence (yacc's `%prec`) |
 | `@type(…)` | Declare this alternative's typing rule (see **The type tier** below) |
 | `@export` | This alternative's `@def` is visible to other files (see **The module tier**) |
@@ -379,6 +370,37 @@ There is no separate symbol-table pass to write.
 unordered scope — a declaration language, where a top-level name is
 visible to references that appear before it. Without it, top-level names
 follow definition-before-use.
+
+### Folding
+
+A document folds where its syntax says it does. `@fold(kind)` on an
+alternative makes its construct foldable wherever one runs over lines;
+`kind` is a lowercase name the grammar chooses (`block`, `list`,
+`string`), and editors map the names onto their own fold rules, as themes
+map style classes. A construct whose brackets sit among other symbols
+names where its fold begins and ends:
+
+```
+rule block   = Block:  "{" stmts "}" @fold(block)                          // all of it
+rule mod_def = ModDef: "mod" n:name open:"{" items "}" @fold(block, open)  // from `{` to the end
+rule fn_def  = FnDef:  "fn" n:name open:"(" params close:")" ret body
+                       @fold(list, open, close)                            // `(` to `)`
+```
+
+A fold's head is its first token; an editor keeps that line when it
+folds. The start rule cannot fold (its construct is the whole document).
+An outline entry folds too: the folds are the regions that are not
+outline structure, in a channel of their own (`Limner::folds_shared`).
+
+Comments are trivia, not syntax, so they fold by their tokens, without
+being asked, as the `comment` kind: a comment that runs over lines (a
+token styled `comment` followed by tokens of its mode, such as a block
+comment's body), and two or more lines in a row holding nothing but
+comments. `qana folds <grammar> <file>` shows what folds.
+
+A live document keeps its folds and its outline across edits by subtree:
+after an edit only the subtrees the parser rebuilt are read again, and a
+large one (a module that is the whole file) child by child.
 
 ---
 

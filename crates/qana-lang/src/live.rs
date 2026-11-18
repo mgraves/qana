@@ -8,14 +8,12 @@
 //! alone; this crate depends on `linework` and implements it. The two
 //! meet only at the trait.
 
-use crate::folds::FoldIndex;
+use crate::structure::Structure;
 use crate::EmbeddedLang;
 use linework::{FactCard, Hint, LineEdit, Limner, Mark, Paint, PaintDelta};
 use qana_engine::{IncSession, Line, LineTerm};
-use qana_grammar::green::{GreenChild, GreenNode, LIST_PROD, RUN_PROD};
 use qana_sem::SemDb;
 use qana_services::paint::{facts_at, type_hints, Painter};
-use qana_services::OutlineConfig;
 use std::sync::Arc;
 
 /// A stopwatch for one stage of an edit, feeding the `QANA_TRACE_EDIT`
@@ -47,13 +45,13 @@ pub struct LiveDoc {
     db: SemDb,
     painter: Painter,
     /// Marks-channel revision: bumps on every edit and reopen. Keys
-    /// the marks cache and answers [`Limner::marks_rev`] so editors
+    /// the marks and folds and answers [`Limner::marks_rev`] so editors
     /// gate their derived outline work on real structure changes.
     marks_rev: u64,
-    /// The outline, kept across edits: see [`Outline`]. Editors query
-    /// marks per cursor tick, and after an edit only the part of the
-    /// tree the edit rebuilt is walked again.
-    outline: Outline,
+    /// The outline and the folds, kept across edits: see [`Structure`].
+    /// Editors query them per cursor tick, and after an edit only the
+    /// part of the tree the edit rebuilt is read again.
+    structure: Structure,
     /// The SHAPE revision: bumps only when the (name, category,
     /// nesting) sequence of the marks changes — spans shift on every
     /// keystroke, the shape survives body edits. Computed as a hash
@@ -61,164 +59,6 @@ pub struct LiveDoc {
     /// so typing costs them nothing.
     shape_rev: u64,
     shape_hash: u64,
-    /// The folds channel: what each line contributes, kept across edits,
-    /// and the folds matched from it once per revision.
-    folds: FoldIndex,
-}
-
-// ---------------------------------------------------------------------------
-// The outline, kept across edits
-// ---------------------------------------------------------------------------
-//
-// `qana_services::outline` walks a whole tree. An editor asks for the
-// outline after every edit (breadcrumbs ask on every cursor move), and
-// at 250,000 lines the walk is 25 ms: per keystroke, for an edit that
-// changed one function.
-//
-// An edit leaves most of a tree as it was. The incremental parser hands
-// back the same subtrees, by pointer, for everything it did not have to
-// rebuild. And the outline of a subtree depends on nothing outside it:
-// the marks of a top-level construct, relative to where it starts, are
-// the same wherever it sits. So the outline is kept in UNITS, the
-// top-level constructs of the file, and after an edit only the units
-// that are new subtrees are walked. The rest keep their marks, moved to
-// where the construct now starts.
-
-/// One top-level construct of the file and the marks it contributes.
-struct OutlineUnit {
-    /// The construct. Identity (the same allocation is the same
-    /// construct) and keepalive in one: while the unit holds it, its
-    /// address cannot be handed to another subtree.
-    node: Arc<GreenNode>,
-    /// Where the construct starts, in bytes. Its marks are absolute, so
-    /// when this moves they move with it.
-    base: u32,
-    /// One past the index of its last mark in [`Outline::marks`]. Its
-    /// first is where the unit before it ended.
-    mark_end: u32,
-    /// The [`shape_fold`] of its marks, and `SHAPE_P` to the power of
-    /// their count: what joins unit shapes into the file's.
-    shape: u64,
-    shape_pow: u64,
-}
-
-struct Outline {
-    /// The [`LiveDoc::marks_rev`] this outline is of. Zero: never walked.
-    rev: u64,
-    /// Every mark of the document, in document order, absolute. Handed
-    /// out by `Arc`; when nobody else holds one at the next edit, it is
-    /// patched where it stands.
-    marks: Arc<Vec<Mark>>,
-    /// 1 when `marks[0]` is the mark of the ROOT node itself (a grammar
-    /// whose start production is outline-worthy), else 0. Every other
-    /// mark then lies inside it, one level deeper.
-    head: usize,
-    units: Vec<OutlineUnit>,
-}
-
-impl Outline {
-    fn new() -> Self {
-        Outline { rev: 0, marks: Arc::new(Vec::new()), head: 0, units: Vec::new() }
-    }
-}
-
-/// The multiplier of the shape hash: odd, so multiplying by it loses
-/// nothing.
-const SHAPE_P: u64 = 0x9E37_79B9_7F4A_7C15;
-
-/// One mark's contribution to the shape: its name, its category and how
-/// deeply it is nested. Its position is left out on purpose: positions
-/// move with every keystroke, and the shape is what does not.
-fn shape_element(name: &str, category: u8, depth: usize) -> u64 {
-    let mut h = 0xcbf29ce484222325u64;
-    for &b in name.as_bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    for b in [0xff, category, depth as u8] {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h ^= h >> 32;
-    h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
-    h ^ (h >> 32)
-}
-
-/// Add one element to a shape hash. The hash of a sequence is a
-/// polynomial in [`SHAPE_P`], so the hash of two sequences joined is
-/// `left * SHAPE_P^len(right) + right`: the shapes of the units join
-/// into the shape of the file without reading any mark again, and the
-/// result does not depend on where the units divide.
-fn shape_fold(h: u64, element: u64) -> u64 {
-    h.wrapping_mul(SHAPE_P).wrapping_add(element)
-}
-
-/// A symbol of `qana_services::outline`, as a mark at `base`.
-fn mark_at(symbol: qana_services::Symbol, base: u32, kinds: &[&'static str]) -> Mark {
-    Mark {
-        category: kinds.iter().position(|k| *k == symbol.kind).unwrap_or(0) as u8,
-        start: base + symbol.span.0,
-        end: base + symbol.span.1,
-        name_start: base + symbol.selection.0,
-        name_end: base + symbol.selection.1,
-        name: symbol.name,
-    }
-}
-
-/// The units of a tree, in document order, each with where it starts:
-/// the elements of the root's list children, and every other node child
-/// of the root. Between the root and a unit there are only the root
-/// itself and the list nodes (`LIST_PROD`, `RUN_PROD`), which no outline
-/// entry can name, so `outline(tree)` is the root's own symbol followed
-/// by the outline of each unit in turn.
-fn collect_units<'t>(root: &'t GreenNode, out: &mut Vec<(&'t Arc<GreenNode>, u32)>) {
-    fn list<'t>(n: &'t GreenNode, base: u32, out: &mut Vec<(&'t Arc<GreenNode>, u32)>) {
-        let mut off = base;
-        for c in &n.children {
-            match c {
-                GreenChild::Node(m) if m.prod == RUN_PROD => list(m, off, out),
-                GreenChild::Node(m) => out.push((m, off)),
-                GreenChild::Token(_) => {}
-            }
-            off += c.width();
-        }
-    }
-    let mut off = 0u32;
-    for c in &root.children {
-        if let GreenChild::Node(n) = c {
-            if n.prod == LIST_PROD {
-                list(n, off, out);
-            } else {
-                out.push((n, off));
-            }
-        }
-        off += c.width();
-    }
-}
-
-/// Walk one unit: its marks, absolute, and its shape. `outer` is how
-/// many marks enclose every unit (the root's own, if it has one).
-fn walk_unit(
-    node: &Arc<GreenNode>,
-    base: u32,
-    outer: usize,
-    cfg: &OutlineConfig,
-    kinds: &[&'static str],
-    marks: &mut Vec<Mark>,
-) -> (u64, u64) {
-    let (mut shape, mut pow) = (0u64, 1u64);
-    let mut open_ends: Vec<u32> = Vec::new();
-    for symbol in qana_services::outline(node, cfg) {
-        let m = mark_at(symbol, base, kinds);
-        while open_ends.last().is_some_and(|&e| m.start >= e) {
-            open_ends.pop();
-        }
-        shape = shape_fold(shape, shape_element(&m.name, m.category, outer + open_ends.len()));
-        pow = pow.wrapping_mul(SHAPE_P);
-        open_ends.push(m.end);
-        marks.push(m);
-    }
-    (shape, pow)
 }
 
 impl LiveDoc {
@@ -232,7 +72,6 @@ impl LiveDoc {
         db.set_macro_bodies(&lang.macros);
         db.set_tree(&uri, session.tree().expect("total").clone());
         let (painter, _) = Painter::new(&session, &lang.styles, Some((&mut db, &uri)));
-        let folds = FoldIndex::new(lang.lexer, |id| style_class(&lang, id), &session.buf);
         LiveDoc {
             lang,
             uri,
@@ -240,145 +79,31 @@ impl LiveDoc {
             db,
             painter,
             marks_rev: 1,
-            outline: Outline::new(),
+            structure: Structure::new(),
             shape_rev: 0,
             shape_hash: 0,
-            folds,
         }
     }
 
-    /// The outline marks for the CURRENT revision.
-    ///
-    /// Asked twice in one revision, the second answer is the first's
-    /// `Arc`. Asked after an edit, the units the edit left alone keep
-    /// their marks, and only the units that are new subtrees are walked.
-    fn marks_now(&mut self) -> Arc<Vec<Mark>> {
-        if self.outline.rev == self.marks_rev {
-            return self.outline.marks.clone();
-        }
-        let cfg = &self.lang.outline;
-        let kinds = mark_kinds(cfg);
+    /// The outline and folds of the CURRENT revision: read once per
+    /// revision, and then only what the edits since the last one rebuilt
+    /// (see [`Structure`]). The SHAPE revision moves when the outline's
+    /// shape did.
+    fn structure_now(&mut self) -> &Structure {
         let tree = self.session.tree().expect("total");
-        let outline = &mut self.outline;
-
-        // The list nodes between the root and a unit have productions of
-        // their own that no grammar's outline entry names. Were one ever
-        // to (a grammar of 65,534 productions), the units would not be
-        // the whole story; the tree is then one unit, walked whole.
-        let spine_is_silent =
-            !cfg.entries.iter().any(|e| e.prod == LIST_PROD || e.prod == RUN_PROD);
-
-        // The root's own mark, when its production is outline-worthy.
-        let root_mark = if spine_is_silent {
-            qana_services::node_symbol(tree, cfg).map(|s| mark_at(s, 0, &kinds))
-        } else {
-            None
-        };
-        let head = root_mark.is_some() as usize;
-        let marks = Arc::make_mut(&mut outline.marks);
-        if head != outline.head {
-            // Every unit just moved a level in or out, and its shape
-            // with it: nothing kept is true any more.
-            outline.units.clear();
-            marks.clear();
-            outline.head = head;
-        }
-        if let Some(root_mark) = root_mark {
-            match marks.first_mut() {
-                Some(first) => *first = root_mark,
-                None => marks.push(root_mark),
-            }
-        }
-
-        // Which units did the edits since the last walk leave alone?
-        // The ones still at the front and the ones still at the back, by
-        // identity; what lies between them is walked.
-        let mut units: Vec<(&Arc<GreenNode>, u32)> = Vec::new();
-        if spine_is_silent {
-            collect_units(tree, &mut units);
-        } else {
-            units.push((tree, 0));
-        }
-        let (old_len, new_len) = (outline.units.len(), units.len());
-        let mut lo = 0usize;
-        while lo < old_len && lo < new_len && Arc::ptr_eq(&outline.units[lo].node, units[lo].0) {
-            lo += 1;
-        }
-        let mut suffix = 0usize;
-        while suffix < old_len - lo
-            && suffix < new_len - lo
-            && Arc::ptr_eq(&outline.units[old_len - 1 - suffix].node, units[new_len - 1 - suffix].0)
-        {
-            suffix += 1;
-        }
-        let (old_hi, new_hi) = (old_len - suffix, new_len - suffix);
-        let first_mark = |units: &[OutlineUnit], i: usize| {
-            if i == 0 {
-                head
-            } else {
-                units[i - 1].mark_end as usize
-            }
-        };
-        let (from, to) = (first_mark(&outline.units, lo), first_mark(&outline.units, old_hi));
-
-        let mut window_marks: Vec<Mark> = Vec::new();
-        let mut window_units: Vec<OutlineUnit> = Vec::with_capacity(new_hi - lo);
-        for &(node, base) in &units[lo..new_hi] {
-            let (shape, shape_pow) = walk_unit(node, base, head, cfg, &kinds, &mut window_marks);
-            window_units.push(OutlineUnit {
-                node: node.clone(),
-                base,
-                mark_end: (from + window_marks.len()) as u32,
-                shape,
-                shape_pow,
-            });
-        }
-        let moved = (from + window_marks.len()) as i64 - to as i64;
-        if moved != 0 {
-            for unit in &mut outline.units[old_hi..] {
-                unit.mark_end = (unit.mark_end as i64 + moved) as u32;
-            }
-        }
-        marks.splice(from..to, window_marks);
-        outline.units.splice(lo..old_hi, window_units);
-        debug_assert_eq!(outline.units.len(), new_len);
-
-        // A unit that was kept is the same construct; where it starts
-        // may have moved, and its marks move with it. The shape of the
-        // file is the units' shapes joined, in order.
-        let mut shape = 0u64;
-        if head == 1 {
-            shape = shape_fold(shape, shape_element(&marks[0].name, marks[0].category, 0));
-        }
-        let mut at = head;
-        for (unit, &(node, base)) in outline.units.iter_mut().zip(&units) {
-            debug_assert!(Arc::ptr_eq(&unit.node, node));
-            let end = unit.mark_end as usize;
-            if unit.base != base {
-                let by = base.wrapping_sub(unit.base);
-                for m in &mut marks[at..end] {
-                    m.start = m.start.wrapping_add(by);
-                    m.end = m.end.wrapping_add(by);
-                    m.name_start = m.name_start.wrapping_add(by);
-                    m.name_end = m.name_end.wrapping_add(by);
-                }
-                unit.base = base;
-            }
-            shape = shape.wrapping_mul(unit.shape_pow).wrapping_add(unit.shape);
-            at = end;
-        }
-        debug_assert_eq!(at, marks.len());
-
-        // The SHAPE revision bumps only when the (name, category,
-        // nesting) sequence changed. Spans are deliberately not part of
-        // it: they shift on every keystroke while the shape survives
-        // body edits.
-        if shape != self.shape_hash {
-            self.shape_hash = shape;
+        let kinds = mark_kinds(&self.lang.outline);
+        self.structure.update(tree, &self.lang.outline, &kinds, &self.lang.folds, self.marks_rev);
+        if self.structure.shape != self.shape_hash {
+            self.shape_hash = self.structure.shape;
             self.shape_rev = self.shape_rev.wrapping_add(1);
         }
-        outline.rev = self.marks_rev;
-        outline.marks.clone()
+        &self.structure
+    }
+
+    /// The outline marks for the CURRENT revision. Asked twice in one
+    /// revision, the second answer is the first's `Arc`.
+    fn marks_now(&mut self) -> Arc<Vec<Mark>> {
+        self.structure_now().marks()
     }
 }
 
@@ -388,9 +113,8 @@ impl Limner for LiveDoc {
         // A new document: nothing of the old tree is in the new one.
         // (The shape hash stays, so reopening a document of the same
         // shape does not announce a new one.)
-        self.outline = Outline::new();
+        self.structure = Structure::new();
         self.session = self.lang.session(text);
-        self.folds.reset(&self.session.buf);
         self.db = SemDb::new(self.lang.binding.clone());
         self.db.set_types(self.lang.types.clone());
         self.db.set_macro_bodies(&self.lang.macros);
@@ -473,12 +197,6 @@ impl Limner for LiveDoc {
             }])
             .expect("total under errors");
         let t_parse = t0.elapsed();
-        self.folds.note_edit(
-            &self.session.buf,
-            &outcome.damage.regions,
-            self.marks_rev.wrapping_sub(1),
-            self.marks_rev,
-        );
         let t1 = StageClock::start(trace);
         self.db.set_tree(&self.uri, self.session.tree().expect("total").clone());
         let t_sem = t1.elapsed();
@@ -555,7 +273,7 @@ impl Limner for LiveDoc {
     }
 
     fn folds_shared(&mut self) -> Arc<Vec<Mark>> {
-        self.folds.folds(self.marks_rev)
+        self.structure_now().folds()
     }
 
     fn folds_rev(&mut self) -> u64 {
@@ -563,13 +281,8 @@ impl Limner for LiveDoc {
     }
 
     fn fold_legend(&self) -> Vec<String> {
-        self.folds.legend().to_vec()
+        self.lang.folds.legend.clone()
     }
-}
-
-/// The style class of a token of `lang`, if it has one.
-fn style_class(lang: &EmbeddedLang, id: qana_grammar::model::TokenId) -> Option<&'static str> {
-    lang.styles.class_of(id).map(|class| lang.styles.legend[class as usize])
 }
 
 /// Mark categories = the outline config's kinds, deduped in first-use
@@ -593,8 +306,10 @@ mod outline_tests {
     //! revision must move exactly when the shape does.
 
     use super::*;
+    use crate::structure::{mark_at, PIECE_BYTES};
 
     const C_QANA: &str = include_str!("../../../examples/c/c.qana");
+    const RUST_QANA: &str = include_str!("../../../examples/rust/rust.qana");
 
     /// A grammar whose START production is outline-worthy: the root
     /// node is itself a mark, and every other mark is inside it.
@@ -822,62 +537,103 @@ rule call = Call: name:IDENT ";"
         let mut doc = LiveDoc::open(lang, "m", &text);
         let marks = doc.marks_now();
         assert_eq!(marks[0].name, "main");
+        assert!(marks[1..].iter().all(|m| m.end <= marks[0].end), "and encloses the rest");
         assert_eq!(shape_of(&marks)[1], ("alpha".to_string(), marks[1].category, 1));
-        assert_eq!(doc.outline.head, 1);
     }
 
     /// The root's mark can come and go: a document that does not parse
     /// as the root production has none. Losing it and getting it back
-    /// puts every unit a level out and a level in again.
+    /// puts every other mark a level out and a level in again.
     #[test]
     fn the_root_mark_goes_and_comes_back() {
         let lang = Arc::new(EmbeddedLang::from_qana_source(MODULE_QANA).unwrap());
         let text = "module main;\nfn alpha { beta; }\nfn beta { alpha; }\n";
         let mut doc = LiveDoc::open(lang, "m", text);
+        let root_mark = |doc: &mut LiveDoc| doc.marks_now().first().is_some_and(|m| m.name == "main");
         assert_eq!(doc.marks_now().len(), 3);
-        assert_eq!(doc.outline.head, 1);
+        assert!(root_mark(&mut doc));
         let with_root = doc.shape_rev;
 
         // The header goes: whatever the parser makes of the rest, the
         // kept outline is what a walk of that tree says.
         doc.edit(&LineEdit { start: 0, end: 1, lines: vec![] });
         assert_eq!(*doc.marks_now(), walked(&doc));
-        let head_without = doc.outline.head;
+        let root_without = root_mark(&mut doc);
 
         // And comes back.
         doc.edit(&LineEdit { start: 0, end: 0, lines: vec!["module main;".into()] });
         assert_eq!(*doc.marks_now(), walked(&doc));
-        assert_eq!(doc.outline.head, 1);
-        assert_eq!(doc.marks_now()[0].name, "main");
-        if head_without == 0 {
+        assert!(root_mark(&mut doc));
+        if !root_without {
             assert_ne!(doc.shape_rev, with_root, "the shape changed, and changed back");
         }
     }
 
-    /// The point of keeping it: typing in one function walks that
-    /// function again, and no other.
+    /// The point of keeping it: typing in one function reads the piece
+    /// holding that function again (a run of short functions, here), and
+    /// copies the rest.
     #[test]
-    fn a_keystroke_walks_one_unit() {
+    fn a_keystroke_reads_a_piece_or_two() {
         let lang = Arc::new(EmbeddedLang::from_qana_source(C_QANA).unwrap());
         let text: String = (0..300)
             .map(|i| format!("static int fn_{i}(int a) {{\n    return a + {i};\n}}\n\n"))
             .collect();
         let mut doc = LiveDoc::open(lang, "units.c", &text);
-        let before = doc.marks_now();
-        assert_eq!(before.len(), 300);
-        let kept: Vec<*const GreenNode> =
-            doc.outline.units.iter().map(|u| Arc::as_ptr(&u.node)).collect();
-        drop(before);
+        assert_eq!(doc.marks_now().len(), 300);
 
         // Line 4·150 + 1 is the body of fn_150.
         doc.edit(&LineEdit { start: 601, end: 602, lines: vec!["    return a + 150 + 1;".into()] });
         let after = doc.marks_now();
         assert_eq!(*after, walked(&doc));
-        let now: Vec<*const GreenNode> =
-            doc.outline.units.iter().map(|u| Arc::as_ptr(&u.node)).collect();
-        assert_eq!(now.len(), kept.len(), "the same number of units");
-        let changed: Vec<usize> = (0..now.len()).filter(|&i| now[i] != kept[i]).collect();
-        assert_eq!(changed.len(), 1, "one unit is a new subtree: {changed:?}");
-        assert_eq!(after[changed[0]].name, "fn_150");
+        let read = doc.structure.read;
+        assert!(read <= 2 * PIECE_BYTES as usize, "a piece or two read again, {read} bytes of {}", text.len());
+        assert_eq!(*doc.folds_shared(), walked_folds(&doc), "and the folds are the whole tree's");
+    }
+
+    /// Wherever the function is: inside one module that is the whole
+    /// file, typing in one of its functions reads the piece holding it,
+    /// walks the chain of constructs around it, and copies the rest.
+    #[test]
+    fn a_keystroke_inside_one_big_module_reads_a_piece_or_two() {
+        let lang = Arc::new(EmbeddedLang::from_qana_source(RUST_QANA).unwrap());
+        let mut text = String::from("pub mod m {\n");
+        for i in 0..300 {
+            text.push_str(&format!("    pub fn f{i}(a: u8) -> u8 {{\n        a + {i}\n    }}\n\n"));
+        }
+        text.push_str("}\n");
+        let mut doc = LiveDoc::open(lang, "big.rs", &text);
+        assert_eq!(doc.marks_now().len(), 301, "the module and its functions");
+        assert_eq!(*doc.marks_now(), walked(&doc));
+        assert_eq!(*doc.folds_shared(), walked_folds(&doc));
+
+        // Line 1 + 4·150 + 1 is the body of f150.
+        doc.edit(&LineEdit { start: 602, end: 603, lines: vec!["        a + 150 + 1".into()] });
+        assert_eq!(*doc.marks_now(), walked(&doc));
+        let read = doc.structure.read;
+        assert!(read <= 2 * PIECE_BYTES as usize, "a piece or two read again, {read} bytes of {}", text.len());
+        assert_eq!(*doc.folds_shared(), walked_folds(&doc), "and the folds are the whole tree's");
+
+        // A new function in the middle: the shape moves, and what is kept
+        // around it is still the whole tree's.
+        let rev = doc.shape_rev;
+        doc.edit(&LineEdit { start: 601, end: 601, lines: vec!["    fn added() {}".into()] });
+        assert_eq!(*doc.marks_now(), walked(&doc));
+        assert_ne!(doc.shape_rev, rev);
+        assert_eq!(*doc.folds_shared(), walked_folds(&doc));
+    }
+
+    /// What a full walk of the document's tree says its folds are.
+    fn walked_folds(doc: &LiveDoc) -> Vec<Mark> {
+        qana_services::folds(doc.session.tree().expect("total"), &doc.lang.folds)
+            .into_iter()
+            .map(|f| Mark {
+                category: f.category,
+                start: f.span.0,
+                end: f.span.1,
+                name_start: f.head.0,
+                name_end: f.head.1,
+                name: String::new(),
+            })
+            .collect()
     }
 }

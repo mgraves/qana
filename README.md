@@ -100,7 +100,7 @@ full system keeps `incremental == batch` as a permanent CI gate.
 |---|---|
 | Cold lex (from scratch) | **18.6 ms** (203 MB/s) |
 | Lossless roundtrip | verified, 0.6 ms |
-| Block skeleton (108,935 blocks, 10,000 folds) | 1.5 ms |
+| Block skeleton (108,935 blocks, 10,000 over lines) | 1.5 ms |
 | **Typical batch: 1,000 scattered single-line edits** | **269 µs** (0.27 µs/site), damage 0.99% of file, **zero reconvergence** |
 | **Single keystroke (in-place fast path)** | **0.4 µs median, 0.7 µs p99** |
 | Bounded construct (open `/*` + close `*/` 25 lines apart, one batch) | wave stopped after exactly 25 lines |
@@ -357,8 +357,8 @@ already generates, LSP-shaped but transport-free:
   encoding, and **delta updates spliced from damage regions** — gated by
   a property test (delta-applied cache must byte-equal a fresh full
   encode, 160 random edit rounds + 200 at scale).
-- **Folding** from the block skeleton + multi-line comment runs read
-  straight off the line states.
+- **Folding** from the syntax: the constructs a grammar marks `@fold`,
+  and comments over lines, kept across edits by top-level construct.
 - **Outline** from the tree with byte spans (name selection = exact
   ident span).
 - **Completion from the ACTION rows** — the antlr4-c3 capability as a

@@ -1,7 +1,7 @@
 //! P3 increment 1: grammar-derived editor services over the incremental
 //! session. Everything here is computed from artifacts the toolchain
-//! already generates — token styles from the vocab, folding from the
-//! block skeleton and line states, outline from the typed tree,
+//! already generates — token styles from the vocab, folding and the
+//! outline from the typed tree,
 //! completion straight off the LR ACTION rows, diagnostics from repairs.
 //! The functions are LSP-shaped (semantic-token quintuples with delta
 //! edits, line/col ranges) but transport-free; the LSP server binary is
@@ -13,7 +13,7 @@ use qana_engine::{DamageReport, IncSession, LexedBuffer};
 use qana_grammar::green::{ancestor_spans, ERROR_NT};
 use qana_grammar::incremental::{Repair, RepairKind};
 use qana_grammar::{
-    CompiledLexer, GreenChild, GreenNode, LrAct, LrTables, SynGrammar, TokenId, EOF,
+    CompiledLexer, GreenChild, GreenNode, GreenToken, LrAct, LrTables, SynGrammar, TokenId, EOF,
 };
 use std::collections::HashMap;
 
@@ -234,60 +234,468 @@ impl SemanticTokens {
 // ---------------------------------------------------------------------------
 // Folding
 // ---------------------------------------------------------------------------
+//
+// A document folds where its syntax says it does: the constructs its
+// grammar marks `@fold`, wherever one runs over lines. Comments are not
+// syntax (they are trivia, kept in the tree but skipped by the parser),
+// so they fold by their tokens: a comment that runs over lines, and two
+// or more lines in a row holding nothing but comments.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FoldRange {
-    pub start_line: u32,
-    pub end_line: u32,
-    pub kind: FoldKind,
+/// What folds in a language's documents: the constructs its grammar
+/// declares foldable (`@fold`) and its comments.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FoldConfig {
+    /// By production index: the fold its constructs make, if any.
+    pub by_prod: Vec<Option<FoldEntry>>,
+    /// Category names, indexed by [`Fold::category`]: the grammar's fold
+    /// kinds in the order it first uses them, then `comment` if it does
+    /// not.
+    pub legend: Vec<String>,
+    /// The category of comment folds.
+    pub comment: u8,
+    /// By token id: whether it is a comment (a trivia token styled
+    /// `comment`).
+    pub comments: Vec<bool>,
+    /// By token id: whether the lexer reads it in a mode other than the
+    /// base mode (`Vocab::modes`), within a construct of tokens of its
+    /// own such as a block comment's body.
+    pub in_mode: Vec<bool>,
 }
 
+/// The fold a foldable construct makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FoldKind {
-    Block,
-    Comment,
+pub struct FoldEntry {
+    pub category: u8,
+    /// The symbol position the fold begins at (a construct's body, its
+    /// opening bracket); `None` for the construct's start.
+    pub from: Option<usize>,
+    /// The symbol position it ends at (a closing bracket with more of the
+    /// construct after it); `None` for the construct's end.
+    pub to: Option<usize>,
 }
 
-/// Folding: bracket blocks from the skeleton + multi-line comment runs
-/// from the line states (lines whose ENTRY state is inside a comment).
-pub fn folding_ranges(
-    lexer: &CompiledLexer,
-    buf: &LexedBuffer<'_, CompiledLexer>,
-) -> Vec<FoldRange> {
-    let mut out = Vec::new();
-    let sk = qana_engine::build_skeleton(buf, &lexer.vocab);
-    for (start, end) in sk.folding_ranges() {
-        out.push(FoldRange { start_line: start as u32, end_line: end as u32, kind: FoldKind::Block });
-    }
-    // Comment runs: entry state depth > 0 means "inside a block comment".
-    let mut run_start: Option<usize> = None;
-    for li in 0..buf.lines.len() {
-        let inside = buf.entry_state(li).depth() > 0;
-        match (inside, run_start) {
-            (true, None) => run_start = Some(li.saturating_sub(1)), // opener line
-            (false, Some(s)) => {
-                if li > s + 1 {
-                    out.push(FoldRange {
-                        start_line: s as u32,
-                        end_line: (li - 1) as u32,
-                        kind: FoldKind::Comment,
-                    });
-                }
-                run_start = None;
+impl FoldConfig {
+    /// The fold configuration of a language: `kinds`, its fold kinds in
+    /// the order it first uses them; `entries`, its foldable productions
+    /// (the production, the index of its kind, and the symbol positions
+    /// its fold begins and ends at) among `prods`. Its comments are the
+    /// trivia tokens of `vocab` that `styles` classes `comment`.
+    pub fn new(
+        kinds: Vec<String>,
+        entries: &[(u16, u8, Option<usize>, Option<usize>)],
+        prods: usize,
+        vocab: &qana_grammar::Vocab,
+        styles: &Styles,
+    ) -> FoldConfig {
+        let mut legend = kinds;
+        let comment = match legend.iter().position(|k| k == "comment") {
+            Some(i) => i,
+            None => {
+                legend.push("comment".to_string());
+                legend.len() - 1
             }
-            _ => {}
+        } as u8;
+        let mut by_prod: Vec<Option<FoldEntry>> = vec![None; prods];
+        for &(prod, category, from, to) in entries {
+            by_prod[prod as usize] = Some(FoldEntry { category, from, to });
+        }
+        let comment_class = styles.legend.iter().position(|c| *c == "comment");
+        let ids = 0..vocab.names.len() as TokenId;
+        FoldConfig {
+            by_prod,
+            legend,
+            comment,
+            comments: ids
+                .clone()
+                .map(|id| {
+                    vocab.is_trivia(id)
+                        && comment_class.is_some_and(|c| styles.class_of(id) == Some(c as u32))
+                })
+                .collect(),
+            in_mode: ids.map(|id| vocab.modes[id as usize] != 0).collect(),
         }
     }
-    if let Some(s) = run_start {
-        let last = buf.lines.len() - 1;
-        if last > s {
-            out.push(FoldRange { start_line: s as u32, end_line: last as u32, kind: FoldKind::Comment });
-        }
+
+    /// The fold a construct of production `prod` makes, if any.
+    pub fn entry(&self, prod: u16) -> Option<FoldEntry> {
+        self.by_prod.get(prod as usize).copied().flatten()
     }
-    out.sort_by_key(|f| (f.start_line, f.end_line));
-    out
+
+    fn is_comment(&self, id: TokenId) -> bool {
+        self.comments.get(id as usize).copied().unwrap_or(false)
+    }
+
+    fn is_in_mode(&self, id: TokenId) -> bool {
+        self.in_mode.get(id as usize).copied().unwrap_or(false)
+    }
 }
 
+/// A region of a document that runs over lines, which an editor can fold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fold {
+    /// Index into [`FoldConfig::legend`].
+    pub category: u8,
+    /// Byte span, from the start of its first token to the end of its
+    /// last.
+    pub span: (u32, u32),
+    /// Its head: a construct's first token, a comment's opening token,
+    /// the comments of a run's first line.
+    pub head: (u32, u32),
+}
+
+/// Where a fold walk stands between two pieces of a document: what the
+/// tokens before them leave undecided. Offsets are relative to where the
+/// next piece begins, so a piece walked from a state is walked again only
+/// when the state it is entered in differs. A piece that follows a real
+/// token (the usual case: trivia lead the token after them, so a node
+/// ends at a token) is entered in [`FoldState::after_code`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoldState {
+    /// Line breaks since the last token that was not one. Whether they
+    /// end lines or run inside a comment waits on the next token: one
+    /// read in a mode continues the construct the breaks are in.
+    breaks: u32,
+    /// The line being read: whether a real token is on it, the span of
+    /// its comments, and whether it runs over a break inside a mode.
+    code: bool,
+    comments: Option<(i64, i64)>,
+    spans: bool,
+    /// The run of comment lines being read: its start, its first line's
+    /// comments' end, its last line's comments' end, its lines.
+    run: Option<(i64, i64, i64, u32)>,
+    /// The comment being read: its start, its opening token's end, its
+    /// last token's end, and whether it runs over a break.
+    block: Option<(i64, i64, i64, bool)>,
+}
+
+impl FoldState {
+    /// The state at the start of a document.
+    pub fn start() -> FoldState {
+        FoldState { breaks: 0, code: false, comments: None, spans: false, run: None, block: None }
+    }
+
+    /// The state after a real token, with nothing undecided.
+    pub fn after_code() -> FoldState {
+        FoldState { code: true, ..FoldState::start() }
+    }
+
+    fn shifted(&self, by: i64) -> FoldState {
+        FoldState {
+            comments: self.comments.map(|(s, e)| (s + by, e + by)),
+            run: self.run.map(|(s, h, e, n)| (s + by, h + by, e + by, n)),
+            block: self.block.map(|(s, h, e, b)| (s + by, h + by, e + by, b)),
+            ..self.clone()
+        }
+    }
+}
+
+/// A fold whose offsets are relative to where a walk began, and may lie
+/// before it (a comment run carried into the piece).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelFold {
+    pub category: u8,
+    pub span: (i64, i64),
+    pub head: (i64, i64),
+}
+
+impl RelFold {
+    /// The fold at `base`.
+    pub fn at(self, base: u32) -> Fold {
+        let abs = |x: i64| (x + base as i64) as u32;
+        Fold {
+            category: self.category,
+            span: (abs(self.span.0), abs(self.span.1)),
+            head: (abs(self.head.0), abs(self.head.1)),
+        }
+    }
+}
+
+/// Reads the tokens of a document, or of a piece of one in order, and
+/// finds its folds.
+struct FoldWalker<'c> {
+    cfg: &'c FoldConfig,
+    st: FoldState,
+    /// Offset of the next token, relative to where the walk began.
+    at: i64,
+    /// Line breaks passed in this walk.
+    lines: u64,
+    /// The first real token's start and end, and the line breaks passed
+    /// before it.
+    first_real: Option<(i64, i64, u64)>,
+    /// The last real token's end, and the line breaks passed before it.
+    last_real: Option<(i64, u64)>,
+    /// Folds of constructs whose first real token has not come yet.
+    waiting: Vec<usize>,
+    /// Construct folds, in the order they were entered.
+    slots: Vec<Slot>,
+    comments: Vec<RelFold>,
+}
+
+/// A construct's fold being read.
+struct Slot {
+    category: u8,
+    /// Its first real token's start and end, and the line breaks before
+    /// it, once it comes.
+    first: Option<(i64, i64, u64)>,
+    /// Its last real token's end, and the line breaks before it, once the
+    /// fold ends.
+    last: Option<(i64, u64)>,
+}
+
+impl<'c> FoldWalker<'c> {
+    fn new(cfg: &'c FoldConfig, st: FoldState) -> Self {
+        FoldWalker {
+            cfg,
+            st,
+            at: 0,
+            lines: 0,
+            first_real: None,
+            last_real: None,
+            waiting: Vec::new(),
+            slots: Vec::new(),
+            comments: Vec::new(),
+        }
+    }
+
+    fn node(&mut self, n: &GreenNode) {
+        let entry = self.cfg.entry(n.prod);
+        let slot = entry.map(|e| {
+            self.slots.push(Slot { category: e.category, first: None, last: None });
+            self.slots.len() - 1
+        });
+        if let (Some(slot), Some(FoldEntry { from: None, .. })) = (slot, entry) {
+            self.waiting.push(slot);
+        }
+        let (from, to) = (entry.and_then(|e| e.from), entry.and_then(|e| e.to));
+        let mut symbol = 0usize;
+        for c in &n.children {
+            let is_symbol = match c {
+                GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+                GreenChild::Node(m) => m.nt != ERROR_NT,
+            };
+            if let (true, Some(slot), Some(k)) = (is_symbol, slot, from) {
+                if k == symbol {
+                    self.waiting.push(slot);
+                }
+            }
+            match c {
+                GreenChild::Node(m) => self.node(m),
+                GreenChild::Token(t) => self.token(t),
+            }
+            if is_symbol {
+                if let (Some(slot), Some(k)) = (slot, to) {
+                    if k == symbol {
+                        self.end_fold(slot);
+                    }
+                }
+                symbol += 1;
+            }
+        }
+        if let (Some(slot), None) = (slot, to) {
+            self.end_fold(slot);
+        }
+    }
+
+    /// The fold of `slot` ends at the last real token read. One with no
+    /// real token since its start (all of it inserted by recovery) folds
+    /// nothing; so does one whose end never comes (the symbol it ends at
+    /// was set aside by recovery).
+    fn end_fold(&mut self, slot: usize) {
+        self.waiting.retain(|&w| w != slot);
+        if let (Some((start, _, _)), Some((end, lines))) = (self.slots[slot].first, self.last_real) {
+            if end > start {
+                self.slots[slot].last = Some((end, lines));
+            }
+        }
+    }
+
+    fn token(&mut self, t: &GreenToken) {
+        let w = t.text.len() as i64;
+        if t.is_missing() {
+            return;
+        }
+        if t.id == qana_grammar::green::NEWLINE {
+            self.st.breaks += 1;
+            self.lines += 1;
+            self.at += w;
+            return;
+        }
+        let in_mode = self.cfg.is_in_mode(t.id);
+        if self.st.breaks > 0 {
+            if in_mode {
+                // The breaks run inside the construct this token
+                // continues: the line goes on over them.
+                self.st.spans = true;
+                if let Some(block) = &mut self.st.block {
+                    block.3 = true;
+                }
+                self.st.breaks = 0;
+            } else {
+                self.breaks_end_lines();
+            }
+        }
+        if !in_mode {
+            self.close_block();
+        }
+        let comment = t.trivia && self.cfg.is_comment(t.id);
+        let (start, end) = (self.at, self.at + w);
+        if comment {
+            match &mut self.st.block {
+                Some(block) if in_mode => block.2 = end,
+                _ => self.st.block = Some((start, end, end, false)),
+            }
+            self.st.comments = Some(self.st.comments.map_or((start, end), |(s, _)| (s, end)));
+        }
+        if !t.trivia {
+            self.st.code = true;
+            for slot in self.waiting.drain(..) {
+                self.slots[slot].first = Some((start, end, self.lines));
+            }
+            if self.first_real.is_none() {
+                self.first_real = Some((start, end, self.lines));
+            }
+            self.last_real = Some((end, self.lines));
+        }
+        self.at = end;
+    }
+
+    /// The line breaks waiting end lines: the line being read, and a
+    /// blank one for each further break.
+    fn breaks_end_lines(&mut self) {
+        for _ in 0..std::mem::take(&mut self.st.breaks) {
+            self.end_line();
+        }
+    }
+
+    fn end_line(&mut self) {
+        let st = &mut self.st;
+        match st.comments {
+            Some((start, end)) if !st.code && !st.spans => {
+                st.run = Some(match st.run {
+                    Some((s, head, _, n)) => (s, head, end, n + 1),
+                    None => (start, end, end, 1),
+                });
+            }
+            _ => self.close_run(),
+        }
+        let st = &mut self.st;
+        st.code = false;
+        st.comments = None;
+        st.spans = false;
+    }
+
+    fn close_run(&mut self) {
+        if let Some((start, head, end, lines)) = self.st.run.take() {
+            if lines >= 2 {
+                let category = self.cfg.comment;
+                self.comments.push(RelFold { category, span: (start, end), head: (start, head) });
+            }
+        }
+    }
+
+    fn close_block(&mut self) {
+        if let Some((start, head, end, spans)) = self.st.block.take() {
+            if spans {
+                let category = self.cfg.comment;
+                self.comments.push(RelFold { category, span: (start, end), head: (start, head) });
+            }
+        }
+    }
+
+    /// The end of the document: the breaks waiting end lines, the last
+    /// line ends, and so does a comment or run still open.
+    fn end_of_document(&mut self) {
+        self.breaks_end_lines();
+        self.end_line();
+        self.close_block();
+        self.close_run();
+    }
+
+    /// The folds found, in document order (an enclosing fold before the
+    /// ones it encloses; of two constructs with the same span, the outer
+    /// one only), the state the walk ends in, and what it read.
+    fn finish(self) -> FoldWalk {
+        let mut folds: Vec<(RelFold, usize)> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                let (start, head_end, lines_at_start) = slot.first?;
+                let (end, lines_at_end) = slot.last?;
+                (lines_at_end > lines_at_start).then_some((
+                    RelFold { category: slot.category, span: (start, end), head: (start, head_end) },
+                    i,
+                ))
+            })
+            .chain(self.comments.iter().map(|&f| (f, usize::MAX)))
+            .collect();
+        folds.sort_by_key(|(f, order)| (f.span.0, std::cmp::Reverse(f.span.1), *order));
+        folds.dedup_by_key(|(f, _)| f.span);
+        FoldWalk {
+            folds: folds.into_iter().map(|(f, _)| f).collect(),
+            left: self.st.shifted(-self.at),
+            lines: self.lines,
+            first_real: self.first_real,
+            last_real: self.last_real,
+        }
+    }
+}
+
+/// What a fold walk of a piece of a document found: its folds, the state
+/// it leaves (offsets relative to its end), and what a fold enclosing it
+/// needs to know of it: its line breaks, and its first and last real
+/// tokens (offsets relative to its start, with the line breaks before
+/// them). A walk of a document's pieces in order, joined by these, is a
+/// walk of the document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoldWalk {
+    pub folds: Vec<RelFold>,
+    pub left: FoldState,
+    pub lines: u64,
+    /// The first real token's start and end, and the line breaks before it.
+    pub first_real: Option<(i64, i64, u64)>,
+    /// The last real token's end, and the line breaks before it.
+    pub last_real: Option<(i64, u64)>,
+}
+
+/// The folds of a whole document.
+pub fn folds(tree: &GreenNode, cfg: &FoldConfig) -> Vec<Fold> {
+    let mut walker = FoldWalker::new(cfg, FoldState::start());
+    walker.node(tree);
+    walker.end_of_document();
+    walker.finish().folds.into_iter().map(|f| f.at(0)).collect()
+}
+
+/// The fold walk of one node of a document read in order, entered in `st`
+/// (offsets relative to the node's start). A fold of a comment run or a
+/// comment carried in from before the node may begin before it; one still
+/// open at its end is carried out in the state it leaves.
+pub fn node_folds(n: &GreenNode, cfg: &FoldConfig, st: FoldState) -> FoldWalk {
+    let mut walker = FoldWalker::new(cfg, st);
+    walker.node(n);
+    walker.finish()
+}
+
+/// The same for a run of tokens.
+pub fn token_folds<'t>(
+    tokens: impl IntoIterator<Item = &'t GreenToken>,
+    cfg: &FoldConfig,
+    st: FoldState,
+) -> FoldWalk {
+    let mut walker = FoldWalker::new(cfg, st);
+    for t in tokens {
+        walker.token(t);
+    }
+    walker.finish()
+}
+
+/// The folds the end of a document closes, left open in `st` (offsets
+/// relative to the end).
+pub fn end_folds(cfg: &FoldConfig, st: FoldState) -> Vec<RelFold> {
+    let mut walker = FoldWalker::new(cfg, st);
+    walker.end_of_document();
+    walker.finish().folds
+}
 // ---------------------------------------------------------------------------
 // Outline (document symbols)
 // ---------------------------------------------------------------------------
@@ -701,6 +1109,31 @@ pub mod demo_glue {
             s.set(b, "bracket");
         }
         s
+    }
+
+    /// Folding for the demo language: a block, and the bracketed lists
+    /// of a call, a list literal and a parenthesised expression.
+    pub fn demo_fold_config(
+        sg: &SynGrammar,
+        vocab: &qana_grammar::Vocab,
+        styles: &Styles,
+    ) -> super::FoldConfig {
+        let mut entries: Vec<(u16, u8, Option<usize>, Option<usize>)> = Vec::new();
+        for i in 0..sg.prods.len() {
+            match sg.prod_name(i).as_str() {
+                "Block" => entries.push((i as u16, 0, None, None)),
+                "CallExpr" => entries.push((i as u16, 1, Some(1), None)),
+                "ListExpr" | "ParenExpr" => entries.push((i as u16, 1, None, None)),
+                _ => {}
+            }
+        }
+        super::FoldConfig::new(
+            vec!["block".to_string(), "list".to_string()],
+            &entries,
+            sg.prods.len(),
+            vocab,
+            styles,
+        )
     }
 
     pub fn demo_outline_config(sg: &SynGrammar) -> OutlineConfig {

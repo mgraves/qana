@@ -42,6 +42,51 @@ const PIECES: &[&str] = &[
     "#define Z 1\n",
 ];
 
+/// What typing Rust breaks and mends it with: its joined punctuation
+/// (each character lexed as what it begins), paths, closures, patterns,
+/// attributes, lifetimes and raw strings.
+const RUST_PIECES: &[&str] = &[
+    "{",
+    "}",
+    "(",
+    ")",
+    "[",
+    "]",
+    "<",
+    ">",
+    "::",
+    "->",
+    "=>",
+    ">>=",
+    "..=",
+    "..",
+    "&mut ",
+    "|x| ",
+    "||",
+    "'a",
+    "r#\"",
+    "\"",
+    "/*",
+    "*/",
+    "// c\n",
+    "\n",
+    "x",
+    ";",
+    ",",
+    "?",
+    "as u8",
+    "let y = ",
+    "if let Some(x) = y {",
+    "match x {",
+    "#[cfg(test)]\n",
+    "impl<T> X for Y {",
+    "fn f(&self) -> u8 ",
+    "pub(crate) ",
+    "where T: Clone ",
+    "!",
+    "&&",
+];
+
 fn rng(mut seed: u64) -> impl FnMut(usize) -> usize {
     move |n: usize| {
         seed ^= seed << 13;
@@ -54,6 +99,10 @@ fn rng(mut seed: u64) -> impl FnMut(usize) -> usize {
 /// Run `steps` random edits of `text` under `grammar`, holding the
 /// session to the contract after each one.
 fn script(grammar: &str, text: &str, seed: u64, steps: usize) {
+    script_with(grammar, text, PIECES, seed, steps)
+}
+
+fn script_with(grammar: &str, text: &str, pieces: &[&str], seed: u64, steps: usize) {
     let lang = EmbeddedLang::from_qana_source(grammar).unwrap_or_else(|d| panic!("{d:?}"));
     let mut session: IncSession<'static> = lang.session(text);
     let mut pick = rng(seed);
@@ -69,7 +118,7 @@ fn script(grammar: &str, text: &str, seed: u64, steps: usize) {
         let edited = if pick(4) == 0 {
             format!("{}{}", &old[..at], &old[cut_to..])
         } else {
-            format!("{}{}{}", &old[..at], PIECES[pick(PIECES.len())], &old[at..])
+            format!("{}{}{}", &old[..at], pieces[pick(pieces.len())], &old[at..])
         };
         let end = if pick(6) == 0 && line + 1 < lines.len() { line + 2 } else { line + 1 };
         let joined = if end == line + 2 { format!("{edited}{}", lines[line + 1]) } else { edited };
@@ -136,10 +185,25 @@ fn c_edit_scripts_keep_the_contract_wide() {
     }
 }
 
+/// The Rust sample, broken and mended by typing, with the C pieces and
+/// Rust's own.
 #[test]
 fn rust_edit_scripts_keep_the_contract() {
     for seed in [5, 13] {
         script(RUST, RUST_SAMPLE, seed, 200);
+    }
+    for seed in [7, 11, 23, 0xC0DE] {
+        script_with(RUST, RUST_SAMPLE, RUST_PIECES, seed, 160);
+    }
+}
+
+/// The same over 256 scripts (40,960 edits). Release build:
+/// `cargo test --release -p qana-lang --test edit_scripts -- --ignored`.
+#[test]
+#[ignore = "wide sweep: release build, a few minutes"]
+fn rust_edit_scripts_keep_the_contract_wide() {
+    for k in 1..=256u64 {
+        script_with(RUST, RUST_SAMPLE, RUST_PIECES, k * 0x9E37_79B9 + 7, 160);
     }
 }
 
@@ -271,6 +335,21 @@ fn an_eps_seeded_list_in_front_of_skipped_material_is_not_reused() {
 #[test]
 fn an_eps_node_reduced_after_a_recovery_does_not_take_its_repairs() {
     equals_batch_after_edit("#define\n})v)*(v)\n#i*/f\nl=l<1^(t&F);\ne Z 1#e Z 1\n", 5, 6, "\n\n");
+}
+
+/// The other half of the rule above. Here the second item's empty
+/// attribute list is reduced after recovery skipped `{ { } }` in front of
+/// the item; an incremental parse reuses the item, parsed where nothing
+/// was skipped, whole, with the record it had there. The ε-node begins
+/// where it is reduced, so the item it begins starts after the skipped
+/// material and holds none of those repairs; and an ε-reduction has no
+/// symbols for a recovery to come between: the state and the terminal
+/// decide it, and it vouches for its ends whatever came before.
+#[test]
+fn an_eps_node_begins_where_it_is_reduced() {
+    let lang = EmbeddedLang::from_qana_source(RUST).unwrap();
+    let mut session = lang.session("x{\n{\n\"\n\"{\n}\n}\n{\n{\n}\n}}\n::r::E{");
+    holds_contract(&lang, &mut session, 8, 9, "", "the edit");
 }
 
 /// The translation unit's list opens with an ε seed and, in an

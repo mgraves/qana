@@ -1,13 +1,14 @@
-//! `examples/rust/rust.qana` colours Rust without lexing it any
+//! `examples/rust/rust.qana` reads Rust's syntax without lexing it any
 //! differently from `examples/rust-lex/rust_lex.qana`, the grammar that is
 //! measured against rustc's own lexer (see `rust_lex.rs` and
 //! `tools/rust-fit`).
 //!
-//! The colouring grammar cuts every line into the same tokens and leaves
+//! The syntax grammar cuts every line into the same tokens and leaves
 //! every line in the same mode; what it changes is only which token a
-//! piece of text is (a keyword rather than a name, an operator rather
-//! than punctuation). So what was measured holds for it, and these tests
-//! check exactly that, then what it adds.
+//! piece of text is (a keyword rather than a name, one kind of
+//! punctuation rather than another). So what was measured holds for it,
+//! and these tests check exactly that, then what it adds. Its syntax is
+//! tested in `rust_syntax.rs`.
 
 #[path = "../../../tools/rust-fit/src/classes.rs"]
 mod classes;
@@ -54,9 +55,21 @@ fn colour_classes(colour: &CompiledLexer, measured: &CompiledLexer) -> Vec<Class
                 return Class::Word;
             }
             match name.as_str() {
-                "LPAREN" | "RPAREN" | "LBRACK" | "RBRACK" | "LBRACE" | "RBRACE" | "OP" => {
-                    Class::Punct
-                }
+                // Brackets, and each punctuation character lexed as what
+                // it begins: one character each, as rustc_lexer has them.
+                "LPAREN" | "RPAREN" | "LBRACK" | "RBRACK" | "LBRACE" | "RBRACE" | "EQ_EQ"
+                | "EQ_ARROW" | "EQ" | "BANG_EQ" | "BANG" | "LT_SHLEQ" | "LT_SHL" | "LT_LE"
+                | "LT" | "GT_SHREQ" | "GT_SHR" | "GT_GE" | "GT" | "AMP_AMP" | "AMP_EQ" | "AMP"
+                | "PIPE_PIPE" | "PIPE_EQ" | "PIPE" | "PLUS_EQ" | "PLUS" | "MINUS_EQ"
+                | "MINUS_ARROW" | "MINUS" | "STAR_EQ" | "STAR" | "SLASH_EQ" | "SLASH"
+                | "PERCENT_EQ" | "PERCENT" | "CARET_EQ" | "CARET" | "DOT_DOT" | "DOT_EQ"
+                | "DOT" | "COLON_COLON" | "COLON" | "SEMI" | "COMMA" | "AT" | "HASH_BANG"
+                | "HASH" | "TILDE" | "QMARK" | "DOLLAR" => Class::Punct,
+                // The weak keywords, where they act as keywords: words.
+                "KW_UNION" | "KW_AUTO" | "KW_DEFAULT" | "KW_RAW" | "KW_SAFE" => Class::Word,
+                // `1.` alone, a float the parser may split, as rustc_lexer
+                // cuts it.
+                "FLOAT_DOT" => by_name["FLOAT"],
                 other => *by_name.get(other).unwrap_or_else(|| {
                     panic!("rust.qana has a token rust_lex.qana does not, with no class: {other}")
                 }),
@@ -192,9 +205,10 @@ fn keywords_are_keywords_and_names_stay_names() {
     assert_eq!(name_of("'static"), "LIFETIME");
     assert_eq!(name_of("macro_rules"), "IDENT");
     assert!(
-        read.windows(2)
-            .any(|w| w[0] == ("-".into(), "OP".into()) && w[1] == (">".into(), "OP".into())),
-        "`->` is two operators, as rustc_lexer has it: {read:?}"
+        read.windows(2).any(
+            |w| w[0] == ("-".into(), "MINUS_ARROW".into()) && w[1] == (">".into(), "GT".into())
+        ),
+        "`->` is two tokens, as rustc_lexer has it, the first lexed as what it begins: {read:?}"
     );
 }
 
@@ -206,8 +220,25 @@ fn operators_punctuation_and_brackets_are_told_apart() {
     assert_eq!(
         names,
         [
-            "IDENT", "PUNCT", "IDENT", "LPAREN", "IDENT", "RPAREN", "LBRACK", "INT", "RBRACK",
-            "OP", "OP", "LBRACE", "IDENT", "RBRACE", "PUNCT", "IDENT", "PUNCT", "PUNCT", "IDENT",
+            "IDENT",
+            "DOT",
+            "IDENT",
+            "LPAREN",
+            "IDENT",
+            "RPAREN",
+            "LBRACK",
+            "INT",
+            "RBRACK",
+            "PLUS_EQ",
+            "EQ",
+            "LBRACE",
+            "IDENT",
+            "RBRACE",
+            "SEMI",
+            "IDENT",
+            "COLON_COLON",
+            "COLON",
+            "IDENT",
         ]
     );
 }
@@ -227,18 +258,19 @@ fn a_block_over_lines_folds() {
 }
 
 /// Completion offers a keyword by its text. `Self` and `self` are two
-/// keywords, and each is offered as written.
+/// keywords, and each is offered as written, where an expression can
+/// begin.
 #[test]
 fn completion_offers_self_and_self_type_as_written() {
     let tc = QanaToolchain::new();
     let out = compile_source(&tc, GRAMMAR);
     let (lexer, tables) = certify(&out.def).expect("rust.qana is in the envelope");
-    let src = "fn f() ";
+    let src = "fn f() { ";
     let buffer = LexedBuffer::new(&lexer, src);
     let items = completion_at(&lexer, &buffer, &out.def.sg, &tables, src.len() as u32);
     let keyword = |label: &str| items.iter().any(|i| i.is_keyword && i.label == label);
     assert!(keyword("self"), "`self` is offered");
     assert!(keyword("Self"), "`Self` is offered as written, not as `self`");
-    assert!(keyword("fn"));
+    assert!(keyword("fn"), "an item can begin a statement");
     assert!(!items.iter().any(|i| i.is_keyword && i.label.starts_with("KW_")));
 }

@@ -380,6 +380,17 @@ pub fn emit_tree_sitter(
     writeln!(js, "  }}").unwrap();
     writeln!(js, "}});").unwrap();
 
+    // The classes a syntax gives (an alternative's `@style`) are read off
+    // qana's own tree, through what each rule passes on; highlights.scm
+    // holds the token kinds' only.
+    if styles.has_syntax() {
+        warnings.push(
+            "the classes the syntax gives (`@style` on alternatives) are not in highlights.scm: \
+             it styles tokens by their kind only"
+                .to_string(),
+        );
+    }
+
     // ---- queries/highlights.scm ----
     let capture_of = |class: &str| -> &'static str {
         match class {
@@ -392,6 +403,16 @@ pub fn emit_tree_sitter(
             "punctuation" => "@punctuation.delimiter",
             "bracket" => "@punctuation.bracket",
             "regexp" => "@string.regexp",
+            "doc_comment" => "@comment.documentation",
+            "lifetime" => "@label",
+            // The classes a syntax gives (see below) a token kind can
+            // carry too.
+            "type" => "@type",
+            "function" => "@function",
+            "method" => "@function.method",
+            "macro" => "@function.macro",
+            "decorator" => "@attribute",
+            "label" => "@label",
             _ => "@none",
         }
     };

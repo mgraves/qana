@@ -179,8 +179,8 @@ rule external_decl =
   // unambiguously a typedef'd declaration: FULL declarators, pointers
   // included. The head is a REFERENCE — uses of `word_t` navigate to
   // its typedef, and an unknown type is a "cannot find" diagnostic.
-  | TdFunctionDef: head:IDENT d:declarator compound_stmt @ref(head) @outline(d, function)
-  | TdDeclaration: head:IDENT i:init_declarators ";" @ref(head) @outline(i)
+  | TdFunctionDef: head:IDENT d:declarator compound_stmt @ref(head) @outline(d, function) @style(type, head)
+  | TdDeclaration: head:IDENT i:init_declarators ";" @ref(head) @outline(i) @style(type, head)
   | PpItem:      pp_directive
 
 // ---- declaration specifiers (keywords only in v0) ----
@@ -192,16 +192,16 @@ rule pp_directive =
   // and code refs that resolve here OPEN at @splice sites. Directive
   // refs (#ifdef, #undef) carry no @splice, so they never expand —
   // the declared form draws exactly cpp's line.
-  | PpDefine:     "#" PP_DEFINE name:PP_NAME body:pp_tokens @def(name) @macro(body) @outline(name, constant) @fold(directive)
+  | PpDefine:     "#" PP_DEFINE name:PP_NAME body:pp_tokens @def(name) @macro(body) @outline(name, constant) @fold(directive) @style(macro, name)
   // Function-like: the composite PP_NAME_LP proves the adjacency, and
   // the parameter list is STRUCTURE (named, separated, closed) — but
   // the macro's name lives inside the composite token, so it does not
   // @def yet: naming fn-like macros belongs to the meta tier, and the
   // exerciser pins that residue explicitly.
-  | PpDefineFn:   "#" PP_DEFINE name:PP_NAME_LP pp_params PP_RP pp_tokens @fold(directive)
-  | PpUndef:      "#" PP_UNDEF name:PP_NAME @ref(name)
-  | PpIfdef:      "#" PP_IFDEF name:PP_NAME @ref(name)
-  | PpIfndef:     "#" PP_IFNDEF name:PP_NAME @ref(name)
+  | PpDefineFn:   "#" PP_DEFINE name:PP_NAME_LP pp_params PP_RP pp_tokens @fold(directive) @style(macro, name)
+  | PpUndef:      "#" PP_UNDEF name:PP_NAME @ref(name) @style(macro, name)
+  | PpIfdef:      "#" PP_IFDEF name:PP_NAME @ref(name) @style(macro, name)
+  | PpIfndef:     "#" PP_IFNDEF name:PP_NAME @ref(name) @style(macro, name)
   | PpIf:         "#" PP_IF pp_tokens
   | PpElif:       "#" PP_ELIF pp_tokens
   | PpElse:       "#" PP_ELSE
@@ -251,9 +251,9 @@ rule decl_spec =
 // struct definition — per-NAMESPACE ordering, while values stay
 // define-before-use.
 rule struct_spec =
-  | StructDef:  su tag:IDENT su_body @def(tag) @ns(tag) @outline(tag, struct)
+  | StructDef:  su tag:IDENT su_body @def(tag) @ns(tag) @outline(tag, struct) @style(type, tag)
   | StructAnon: su su_body
-  | StructRef:  su tag:IDENT @ref(tag) @ns(tag)
+  | StructRef:  su tag:IDENT @ref(tag) @ns(tag) @style(type, tag)
 
 rule su =
   | SuStruct: "struct"
@@ -268,12 +268,12 @@ rule field_decl =
   | BitField:  decl_specs declarator ":" expr ";"
   // Struct fields have no expression competitors either: full
   // typedef'd fields, pointers included.
-  | TdField:   head:IDENT init_declarators ";" @ref(head)
+  | TdField:   head:IDENT init_declarators ";" @ref(head) @style(type, head)
 
 rule enum_spec =
-  | EnumDef:  "enum" tag:IDENT enum_body @def(tag) @ns(tag) @outline(tag, constant)
+  | EnumDef:  "enum" tag:IDENT enum_body @def(tag) @ns(tag) @outline(tag, constant) @style(type, tag)
   | EnumAnon: "enum" enum_body
-  | EnumRef:  "enum" tag:IDENT @ref(tag) @ns(tag)
+  | EnumRef:  "enum" tag:IDENT @ref(tag) @ns(tag) @style(type, tag)
 
 rule enum_body = EnumBody: "{" enumerators "}" @fold(block)
 
@@ -304,10 +304,10 @@ rule type_qual =
   | QualVolatile: "volatile"
 
 rule direct_declarator =
-  | DName:  name:IDENT @def(name)
+  | DName:  name:IDENT @def(name) @style(inherit, name)
   | DParen: "(" declarator ")"
   | DArray: direct_declarator "[" opt_expr "]"
-  | DFunc:  direct_declarator open:"(" params ")" @fold(list, open)
+  | DFunc:  d:direct_declarator open:"(" params ")" @fold(list, open) @style(function, d)
 
 rule params =
   | ParamsNone:
@@ -323,8 +323,8 @@ rule param_list = param+ % ","
 rule param =
   | Param:       decl_specs declarator
   | ParamAbs:    decl_specs ptrs
-  | TdParam:     head:IDENT declarator @ref(head)
-  | TdParamAbs:  head:IDENT ptrs @ref(head)
+  | TdParam:     head:IDENT declarator @ref(head) @style(type, head)
+  | TdParamAbs:  head:IDENT ptrs @ref(head) @style(type, head)
   | VarArgs:     ELLIPSIS
 
 // Block-level typedef'd declarators: pointered (the expression-tier
@@ -340,9 +340,9 @@ rule n_init_declarator =
 rule n_declarator = NDeclarator: ptrs n_direct
 
 rule n_direct =
-  | NDName:  name:IDENT @def(name)
+  | NDName:  name:IDENT @def(name) @style(inherit, name)
   | NDArray: n_direct "[" opt_expr "]"
-  | NDFunc:  n_direct open:"(" params ")" @fold(list, open)
+  | NDFunc:  d:n_direct open:"(" params ")" @fold(list, open) @style(function, d)
 
 rule initializer =
   | InitExpr:   expr
@@ -365,7 +365,7 @@ rule block_item =
   // shifts into `ptrs` with no competitor, because the one expression
   // that wanted those two tokens (bare-name multiplication) is the
   // derivation the statement tier gave up.
-  | TdLocal: head:IDENT n_init_declarators ";" @ref(head)
+  | TdLocal: head:IDENT n_init_declarators ";" @ref(head) @style(type, head)
   | ItemStmt: stmt
 
 rule stmt =
@@ -378,8 +378,8 @@ rule stmt =
   // namespace is hoisted (@ns) so a forward `goto done;` resolves.
   // Residue: labels are BLOCK-scoped here, not function-scoped — a
   // goto cannot jump INTO a nested block (see the exerciser gate).
-  | LabelStmt:   name:IDENT ":" stmt @def(name) @ns(label)
-  | GotoStmt:    "goto" name:IDENT ";" @ref(name) @ns(label)
+  | LabelStmt:   name:IDENT ":" stmt @def(name) @ns(label) @style(label, name)
+  | GotoStmt:    "goto" name:IDENT ";" @ref(name) @ns(label) @style(label, name)
   | IfStmt:      "if" "(" cexpr ")" stmt @precedence(",")
   | IfElseStmt:  "if" "(" cexpr ")" stmt "else" stmt
   | WhileStmt:   "while" "(" cexpr ")" stmt
@@ -423,7 +423,7 @@ rule s_cexpr =
   | ScComma: s_cexpr "," expr
 
 rule s_expr =
-  | SeName: name:IDENT @ref(name) @splice(name)
+  | SeName: name:IDENT @ref(name) @splice(name) @style(inherit, name)
   | SeWide: s_wide
 
 rule s_wide =
@@ -470,7 +470,7 @@ rule s_wide =
   | SSizeofE:   "sizeof" expr
   | SSizeofT:   "sizeof" "(" type_name ")" @precedence("sizeof")
   | SCast:      "(" type_name ")" expr @precedence("!")
-  | SCall:      s_expr open:"(" args ")" @precedence(".") @fold(list, open)
+  | SCall:      c:s_expr open:"(" args ")" @precedence(".") @fold(list, open) @style(function, c)
   | SIndex:     s_expr open:"[" expr "]" @precedence(".") @fold(list, open)
   | SMember:    s_expr "." IDENT
   | SArrow:     s_expr "->" IDENT
@@ -536,13 +536,13 @@ rule expr =
   | SizeofE:   "sizeof" expr
   | SizeofT:   "sizeof" "(" type_name ")" @precedence("sizeof")
   | Cast:      "(" type_name ")" expr @precedence("!")
-  | Call:      expr open:"(" args ")" @precedence(".") @fold(list, open)
+  | Call:      c:expr open:"(" args ")" @precedence(".") @fold(list, open) @style(function, c)
   | Index:     expr open:"[" expr "]" @precedence(".") @fold(list, open)
   | Member:    expr "." IDENT
   | Arrow:     expr "->" IDENT
   | PostInc:   expr "++" @precedence(".")
   | PostDec:   expr "--" @precedence(".")
-  | NameRef:   name:IDENT @ref(name) @splice(name)
+  | NameRef:   name:IDENT @ref(name) @splice(name) @style(inherit, name)
   | NumLit:    NUMBER
   | CharLit:   CHAR
   | StrLit:    STRING

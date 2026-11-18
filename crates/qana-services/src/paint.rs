@@ -13,12 +13,15 @@
 //!
 //! So the protocol is LINE-KEYED and TWO-WAVE:
 //!
-//!  * WAVE 0 (lexical): each line is a run of 4-byte cells
-//!    `{len, style, mods=0}` — recomputed for DAMAGED LINES ONLY,
-//!    synchronously with the edit. The first frame after a keystroke
-//!    paints from the same declared `@style` classes the final frame
-//!    uses — there is no TextMate approximation to disagree with, so
-//!    there is nothing to flicker.
+//!  * WAVE 0 (declared): each line is a run of 4-byte cells
+//!    `{len, style, mods=0}`, styled by the grammar's declared `@style`
+//!    classes: a token's kind's, or the class its place in the syntax
+//!    gives it (`crate::syntax`). Recomputed synchronously with the edit
+//!    for the DAMAGED LINES, and for the few others whose syntactic
+//!    classes the edit changed (typing `(` after a name makes it a
+//!    call). The first frame after a keystroke paints from the same
+//!    declared classes the final frame uses — there is no TextMate
+//!    approximation to disagree with, so there is nothing to flicker.
 //!  * WAVE 1 (semantic): the SAME runs gain modifier bits — def/ref,
 //!    resolved/unresolved, public, foreign, typed — derived from the
 //!    memoized binding and type tiers. Wave 1 never changes a style,
@@ -29,6 +32,7 @@
 //! wire form is the in-memory form, little-endian — decoding is a
 //! bounds check, not a parse.
 
+use crate::syntax::SyntaxLines;
 use crate::Styles;
 use qana_engine::{DamageReport, IncSession, LexedBuffer};
 use qana_grammar::CompiledLexer;
@@ -64,10 +68,18 @@ impl StageClock {
 }
 
 // ---------------------------------------------------------------------------
-// Wave 0: lexical runs, straight off the line lexer
+// Wave 0: declared runs, off the line lexer and the syntax
 // ---------------------------------------------------------------------------
 
-fn wave0_line(toks: &[qana_grammar::lexer::Token], term_len: u32, styles: &Styles) -> Vec<Run> {
+/// A line's runs: each token styled by its syntax (`painted`, the line's
+/// (column, length, class) from [`SyntaxLines`]), and failing that by its
+/// kind.
+fn wave0_line(
+    toks: &[qana_grammar::lexer::Token],
+    term_len: u32,
+    styles: &Styles,
+    painted: &[(u32, u32, u8)],
+) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::with_capacity(toks.len() + 1);
     let mut push = |len: u32, style: u8| {
         let mut left = len;
@@ -84,14 +96,40 @@ fn wave0_line(toks: &[qana_grammar::lexer::Token], term_len: u32, styles: &Style
             left -= chunk as u32;
         }
     };
+    let mut next = 0usize;
+    let mut col = 0u32;
     for t in toks {
-        let style = styles.class_of(t.id).map(|c| c as u8).unwrap_or(STYLE_NONE);
+        let style = match painted.get(next) {
+            Some(&(at, len, class)) if at == col => {
+                debug_assert_eq!(len, t.len, "the syntax paints whole tokens");
+                next += 1;
+                class
+            }
+            _ => styles.class_of(t.id).map(|c| c as u8).unwrap_or(STYLE_NONE),
+        };
         push(t.len, style);
+        col += t.len;
     }
+    debug_assert_eq!(next, painted.len(), "every token the syntax paints is a token of its line");
     if term_len > 0 {
         push(term_len, STYLE_NONE);
     }
     runs
+}
+
+/// Line `li`'s wave-0 runs.
+fn wave0_line_of(
+    session: &IncSession<'_>,
+    li: usize,
+    styles: &Styles,
+    syntax: Option<&SyntaxLines>,
+) -> Vec<Run> {
+    wave0_line(
+        &session.buf.lexed[li].tokens,
+        session.buf.lines[li].term.as_str().len() as u32,
+        styles,
+        syntax.map_or(&[], |s| s.line(li)),
+    )
 }
 
 fn line_widths(buf: &LexedBuffer<'_, CompiledLexer>) -> Vec<u32> {
@@ -200,8 +238,11 @@ fn apply_overlay(lines: &mut [Vec<Run>], widths: &[u32], marks: &[((u32, u32), u
 
 /// Owns the previous frame so an update can say exactly what changed.
 pub struct Painter {
-    /// Wave-0 runs per line (the lexical base, maintained by splice).
+    /// Wave-0 runs per line (the declared base, maintained by splice).
     base: Vec<Vec<Run>>,
+    /// What the syntax paints, kept across edits; `None` for a language
+    /// whose classes are all its tokens' ([`Styles::has_syntax`]).
+    syntax: Option<SyntaxLines>,
     /// Emitted (overlaid) runs per line — what the editor is showing.
     shown: Vec<Vec<Run>>,
     rev: u64,
@@ -266,12 +307,11 @@ impl Painter {
     ) -> (Painter, Paint) {
         let db = db.filter(|(db, _)| !db.declares_nothing());
         let widths = line_widths(&session.buf);
-        let base: Vec<Vec<Run>> = session
-            .buf
-            .lexed
-            .iter()
-            .zip(session.buf.lines.iter())
-            .map(|(lt, l)| wave0_line(&lt.tokens, l.term.as_str().len() as u32, styles))
+        let syntax = styles.has_syntax().then(|| {
+            SyntaxLines::new(session.tree().expect("total"), styles, session.buf.lines.len())
+        });
+        let base: Vec<Vec<Run>> = (0..session.buf.lines.len())
+            .map(|li| wave0_line_of(session, li, styles, syntax.as_ref()))
             .collect();
         let mut shown = base.clone();
         let mut cache = None;
@@ -293,13 +333,21 @@ impl Painter {
                 );
             }
         }
-        let p = Painter { base, shown: shown.clone(), rev: 0, widths, cache, window_items: 0 };
+        let p = Painter {
+            base,
+            syntax,
+            shown: shown.clone(),
+            rev: 0,
+            widths,
+            cache,
+            window_items: 0,
+        };
         let paint = Paint { rev: 0, lines: shown };
         (p, paint)
     }
 
-    /// Apply one edit's damage: wave 0 recomputes ONLY the damaged
-    /// window; wave 1 (when `db` is given) re-derives the overlay and
+    /// Apply one edit's damage: wave 0 recomputes the damaged window,
+    /// and the lines outside it whose syntactic classes changed; wave 1 (when `db` is given) re-derives the overlay and
     /// re-emits only lines whose runs actually changed. The returned
     /// delta is the whole difference between the frames.
     pub fn update(
@@ -324,16 +372,6 @@ impl Painter {
             let new_lo = damage.regions.iter().map(|r| r.new_lines.0).min().unwrap();
             let new_hi = damage.regions.iter().map(|r| r.new_lines.1).max().unwrap();
             debug_assert_eq!(old_lo, new_lo);
-            let fresh: Vec<Vec<Run>> = (new_lo..new_hi)
-                .map(|li| {
-                    wave0_line(
-                        &session.buf.lexed[li].tokens,
-                        session.buf.lines[li].term.as_str().len() as u32,
-                        styles,
-                    )
-                })
-                .collect();
-            self.base.splice(old_lo..old_hi, fresh.clone());
             old_chars = self.widths[old_lo..old_hi].iter().sum();
             let fresh_widths: Vec<u32> = (new_lo..new_hi)
                 .map(|li| {
@@ -344,18 +382,38 @@ impl Painter {
             self.widths.splice(old_lo..old_hi, fresh_widths);
             Some((old_lo, old_hi, new_lo, new_hi))
         };
+        // The syntax first: the window's runs are styled by it, and the
+        // lines outside the window whose classes it changed are restyled.
+        let restyled = match &mut self.syntax {
+            Some(syntax) => syntax.update(session.tree().expect("total"), styles, window),
+            None => Vec::new(),
+        };
+        if let Some((old_lo, old_hi, new_lo, new_hi)) = window {
+            let fresh: Vec<Vec<Run>> = (new_lo..new_hi)
+                .map(|li| wave0_line_of(session, li, styles, self.syntax.as_ref()))
+                .collect();
+            self.base.splice(old_lo..old_hi, fresh);
+        }
+        for &li in &restyled {
+            self.base[li] = wave0_line_of(session, li, styles, self.syntax.as_ref());
+        }
         debug_assert_eq!(self.widths.len(), self.base.len());
 
         match db {
             None => {
-                // Lexical-only consumer, or a database that declares
-                // nothing: shown IS base; the delta is the splice alone. (Semantic bits, if any were shown
+                // No semantic tier, or a database that declares nothing:
+                // shown IS base; the delta is the splice, and the lines
+                // the syntax restyled. (Semantic bits, if any were shown
                 // before, are the caller's concern — mixing modes on
                 // one painter is not supported.)
                 if let Some((old_lo, old_hi, new_lo, new_hi)) = window {
                     let repl: Vec<Vec<Run>> = self.base[new_lo..new_hi].to_vec();
                     self.shown.splice(old_lo..old_hi, repl.clone());
                     delta.splice = Some(((old_lo as u32, old_hi as u32), repl));
+                }
+                for &li in &restyled {
+                    self.shown[li] = self.base[li].clone();
+                    delta.repaints.push((li as u32, self.base[li].clone()));
                 }
             }
             Some((db, uri)) if !db.has_types() => {
@@ -367,7 +425,7 @@ impl Painter {
                 // O(window + changed items). What still grows with the
                 // document is flat: an identity compared per item, and
                 // an addition per line for the line starts.
-                self.overlay_via_items(window, old_chars, db, uri, &mut delta);
+                self.overlay_via_items(window, old_chars, &restyled, db, uri, &mut delta);
             }
             Some((db, uri)) => {
                 let trace = std::env::var_os("QANA_TRACE_EDIT").is_some();
@@ -426,6 +484,14 @@ impl Painter {
         self.window_items
     }
 
+    /// How many bytes of the document the syntax was read again for by the
+    /// last [`new`](Self::new) or [`update`](Self::update): the subtrees
+    /// the parser rebuilt, or that are given another class than before.
+    /// Zero for a language whose classes are all its tokens'.
+    pub fn syntax_read(&self) -> usize {
+        self.syntax.as_ref().map_or(0, SyntaxLines::read)
+    }
+
     /// The frame as currently shown (what a fresh viewer would paint).
     pub fn frame(&self) -> Paint {
         Paint { rev: self.rev, lines: self.shown.clone() }
@@ -439,6 +505,7 @@ impl Painter {
         &mut self,
         window: Option<(usize, usize, usize, usize)>,
         old_chars: u32,
+        restyled: &[usize],
         db: &mut SemDb,
         uri: &str,
         delta: &mut PaintDelta,
@@ -519,9 +586,10 @@ impl Painter {
         let t_sync = t0.elapsed();
 
         // Touched lines: the damaged window, every line a miss item has a
-        // mark on, and every line a replaced item had one on. Nothing else
-        // can look different: outside the window every line holds the text
-        // it held, and every other item's marks stand on it as they stood.
+        // mark on, every line a replaced item had one on, and every line
+        // whose base the syntax restyled. Nothing else can look different:
+        // outside the window every line holds the text and the base it
+        // held, and every other item's marks stand on it as they stood.
         // (Marks are token spans, and a token stays on one line (L1): the
         // line a mark starts on is the line it is on.)
         let t1 = StageClock::start(trace);
@@ -546,7 +614,8 @@ impl Painter {
                 None
             }
         };
-        let mut touched: Vec<usize> = Vec::new();
+        // Lines whose base the syntax restyled.
+        let mut touched: Vec<usize> = restyled.to_vec();
         for &i in &misses {
             let a0 = items[i].0.start;
             touched.extend(items[i].1.iter().map(|&((ra, _), _)| line_of(a0 + ra)));

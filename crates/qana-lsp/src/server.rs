@@ -18,6 +18,7 @@ use qana_lang::QanaToolchain;
 use qana_sem::SemDb;
 use qana_services::{
     completion_at, diagnostics, folds, outline, semantic_tokens_full, SemanticTokens,
+    LSP_MODIFIERS,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -137,7 +138,10 @@ impl Server {
                 let mut caps = json!({
                     "textDocumentSync": {"openClose": true, "change": 2},
                     "semanticTokensProvider": {
-                        "legend": {"tokenTypes": self.pipeline.styles.legend, "tokenModifiers": []},
+                        "legend": {
+                            "tokenTypes": self.pipeline.styles.lsp_types(),
+                            "tokenModifiers": LSP_MODIFIERS
+                        },
                         "full": {"delta": true}
                     },
                     "foldingRangeProvider": true,
@@ -198,6 +202,7 @@ impl Server {
                                     doc.cache.update(
                                         pipe.lexer,
                                         &doc.session.buf,
+                                        doc.session.tree().expect("total"),
                                         &pipe.styles,
                                         &outcome.damage,
                                     );
@@ -412,8 +417,8 @@ impl Server {
         let pipe = self.pipe_of(lang);
         let session = IncSession::new(pipe.lexer, pipe.sg, pipe.tables, text)
             .expect("total parsing");
-        let cache = semantic_tokens_full(pipe.lexer, &session.buf, &pipe.styles);
         let tree = session.tree().expect("total").clone();
+        let cache = semantic_tokens_full(pipe.lexer, &session.buf, &tree, &pipe.styles);
         self.sem_of(lang).set_tree(uri, tree);
         self.docs.insert(
             uri.to_string(),

@@ -1,13 +1,17 @@
 //! P3 increment 1: grammar-derived editor services over the incremental
 //! session. Everything here is computed from artifacts the toolchain
-//! already generates — token styles from the vocab, folding and the
-//! outline from the typed tree,
+//! already generates — token styles from the vocab and the tree,
+//! folding and the outline from the typed tree,
 //! completion straight off the LR ACTION rows, diagnostics from repairs.
 //! The functions are LSP-shaped (semantic-token quintuples with delta
 //! edits, line/col ranges) but transport-free; the LSP server binary is
 //! the next increment's plumbing.
 
 pub mod paint;
+pub mod syntax;
+
+pub use syntax::syntax_classes;
+use syntax::SyntaxLines;
 
 use qana_engine::{DamageReport, IncSession, LexedBuffer};
 use qana_grammar::green::{ancestor_spans, ERROR_NT};
@@ -16,6 +20,7 @@ use qana_grammar::{
     CompiledLexer, GreenChild, GreenNode, GreenToken, LrAct, LrTables, SynGrammar, TokenId, EOF,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Semantic tokens (tier 0: syntactic, from the token runs)
@@ -25,6 +30,16 @@ use std::collections::HashMap;
 /// grammar the server hosts (editor themes and the semantic-token
 /// protocol need one stable legend). Grammar-declared styles must pick
 /// from it — an unknown class is a compile diagnostic, not a surprise.
+///
+/// A class is given two ways. A token's `@style(class)` gives it to every
+/// token of that kind, wherever it stands (keywords, literals, comments).
+/// An alternative's `@style(class, label…)` gives it to the symbols it
+/// labels, by where they stand in the tree: a name is a `type` in a type
+/// and a `function` where it is called (see [`syntax`]). The classes are
+/// LSP's semantic token types where LSP has one; [`Styles::lsp_encode`]
+/// says how each is sent.
+///
+/// New classes are added at the end, so a class keeps its index.
 pub const LEGEND: &[&str] = &[
     "keyword",
     "variable",
@@ -35,70 +50,241 @@ pub const LEGEND: &[&str] = &[
     "punctuation",
     "bracket",
     "regexp",
+    // A name that denotes a type: a type's own name where it is defined,
+    // and the name a path in a type position ends in.
+    "type",
+    // A function's name where it is defined, and the name a call calls.
+    "function",
+    // The name a method call calls (`x.name()`).
+    "method",
+    // A macro's name where it is invoked or defined.
+    "macro",
+    // An attribute or annotation (`#[derive(Debug)]`).
+    "decorator",
+    // A lifetime (`'a`).
+    "lifetime",
+    // The label a loop or a block is given, and a `break` names.
+    "label",
+    // A comment that documents what follows it (`///`, `/** */`).
+    "doc_comment",
 ];
 
-/// Token-id → style mapping plus the LSP legend it indexes into.
+/// The token modifiers of the LSP legend, in order: bit `i` of a token's
+/// modifier set is `LSP_MODIFIERS[i]`.
+pub const LSP_MODIFIERS: &[&str] = &["documentation"];
+
+/// How LSP is sent a class that is not a token type of its own name: a
+/// doc comment is LSP's `comment` with the `documentation` modifier.
+/// Every other class is sent as the type of its name: LSP's standard
+/// types, and the ones qana adds (`punctuation`, `bracket`, `lifetime`),
+/// which a client declares (the VS Code extension does, with the standard
+/// type each falls back to).
+const LSP_ENCODING: &[(&str, &str, u32)] = &[("doc_comment", "comment", 1 << 0)];
+
+fn lsp_encoding_of(class: &'static str) -> (&'static str, u32) {
+    LSP_ENCODING
+        .iter()
+        .find(|(c, _, _)| *c == class)
+        .map(|&(_, ty, mods)| (ty, mods))
+        .unwrap_or((class, 0))
+}
+
+/// A symbol its production gives no class.
+const ROUTE_NONE: u8 = u8::MAX;
+/// A symbol painted the class its production's node is given.
+const ROUTE_INHERIT: u8 = u8::MAX - 1;
+
+/// A language's styles: the class each kind of token is painted
+/// (`@style` on a token), the classes its syntax gives (`@style` on an
+/// alternative), and the legend both index into.
 #[derive(Clone, Debug)]
 pub struct Styles {
     pub legend: Vec<&'static str>,
     map: HashMap<TokenId, u32>,
+    /// By production, by symbol position: the class an alternative gives
+    /// the symbol (an index into the legend), [`ROUTE_INHERIT`] for the
+    /// class the production's node is given, or [`ROUTE_NONE`]. `None`
+    /// for a production that gives none.
+    syntax: Vec<Option<Box<[u8]>>>,
+    /// By class: its LSP token type (an index into `lsp_types`) and its
+    /// modifier bits.
+    lsp: Vec<(u32, u32)>,
+    lsp_types: Vec<&'static str>,
 }
 
 impl Styles {
     pub fn new(legend: Vec<&'static str>) -> Self {
-        Styles { legend, map: HashMap::new() }
+        assert!(legend.len() < ROUTE_INHERIT as usize, "a legend has at most 253 classes");
+        let mut lsp_types: Vec<&'static str> = Vec::new();
+        let lsp = legend
+            .iter()
+            .map(|&class| {
+                let (ty, mods) = lsp_encoding_of(class);
+                let at = match lsp_types.iter().position(|t| *t == ty) {
+                    Some(at) => at,
+                    None => {
+                        lsp_types.push(ty);
+                        lsp_types.len() - 1
+                    }
+                };
+                (at as u32, mods)
+            })
+            .collect();
+        Styles { legend, map: HashMap::new(), syntax: Vec::new(), lsp, lsp_types }
     }
-    pub fn set(&mut self, id: TokenId, class: &'static str) {
-        let idx = self
-            .legend
+
+    /// The index of `class` in the legend.
+    ///
+    /// # Panics
+    /// When the legend has no such class.
+    pub fn class_index(&self, class: &str) -> u32 {
+        self.legend
             .iter()
             .position(|c| *c == class)
-            .expect("class must be in the legend") as u32;
+            .expect("class must be in the legend") as u32
+    }
+
+    pub fn set(&mut self, id: TokenId, class: &'static str) {
+        let idx = self.class_index(class);
         self.map.insert(id, idx);
     }
+
     pub fn class_of(&self, id: TokenId) -> Option<u32> {
         self.map.get(&id).copied()
+    }
+
+    /// The symbol at `position` of production `prod` is painted `class`,
+    /// wherever the production stands (`@style(class, label)` on an
+    /// alternative). A token there takes the class; a rule there is given
+    /// it, and its own alternatives say which of its symbols take it (see
+    /// [`Styles::pass_style`]).
+    pub fn paint_symbol(&mut self, prod: u16, position: usize, class: &'static str) {
+        let idx = self.class_index(class) as u8;
+        self.set_route(prod, position, idx);
+    }
+
+    /// The symbol at `position` of production `prod` is painted the class
+    /// the production's node is given, when it is given one
+    /// (`@style(inherit, label)`): how a path hands the class it is given
+    /// to the segment that names it.
+    pub fn pass_style(&mut self, prod: u16, position: usize) {
+        self.set_route(prod, position, ROUTE_INHERIT);
+    }
+
+    fn set_route(&mut self, prod: u16, position: usize, route: u8) {
+        let prod = prod as usize;
+        if self.syntax.len() <= prod {
+            self.syntax.resize(prod + 1, None);
+        }
+        let routes = self.syntax[prod].get_or_insert_with(Box::default);
+        if routes.len() <= position {
+            let mut grown = routes.to_vec();
+            grown.resize(position + 1, ROUTE_NONE);
+            *routes = grown.into_boxed_slice();
+        }
+        routes[position] = route;
+    }
+
+    /// Whether the syntax gives any class. A language whose classes are
+    /// all its tokens' is painted without reading its tree.
+    pub fn has_syntax(&self) -> bool {
+        self.syntax.iter().flatten().any(|r| r.iter().any(|&x| x != ROUTE_NONE))
+    }
+
+    /// The class the symbol at `position` of `prod` is painted, when the
+    /// production's node is given `given`: an index into the legend, or
+    /// `None` where the syntax gives it none.
+    pub(crate) fn route(&self, prod: u16, position: usize, given: Option<u8>) -> Option<u8> {
+        match self.syntax.get(prod as usize)?.as_ref()?.get(position).copied()? {
+            ROUTE_NONE => None,
+            ROUTE_INHERIT => given,
+            class => Some(class),
+        }
+    }
+
+    /// The token types of the LSP legend, in order: what
+    /// [`Styles::lsp_encode`] sends each class as.
+    pub fn lsp_types(&self) -> &[&'static str] {
+        &self.lsp_types
+    }
+
+    /// How LSP is sent `class`: its token type (an index into
+    /// [`Styles::lsp_types`]) and its modifier bits (over
+    /// [`LSP_MODIFIERS`]).
+    pub fn lsp_encode(&self, class: u32) -> (u32, u32) {
+        self.lsp[class as usize]
     }
 }
 
 /// LSP `SemanticTokens.data`: flat quintuples
-/// (deltaLine, deltaStart, length, tokenType, tokenModifiers).
+/// (deltaLine, deltaStart, length, tokenType, tokenModifiers), the type
+/// and modifiers as [`Styles::lsp_encode`] sends each class.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticTokens {
     pub data: Vec<u32>,
     /// Styled-token quintuple count per buffer line (delta bookkeeping).
     per_line: Vec<u32>,
+    /// What the syntax paints, kept across edits; `None` for a language
+    /// whose classes are all its tokens' ([`Styles::has_syntax`]).
+    syntax: Option<SyntaxLines>,
+}
+
+/// The styled tokens of line `li`, as (column, length, class): each the
+/// class its syntax gives it, and failing that its kind's.
+fn styled_line(
+    buf: &LexedBuffer<'_, CompiledLexer>,
+    li: usize,
+    styles: &Styles,
+    syntax: Option<&SyntaxLines>,
+) -> Vec<(u32, u32, u32)> {
+    let painted = syntax.map(|s| s.line(li)).unwrap_or(&[]);
+    let mut out = Vec::new();
+    let mut next = 0usize;
+    let mut col = 0u32;
+    for tok in &buf.lexed[li].tokens {
+        let class = match painted.get(next) {
+            Some(&(at, len, class)) if at == col => {
+                debug_assert_eq!(len, tok.len, "the syntax paints whole tokens");
+                next += 1;
+                Some(class as u32)
+            }
+            _ => styles.class_of(tok.id),
+        };
+        if let Some(class) = class {
+            out.push((col, tok.len, class));
+        }
+        col += tok.len;
+    }
+    debug_assert_eq!(next, painted.len(), "every token the syntax paints is a token of its line");
+    out
 }
 
 pub fn semantic_tokens_full(
     lexer: &CompiledLexer,
     buf: &LexedBuffer<'_, CompiledLexer>,
+    tree: &Arc<GreenNode>,
     styles: &Styles,
 ) -> SemanticTokens {
+    let _ = lexer;
+    let syntax = styles.has_syntax().then(|| SyntaxLines::new(tree, styles, buf.lines.len()));
     let mut data = Vec::new();
     let mut per_line = Vec::with_capacity(buf.lines.len());
     let mut prev_line = 0u32;
     let mut prev_start = 0u32;
-    for (li, lt) in buf.lexed.iter().enumerate() {
-        let mut count = 0u32;
-        let mut col = 0u32;
-        for tok in &lt.tokens {
-            let len = tok.len;
-            if let Some(class) = styles.class_of(tok.id) {
-                let line = li as u32;
-                let delta_line = line - prev_line;
-                let delta_start = if delta_line == 0 { col - prev_start } else { col };
-                data.extend_from_slice(&[delta_line, delta_start, len, class, 0]);
-                prev_line = line;
-                prev_start = col;
-                count += 1;
-            }
-            col += len;
-            let _ = lexer;
+    for li in 0..buf.lexed.len() {
+        let styled = styled_line(buf, li, styles, syntax.as_ref());
+        for &(col, len, class) in &styled {
+            let line = li as u32;
+            let delta_line = line - prev_line;
+            let delta_start = if delta_line == 0 { col - prev_start } else { col };
+            let (ty, mods) = styles.lsp_encode(class);
+            data.extend_from_slice(&[delta_line, delta_start, len, ty, mods]);
+            prev_line = line;
+            prev_start = col;
         }
-        per_line.push(count);
+        per_line.push(styled.len() as u32);
     }
-    SemanticTokens { data, per_line }
+    SemanticTokens { data, per_line, syntax }
 }
 
 /// An LSP `SemanticTokensEdit`: splice `insert` over
@@ -113,11 +299,15 @@ pub struct SemDelta {
 impl SemanticTokens {
     /// Recompute after an edit batch: damaged line ranges are re-encoded
     /// and spliced; the first styled token AFTER the damage gets its
-    /// deltaLine re-anchored. Returns the LSP-shaped edit.
+    /// deltaLine re-anchored. A line the edit did not touch whose classes
+    /// its syntax changed (typing `(` after a name makes it a call) is
+    /// re-encoded with them: the span spliced reaches it. Returns the
+    /// LSP-shaped edit.
     pub fn update(
         &mut self,
         _lexer: &CompiledLexer,
         buf: &LexedBuffer<'_, CompiledLexer>,
+        tree: &Arc<GreenNode>,
         styles: &Styles,
         damage: &DamageReport,
     ) -> Option<SemDelta> {
@@ -127,10 +317,30 @@ impl SemanticTokens {
         // Spanning region (regions are ascending; a single splice keeps
         // the delta simple — per-region splices are a refinement).
         let old_lo = damage.regions.iter().map(|r| r.old_lines.0).min().unwrap();
-        let old_hi = damage.regions.iter().map(|r| r.old_lines.1).max().unwrap();
+        let mut old_hi = damage.regions.iter().map(|r| r.old_lines.1).max().unwrap();
         let new_lo = damage.regions.iter().map(|r| r.new_lines.0).min().unwrap();
-        let new_hi = damage.regions.iter().map(|r| r.new_lines.1).max().unwrap();
+        let mut new_hi = damage.regions.iter().map(|r| r.new_lines.1).max().unwrap();
         debug_assert_eq!(old_lo, new_lo, "regions align at their start");
+        let changed = match &mut self.syntax {
+            Some(syntax) => syntax.update(tree, styles, Some((old_lo, old_hi, new_lo, new_hi))),
+            None => Vec::new(),
+        };
+        // The span reaches the lines whose classes changed outside the
+        // damage. A line before it has one number in both revisions; one
+        // after it is moved by the damage's change in line count.
+        let mut new_lo = new_lo;
+        if let Some(&first) = changed.first() {
+            new_lo = new_lo.min(first);
+        }
+        if let Some(&last) = changed.last() {
+            if last >= new_hi {
+                let reach = last + 1 - new_hi;
+                new_hi += reach;
+                old_hi += reach;
+            }
+        }
+        let old_lo = new_lo;
+        let syntax = self.syntax.as_ref();
 
         // Quintuple index where the damaged span starts, in OLD data.
         let q_start: u32 = self.per_line[..old_lo].iter().sum::<u32>() * 5;
@@ -142,47 +352,30 @@ impl SemanticTokens {
 
         // Encode replacement lines (and the re-anchored follower).
         let mut insert = Vec::new();
-        // Absolute position of the styled token PRECEDING the span.
-        let (mut prev_line, mut prev_start) = {
-            let mut line = None;
-            'outer: for li in (0..new_lo).rev() {
-                if self.per_line[li] > 0 {
-                    // Find its start col by rescanning that line.
-                    let mut col = 0u32;
-                    let mut last = None;
-                    for tok in &buf.lexed[li].tokens {
-                        if styles.class_of(tok.id).is_some() {
-                            last = Some(col);
-                        }
-                        col += tok.len;
-                    }
-                    line = Some((li as u32, last.unwrap_or(0)));
-                    break 'outer;
-                }
-            }
-            line.unwrap_or((0, 0))
-        };
-        if self.per_line[..new_lo].iter().all(|&c| c == 0) {
-            prev_line = 0;
-            prev_start = 0;
-        }
+        // Absolute position of the styled token PRECEDING the span: the
+        // last one on the nearest line before it that has one (lines
+        // before the span are as they were).
+        let (mut prev_line, mut prev_start) = (0..new_lo)
+            .rev()
+            .find(|&li| self.per_line[li] > 0)
+            .map(|li| {
+                let last = styled_line(buf, li, styles, syntax).last().map_or(0, |s| s.0);
+                (li as u32, last)
+            })
+            .unwrap_or((0, 0));
         let mut new_counts: Vec<u32> = Vec::with_capacity(new_hi - new_lo);
         for li in new_lo..new_hi {
-            let mut count = 0u32;
-            let mut col = 0u32;
-            for tok in &buf.lexed[li].tokens {
-                if let Some(class) = styles.class_of(tok.id) {
-                    let line = li as u32;
-                    let delta_line = line - prev_line;
-                    let delta_start = if delta_line == 0 { col - prev_start } else { col };
-                    insert.extend_from_slice(&[delta_line, delta_start, tok.len, class, 0]);
-                    prev_line = line;
-                    prev_start = col;
-                    count += 1;
-                }
-                col += tok.len;
+            let styled = styled_line(buf, li, styles, syntax);
+            for &(col, len, class) in &styled {
+                let line = li as u32;
+                let delta_line = line - prev_line;
+                let delta_start = if delta_line == 0 { col - prev_start } else { col };
+                let (ty, mods) = styles.lsp_encode(class);
+                insert.extend_from_slice(&[delta_line, delta_start, len, ty, mods]);
+                prev_line = line;
+                prev_start = col;
             }
-            new_counts.push(count);
+            new_counts.push(styled.len() as u32);
         }
         // Re-anchor the follower (first styled token after the span).
         if has_after {
@@ -202,21 +395,11 @@ impl SemanticTokens {
             }
             let delta_lines = new_hi as i64 - old_hi as i64;
             let abs_line_new = (abs_line_old as i64 + delta_lines) as u32;
-            let abs_start = {
-                // deltaStart is relative only within the same line; the
-                // follower is on a later line than prev unless...
-                let mut col = 0u32;
-                let li = abs_line_new as usize;
-                let mut first = 0u32;
-                for tok in &buf.lexed[li].tokens {
-                    if styles.class_of(tok.id).is_some() {
-                        first = col;
-                        break;
-                    }
-                    col += tok.len;
-                }
-                first
-            };
+            // Its column: the first styled token of its line (it is the
+            // first after the span, and the span ends with a line).
+            let abs_start = styled_line(buf, abs_line_new as usize, styles, syntax)
+                .first()
+                .map_or(0, |s| s.0);
             follower[0] = abs_line_new - prev_line;
             follower[1] = if follower[0] == 0 { abs_start - prev_start } else { abs_start };
             insert.extend_from_slice(&follower);
@@ -230,7 +413,6 @@ impl SemanticTokens {
         Some(SemDelta { start: q_start, delete_count: q_deleted + extra, insert })
     }
 }
-
 // ---------------------------------------------------------------------------
 // Folding
 // ---------------------------------------------------------------------------
@@ -254,7 +436,7 @@ pub struct FoldConfig {
     /// The category of comment folds.
     pub comment: u8,
     /// By token id: whether it is a comment (a trivia token styled
-    /// `comment`).
+    /// `comment` or `doc_comment`).
     pub comments: Vec<bool>,
     /// By token id: whether the lexer reads it in a mode other than the
     /// base mode (`Vocab::modes`), within a construct of tokens of its
@@ -279,7 +461,8 @@ impl FoldConfig {
     /// the order it first uses them; `entries`, its foldable productions
     /// (the production, the index of its kind, and the symbol positions
     /// its fold begins and ends at) among `prods`. Its comments are the
-    /// trivia tokens of `vocab` that `styles` classes `comment`.
+    /// trivia tokens of `vocab` that `styles` classes `comment` or
+    /// `doc_comment`.
     pub fn new(
         kinds: Vec<String>,
         entries: &[(u16, u8, Option<usize>, Option<usize>)],
@@ -299,7 +482,14 @@ impl FoldConfig {
         for &(prod, category, from, to) in entries {
             by_prod[prod as usize] = Some(FoldEntry { category, from, to });
         }
-        let comment_class = styles.legend.iter().position(|c| *c == "comment");
+        // Doc comments are comments.
+        let comment_classes: Vec<u32> = styles
+            .legend
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(**c, "comment" | "doc_comment"))
+            .map(|(i, _)| i as u32)
+            .collect();
         let ids = 0..vocab.names.len() as TokenId;
         FoldConfig {
             by_prod,
@@ -309,7 +499,7 @@ impl FoldConfig {
                 .clone()
                 .map(|id| {
                     vocab.is_trivia(id)
-                        && comment_class.is_some_and(|c| styles.class_of(id) == Some(c as u32))
+                        && styles.class_of(id).is_some_and(|c| comment_classes.contains(&c))
                 })
                 .collect(),
             in_mode: ids.map(|id| vocab.modes[id as usize] != 0).collect(),

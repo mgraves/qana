@@ -72,8 +72,19 @@ language Rust
 max_stack 8
 
 token WS           = /\s+/      @trivia
-token LINE_COMMENT = /\/\/.*/   @trivia @style(comment)
-token BLOCK_OPEN   = "/*"       @trivia @push(BLOCK) @style(comment)
+
+// Comments. A doc comment is `///` (not `////`) or `//!`, and `/**` (not
+// `/***` or `/**/`) or `/*!`, as rustc_lexer tells them; it is cut where
+// any comment is, and a block one reads its body in a mode of its own, so
+// all of it is a doc comment. A block comment's `/*` before nothing else
+// on its line opens a plain one: it is declared first, so that the
+// opener of `/**` before nothing else (a doc comment) is the only one
+// whose context then holds.
+token DOC_LINE       = /\/\/\/([^\/].*)?|\/\/!.*/       @trivia @style(doc_comment)
+token LINE_COMMENT   = /\/\/.*/                         @trivia @style(comment)
+token BLOCK_OPEN_EOL = /\/\*(?!.)/                      @trivia @push(BLOCK) @style(comment)
+token DOC_OPEN       = /\/\*(?=\*[^*\/]|!)|\/\*(?![^*]|\*.)/ @trivia @push(DOC) @style(doc_comment)
+token BLOCK_OPEN     = "/*"                             @trivia @push(BLOCK) @style(comment)
 
 // Strings. A prefix (`b`, `c`, `r`, `br`, `cr`) followed by its quote is
 // longer than the identifier it starts with, so longest match takes it.
@@ -95,8 +106,8 @@ token BYTE = /b'[^\\]'([\a_][\w_]*)?|b'([^'\\\/]|\\.)*('([\a_][\w_]*)?)?/ @style
 // rustc reports later). Anything else after the quote is a char literal,
 // closed or not. Longest match picks between them.
 token CHAR = /'[^\\]'([\a_][\w_]*)?|'\\.([^'\\\/]|\\.)*('([\a_][\w_]*)?)?|'[\a_\d][\w_]*'|'[^\a_\d'\\\/]([^'\\\/]|\\.)*('([\a_][\w_]*)?)?/ @style(string)
-token RAW_LIFETIME = /'r#[\a_][\w_]*/ @style(variable)
-token LIFETIME     = /'[\a_\d][\w_]*/ @style(variable)
+token RAW_LIFETIME = /'r#[\a_][\w_]*/ @style(lifetime)
+token LIFETIME     = /'[\a_\d][\w_]*/ @style(lifetime)
 
 // Numbers. `1.` is a float unless a `.`, a `_` or a letter follows
 // (`1..2`, `1.foo()`): the trailing context. A literal takes an
@@ -227,6 +238,15 @@ mode RAW3 {
   token R3_TEXT  = /[^"]+/                   @style(string)
 }
 
+// A block doc comment's body, cut as a block comment's is: what is nested
+// in it is documentation too.
+mode DOC {
+  token D_OPEN    = "/*"      @trivia @push(DOC) @style(doc_comment)
+  token D_CLOSE   = "*/"      @trivia @pop       @style(doc_comment)
+  token D_CONTENT = /[^*\/]+/ @trivia            @style(doc_comment)
+  token D_MISC    = /[*\/]/   @trivia            @style(doc_comment)
+}
+
 // Precedence, loosest first: the Reference's table, with the levels the
 // tiers need around it. RETURN is the level of what extends as far right
 // as it can (`return`, `break`, closures, an open range in `expr`); a
@@ -277,15 +297,15 @@ rule stmt_item =
 
 rule outer_attrs_opt = outer_attr*
 
-rule outer_attr = OuterAttr: HASH "[" attr "]"
+rule outer_attr = OuterAttr: h:HASH o:"[" a:attr c:"]" @style(decorator, h, o, a, c)
 
 rule inner_attrs_opt = inner_attr*
 
-rule inner_attr = InnerAttr: HASH_BANG BANG "[" attr "]"
+rule inner_attr = InnerAttr: h:HASH_BANG b:BANG o:"[" a:attr c:"]" @style(decorator, h, b, o, a, c)
 
 rule attr =
-  | Attr:       plain_path attr_input_opt
-  | UnsafeAttr: "unsafe" "(" plain_path attr_input_opt ")"
+  | Attr:       p:plain_path attr_input_opt @style(inherit, p)
+  | UnsafeAttr: "unsafe" "(" p:plain_path attr_input_opt ")" @style(inherit, p)
 
 rule attr_input_opt = attr_input?
 
@@ -352,12 +372,12 @@ rule tt_token =
 // ---- names and paths ----
 
 rule name =
-  | Name:    IDENT
-  | RawName: RAW_IDENT
+  | Name:    t:IDENT @style(inherit, t)
+  | RawName: t:RAW_IDENT @style(inherit, t)
 
 rule lifetime =
-  | Lifetime:    LIFETIME
-  | RawLifetime: RAW_LIFETIME
+  | Lifetime:    t:LIFETIME @style(inherit, t)
+  | RawLifetime: t:RAW_LIFETIME @style(inherit, t)
 
 // `::`, `->` and `=>` are two tokens each (see the header).
 rule path_sep = PathSep: COLON_COLON COLON
@@ -372,7 +392,7 @@ rule path_sep = PathSep: COLON_COLON COLON
 // A path segment that ends a type or a pattern path, or takes generic
 // arguments.
 rule tlast =
-  | LastName:     name @precedence("return")
+  | LastName:     n:name @precedence("return") @style(inherit, n)
   | LastSelfType: "Self" @precedence("return")
 
 // A segment that begins a path and ends no type: `self`, `super`, `crate`.
@@ -384,18 +404,18 @@ rule kseg =
 
 // A plain path (no generic arguments) ending in a name or `Self`.
 rule name_path =
-  | NamePath:      tlast
-  | NamePathMulti: name_path_multi @precedence("return")
+  | NamePath:      t:tlast @style(inherit, t)
+  | NamePathMulti: m:name_path_multi @precedence("return") @style(inherit, m)
 
 // A one-segment head is written out (`name ::`), not a path first: the
 // token after `::` (a name, `<`, `(`) is read before anything is decided,
 // which is what lets `Item::<T> = U` be a binding in generic arguments.
 rule name_path_multi =
-  | PathGlobal:    path_sep tlast
-  | PathMoreName:  name path_sep tlast
-  | PathMoreSelf:  "Self" path_sep tlast
-  | PathMore:      name_path_multi path_sep tlast
-  | PathAfterKw:   kw_path path_sep tlast
+  | PathGlobal:    path_sep t:tlast @style(inherit, t)
+  | PathMoreName:  name path_sep t:tlast @style(inherit, t)
+  | PathMoreSelf:  "Self" path_sep t:tlast @style(inherit, t)
+  | PathMore:      name_path_multi path_sep t:tlast @style(inherit, t)
+  | PathAfterKw:   kw_path path_sep t:tlast @style(inherit, t)
 
 // A plain path ending in `self`, `super` or `crate`.
 rule kw_path =
@@ -404,39 +424,39 @@ rule kw_path =
 
 // A plain path: `use`, visibility, attributes, and macro names.
 rule plain_path =
-  | PlainName: name_path
+  | PlainName: p:name_path @style(inherit, p)
   | PlainKw:   kw_path
 
 // `<T>` or `<T as Trait>`, before `::`.
 rule qself =
   | QSelf:   lt type gt
-  | QSelfAs: lt type "as" type_path gt
+  | QSelfAs: lt type "as" tr:type_path gt @style(type, tr)
 
 // A qualified path ending in a name.
 rule qual_path =
-  | QualPath:     qself path_sep tlast
-  | QualPathMore: qual_path path_sep tlast
+  | QualPath:     qself path_sep t:tlast @style(inherit, t)
+  | QualPathMore: qual_path path_sep t:tlast @style(inherit, t)
 
 // An expression path: generic arguments only after `::` (the turbofish).
 rule expr_path =
-  | ExprName:      name_path
+  | ExprName:      p:name_path @style(inherit, p)
   | ExprKw:        kw_path
-  | ExprArgs:      expr_args_path
-  | ExprAfterArgs: expr_after_args_path
-  | ExprQual:      qual_path
+  | ExprArgs:      p:expr_args_path @style(inherit, p)
+  | ExprAfterArgs: p:expr_after_args_path @style(inherit, p)
+  | ExprQual:      p:qual_path @style(inherit, p)
 
 // Ending in `::<…>`.
 rule expr_args_path =
-  | Turbofish:      name path_sep generic_args
+  | Turbofish:      n:name path_sep generic_args @style(inherit, n)
   | TurbofishSelf:  "Self" path_sep generic_args
-  | TurbofishMulti: name_path_multi path_sep generic_args
-  | TurbofishAgain: expr_after_args_path path_sep generic_args
-  | TurbofishQual:  qual_path path_sep generic_args
+  | TurbofishMulti: m:name_path_multi path_sep generic_args @style(inherit, m)
+  | TurbofishAgain: p:expr_after_args_path path_sep generic_args @style(inherit, p)
+  | TurbofishQual:  q:qual_path path_sep generic_args @style(inherit, q)
 
 // Generic arguments earlier, ending in a name.
 rule expr_after_args_path =
-  | AfterTurbofish:     expr_args_path path_sep tlast
-  | AfterTurbofishMore: expr_after_args_path path_sep tlast
+  | AfterTurbofish:     expr_args_path path_sep t:tlast @style(inherit, t)
+  | AfterTurbofishMore: expr_after_args_path path_sep t:tlast @style(inherit, t)
 
 // A type path: generic arguments after a segment, with or without `::`,
 // and `Fn(A) -> B` arguments. It never ends in `self`, `super` or
@@ -447,56 +467,56 @@ rule expr_after_args_path =
 // Qualified paths (`<T as A>::B`) are a kind of their own, for the one
 // place that cannot begin with `<` (see `impl_def`).
 rule type_path =
-  | TypeUnq:  unq_type_path
-  | TypeQual: qual_type_path
+  | TypeUnq:  p:unq_type_path @style(inherit, p)
+  | TypeQual: p:qual_type_path @style(inherit, p)
 
 rule unq_type_path =
-  | TypePlain:     name_path @precedence("return")
-  | TypeArgs:      type_args_path @precedence("return")
-  | TypeAfterArgs: type_after_args_path @precedence("return")
-  | TypeFnArgs:    type_fn_path
+  | TypePlain:     p:name_path @precedence("return") @style(inherit, p)
+  | TypeArgs:      p:type_args_path @precedence("return") @style(inherit, p)
+  | TypeAfterArgs: p:type_after_args_path @precedence("return") @style(inherit, p)
+  | TypeFnArgs:    p:type_fn_path @style(inherit, p)
 
 rule type_args_path =
-  | TArgsName:      name generic_args
+  | TArgsName:      n:name generic_args @style(inherit, n)
   | TArgsSelfType:  "Self" generic_args
-  | TArgsMulti:     name_path_multi generic_args
-  | TArgsTurbofish: name path_sep generic_args
+  | TArgsMulti:     m:name_path_multi generic_args @style(inherit, m)
+  | TArgsTurbofish: n:name path_sep generic_args @style(inherit, n)
   | TArgsTurbofishSelf:  "Self" path_sep generic_args
-  | TArgsTurbofishMulti: name_path_multi path_sep generic_args
-  | TArgsAgain:     type_after_args_path generic_args
-  | TArgsAgainTurbofish: type_after_args_path path_sep generic_args
+  | TArgsTurbofishMulti: m:name_path_multi path_sep generic_args @style(inherit, m)
+  | TArgsAgain:     p:type_after_args_path generic_args @style(inherit, p)
+  | TArgsAgainTurbofish: p:type_after_args_path path_sep generic_args @style(inherit, p)
 
 // `Fn(A) -> B` ends its path: `-> B::C` is `B::C`.
 rule type_fn_path =
-  | FnSugarName:    name fn_args
-  | FnSugarNameSep: name path_sep fn_args
-  | FnSugarMulti:   name_path_multi fn_args
-  | FnSugarMultiSep: name_path_multi path_sep fn_args
-  | FnSugarAfterArgs: type_after_args_path fn_args
+  | FnSugarName:    n:name fn_args @style(inherit, n)
+  | FnSugarNameSep: n:name path_sep fn_args @style(inherit, n)
+  | FnSugarMulti:   m:name_path_multi fn_args @style(inherit, m)
+  | FnSugarMultiSep: m:name_path_multi path_sep fn_args @style(inherit, m)
+  | FnSugarAfterArgs: p:type_after_args_path fn_args @style(inherit, p)
 
 rule type_after_args_path =
-  | TAfterArgs:     type_args_path path_sep tlast
-  | TAfterArgsMore: type_after_args_path path_sep tlast
+  | TAfterArgs:     type_args_path path_sep t:tlast @style(inherit, t)
+  | TAfterArgsMore: type_after_args_path path_sep t:tlast @style(inherit, t)
 
 rule qual_type_path =
-  | TQualPath:      qual_path @precedence("return")
-  | TQualArgs:      qual_args_path @precedence("return")
-  | TQualAfterArgs: qual_after_args_path @precedence("return")
-  | TQualFnArgs:    qual_fn_path
+  | TQualPath:      q:qual_path @precedence("return") @style(inherit, q)
+  | TQualArgs:      q:qual_args_path @precedence("return") @style(inherit, q)
+  | TQualAfterArgs: q:qual_after_args_path @precedence("return") @style(inherit, q)
+  | TQualFnArgs:    q:qual_fn_path @style(inherit, q)
 
 rule qual_args_path =
-  | QArgs:          qual_path generic_args
-  | QArgsTurbofish: qual_path path_sep generic_args
-  | QArgsAgain:     qual_after_args_path generic_args
-  | QArgsAgainTurbofish: qual_after_args_path path_sep generic_args
+  | QArgs:          q:qual_path generic_args @style(inherit, q)
+  | QArgsTurbofish: q:qual_path path_sep generic_args @style(inherit, q)
+  | QArgsAgain:     q:qual_after_args_path generic_args @style(inherit, q)
+  | QArgsAgainTurbofish: q:qual_after_args_path path_sep generic_args @style(inherit, q)
 
 rule qual_fn_path =
-  | QFnSugar:          qual_path fn_args
-  | QFnSugarAfterArgs: qual_after_args_path fn_args
+  | QFnSugar:          q:qual_path fn_args @style(inherit, q)
+  | QFnSugarAfterArgs: q:qual_after_args_path fn_args @style(inherit, q)
 
 rule qual_after_args_path =
-  | QAfterArgs:     qual_args_path path_sep tlast
-  | QAfterArgsMore: qual_after_args_path path_sep tlast
+  | QAfterArgs:     qual_args_path path_sep t:tlast @style(inherit, t)
+  | QAfterArgsMore: qual_after_args_path path_sep t:tlast @style(inherit, t)
 
 rule fn_args =
   | FnArgs:    "(" types_opt ")"
@@ -527,12 +547,12 @@ rule generic_arg =
   | ConstBlockArg:  block
   | ConstLitArg:    literal
   | ConstNegArg:    MINUS literal
-  | BindingArg:     name EQ type
-  | BindingArgsArg: name generic_args EQ type
-  | BindingTurbofishArg: name path_sep generic_args EQ type
-  | BoundArg:       name COLON bounds
-  | BoundArgsArg:   name generic_args COLON bounds
-  | BoundTurbofishArg: name path_sep generic_args COLON bounds
+  | BindingArg:     n:name EQ type @style(type, n)
+  | BindingArgsArg: n:name generic_args EQ type @style(type, n)
+  | BindingTurbofishArg: n:name path_sep generic_args EQ type @style(type, n)
+  | BoundArg:       n:name COLON bounds @style(type, n)
+  | BoundArgsArg:   n:name generic_args COLON bounds @style(type, n)
+  | BoundTurbofishArg: n:name path_sep generic_args COLON bounds @style(type, n)
 
 // ---- items ----
 
@@ -551,12 +571,12 @@ rule vis_item_kind =
   | ModDef:       mod_head n:name open:"{" inner_attrs_opt items_opt "}" @outline(n, module) @fold(block, open)
   | Fn:           fn_def
   | Struct:       struct_def
-  | Enum:         "enum" n:name generics_opt where_opt open:"{" variants_opt "}" @outline(n, struct) @fold(block, open)
-  | Union:        KW_UNION n:name generics_opt where_opt open:"{" fields_opt "}" @outline(n, struct) @fold(block, open)
+  | Enum:         "enum" n:name generics_opt where_opt open:"{" variants_opt "}" @outline(n, struct) @fold(block, open) @style(type, n)
+  | Union:        KW_UNION n:name generics_opt where_opt open:"{" fields_opt "}" @outline(n, struct) @fold(block, open) @style(type, n)
   | Const:        const_def
   | Static:       static_def
   | TypeAlias:    type_alias
-  | Trait:        trait_head n:name generics_opt colon_bounds_opt where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(n, class) @fold(block, open)
+  | Trait:        trait_head n:name generics_opt colon_bounds_opt where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(n, class) @fold(block, open) @style(type, n)
   | ExternBlock:  extern_head open:"{" inner_attrs_opt foreign_items_opt "}" @fold(block, open)
   | ExternCrate:  "extern" "crate" n:crate_name rename_opt ";" @outline(n, module)
 
@@ -609,7 +629,7 @@ rule use_tree_list = use_tree+ % ","
 // prefix would ask the parser to decide it is absent before it sees what
 // the `unsafe` or `const` it is reading begins (an `unsafe impl`, a
 // `const` item), which one token cannot tell.
-rule fn_def = FnDef: fn_head n:name generics_opt open:"(" params_opt close:")" fn_ret_opt where_opt fn_body @outline(n, function) @fold(list, open, close)
+rule fn_def = FnDef: fn_head n:name generics_opt open:"(" params_opt close:")" fn_ret_opt where_opt fn_body @outline(n, function) @fold(list, open, close) @style(function, n)
 
 rule fn_body =
   | FnBlock: block_body
@@ -677,9 +697,9 @@ rule fn_ret_nb = FnRetNb: MINUS_ARROW GT type_nb
 
 // Structs.
 rule struct_def =
-  | NamedStruct: "struct" n:name generics_opt where_opt open:"{" fields_opt "}" @outline(n, struct) @fold(block, open)
-  | TupleStruct: "struct" n:name generics_opt open:"(" tuple_fields_opt close:")" where_opt ";" @outline(n, struct) @fold(list, open, close)
-  | UnitStruct:  "struct" n:name generics_opt where_opt ";" @outline(n, struct)
+  | NamedStruct: "struct" n:name generics_opt where_opt open:"{" fields_opt "}" @outline(n, struct) @fold(block, open) @style(type, n)
+  | TupleStruct: "struct" n:name generics_opt open:"(" tuple_fields_opt close:")" where_opt ";" @outline(n, struct) @fold(list, open, close) @style(type, n)
+  | UnitStruct:  "struct" n:name generics_opt where_opt ";" @outline(n, struct) @style(type, n)
 
 rule fields_opt =
   | FieldsNone:
@@ -748,8 +768,8 @@ rule static_head =
   | StaticUnsafeMut: "unsafe" "static" "mut"
 
 rule type_alias =
-  | TypeAliasDef:     type_head n:name generics_opt colon_bounds_opt where_opt EQ type where_opt ";" @outline(n, struct)
-  | TypeAliasNoValue: type_head n:name generics_opt colon_bounds_opt where_opt ";" @outline(n, struct)
+  | TypeAliasDef:     type_head n:name generics_opt colon_bounds_opt where_opt EQ type where_opt ";" @outline(n, struct) @style(type, n)
+  | TypeAliasNoValue: type_head n:name generics_opt colon_bounds_opt where_opt ";" @outline(n, struct) @style(type, n)
 
 rule type_head =
   | TypeKw:        "type"
@@ -781,13 +801,13 @@ rule impl_rest =
 
 rule impl_target_plain =
   | InherentTargetPlain: t:impl_type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
-  | TraitTargetPlain:    tr:unq_type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
-  | NegTargetPlain:      BANG tr:type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
+  | TraitTargetPlain:    tr:unq_type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open) @style(type, tr)
+  | NegTargetPlain:      BANG tr:type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open) @style(type, tr)
 
 rule impl_target =
   | InherentTarget: t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
-  | TraitTarget:    tr:type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
-  | NegTarget:      BANG tr:type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open)
+  | TraitTarget:    tr:type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open) @style(type, tr)
+  | NegTarget:      BANG tr:type_path "for" t:type where_opt open:"{" inner_attrs_opt assoc_items_opt "}" @outline(t, class) @fold(block, open) @style(type, tr)
 
 rule impl_head =
   | ImplKw:        "impl"
@@ -829,11 +849,11 @@ rule foreign_vis_kind =
 // definition form (`macro_rules! name { … }`); in brackets or parentheses
 // a `;` ends it.
 rule item_macro =
-  | MacroItemBrace:   plain_path BANG open:"{" tts "}" @fold(block, open)
-  | MacroItemParen:   plain_path BANG open:"(" tts close:")" ";" @fold(list, open, close)
-  | MacroItemBracket: plain_path BANG open:"[" tts close:"]" ";" @fold(list, open, close)
+  | MacroItemBrace:   p:plain_path b:BANG open:"{" tts "}" @fold(block, open) @style(macro, p, b)
+  | MacroItemParen:   p:plain_path b:BANG open:"(" tts close:")" ";" @fold(list, open, close) @style(macro, p, b)
+  | MacroItemBracket: p:plain_path b:BANG open:"[" tts close:"]" ";" @fold(list, open, close) @style(macro, p, b)
 
-rule macro_def = MacroDef: plain_path BANG n:name delim_tt_def @outline(n, function)
+rule macro_def = MacroDef: p:plain_path b:BANG n:name delim_tt_def @outline(n, function) @style(macro, p, b, n)
 
 rule delim_tt_def =
   | MacroDefBrace:   "{" tts "}" @fold(block)
@@ -853,7 +873,7 @@ rule generic_param_list = generic_param+ % ","
 
 rule generic_param =
   | LifetimeParam: outer_attrs_opt lifetime lifetime_bounds_opt
-  | TypeParam:     outer_attrs_opt name colon_bounds_opt type_default_opt
+  | TypeParam:     outer_attrs_opt n:name colon_bounds_opt type_default_opt @style(type, n)
   | ConstParam:    outer_attrs_opt "const" name COLON type const_default_opt
 
 rule lifetime_bounds_opt = lifetime_bounds?
@@ -906,11 +926,11 @@ rule bound =
   | UseBound:         "use" generic_args
 
 rule trait_bound =
-  | Bound:          type_path
-  | MaybeBound:     QMARK type_path
-  | ForBound:       for_lifetimes type_path
-  | MaybeForBound:  QMARK for_lifetimes type_path
-  | AsyncBound:     "async" type_path
+  | Bound:          tr:type_path @style(type, tr)
+  | MaybeBound:     QMARK tr:type_path @style(type, tr)
+  | ForBound:       for_lifetimes tr:type_path @style(type, tr)
+  | MaybeForBound:  QMARK for_lifetimes tr:type_path @style(type, tr)
+  | AsyncBound:     "async" tr:type_path @style(type, tr)
 
 // ---- types ----
 
@@ -928,12 +948,12 @@ rule type_nb =
 // A type not beginning with `(`.
 rule type_np =
   | CoreType:     type_np_core
-  | QualType:     qual_type_path
+  | QualType:     p:qual_type_path @style(type, p)
   | ForFnPtrType: for_lifetimes fn_ptr
 
 // The types that begin with neither `(`, `<` nor `for`.
 rule type_np_core =
-  | PathType:    unq_type_path
+  | PathType:    p:unq_type_path @style(type, p)
   | RefType:     amp type_nb
   | RefMutType:  amp "mut" type_nb
   | RefLtType:   amp lifetime type_nb
@@ -946,7 +966,7 @@ rule type_np_core =
   | ImplType:    "impl" bound
   | DynType:     "dyn" bound
   | FnPtrType:   fn_ptr
-  | MacroType:   plain_path BANG delim_tt
+  | MacroType:   p:plain_path b:BANG delim_tt @style(macro, p, b)
 
 // The type an `impl` without generics is for: not a qualified path, since
 // `impl <` begins generics (see `impl_def`).
@@ -960,7 +980,7 @@ rule impl_type =
 // `for<…>` of its own, since `where for<'a> …` binds the predicate.
 rule pred_type =
   | PredCoreType:  type_np_core
-  | PredQualType:  qual_type_path
+  | PredQualType:  p:qual_type_path @style(type, p)
   | PredParenType: "(" paren_type_rest
 
 // After `(`: `()`, `(T)`, `(T,)`, `(T, U, …)`.
@@ -1050,7 +1070,7 @@ rule pat_nr_nomut =
   | SlicePat:       "[" pats_opt "]" @fold(list)
   | RefPat:         amp pat_nr_nomut
   | RefMutPat:      amp "mut" pat_nr
-  | MacroPat:       plain_path BANG delim_tt
+  | MacroPat:       p:plain_path b:BANG delim_tt @style(macro, p, b)
 
 // A path in a pattern: one name is an identifier pattern, so a path is
 // more than one segment, `Self`, qualified, or with generic arguments.
@@ -1175,9 +1195,9 @@ rule block_like =
   | LabeledWhile:   label "while" cond block
   | For:            "for" pat "in" cond block
   | LabeledFor:     label "for" pat "in" cond block
-  | BraceMacro:     plain_path BANG open:"{" tts "}" @fold(block, open)
+  | BraceMacro:     p:plain_path b:BANG open:"{" tts "}" @fold(block, open) @style(macro, p, b)
 
-rule label = Label: lifetime COLON
+rule label = Label: l:lifetime COLON @style(label, l)
 
 rule if_expr =
   | IfNoElse:   "if" cond block @precedence("return")
@@ -1211,9 +1231,9 @@ rule guard = Guard: "if" expr
 // An operand that is neither block-like nor a struct literal.
 rule atom =
   | Lit:        literal
-  | PathExpr:   expr_path
-  | MacroCall:  plain_path BANG open:"(" tts ")" @fold(list, open)
-  | MacroIndex: plain_path BANG open:"[" tts "]" @fold(list, open)
+  | PathExpr:   p:expr_path @style(inherit, p)
+  | MacroCall:  p:plain_path b:BANG open:"(" tts ")" @fold(list, open) @style(macro, p, b)
+  | MacroIndex: p:plain_path b:BANG open:"[" tts "]" @fold(list, open) @style(macro, p, b)
   | Unit:       "(" ")" @fold(list)
   | Paren:      "(" elem ")" @fold(list)
   | TupleOne:   "(" elem "," ")" @fold(list)
@@ -1224,7 +1244,7 @@ rule atom =
   | ArrayTrail: "[" expr_list "," "]" @fold(list)
   | ArrayRepeat: "[" elem ";" expr "]" @fold(list)
   | Continue:   "continue"
-  | ContinueLabel: "continue" lifetime
+  | ContinueLabel: "continue" l:lifetime @style(label, l)
 
 rule expr_list = elem+ % ","
 
@@ -1243,7 +1263,7 @@ rule args_opt =
   | ArgsTrail: expr_list ","
 
 rule struct_lit =
-  | StructLit:      expr_path open:"{" struct_fields_opt "}" @fold(list, open)
+  | StructLit:      p:expr_path open:"{" struct_fields_opt "}" @fold(list, open) @style(type, p)
 
 rule struct_fields_opt =
   | StructFieldsNone:
@@ -1285,13 +1305,13 @@ rule member =
   | MemberIndex:     INT
   | MemberIndex2:    FLOAT
   | MemberAwait:     "await"
-  | MemberMethod:    name open:"(" args_opt ")" @fold(list, open)
-  | MemberTurbofish: name path_sep generic_args open:"(" args_opt ")" @fold(list, open)
+  | MemberMethod:    n:name open:"(" args_opt ")" @fold(list, open) @style(method, n)
+  | MemberTurbofish: n:name path_sep generic_args open:"(" args_opt ")" @fold(list, open) @style(method, n)
 
 // ---- expressions: the full tier ----
 
 rule expr =
-  | Atom:        atom
+  | Atom:        a:atom @style(inherit, a)
   | StructExpr:  struct_lit
   | BlockLike:   block_like
   | Closure:     closure_head expr @precedence("return")
@@ -1300,11 +1320,11 @@ rule expr =
   | ReturnValue: "return" expr @precedence("return")
   | Break:       "break" @precedence("return")
   | BreakValue:  "break" expr @precedence("return")
-  | BreakLabel:  "break" lifetime @precedence("return")
-  | BreakLabelValue: "break" lifetime expr @precedence("return")
+  | BreakLabel:  "break" l:lifetime @precedence("return") @style(label, l)
+  | BreakLabelValue: "break" l:lifetime expr @precedence("return") @style(label, l)
   | Member:      expr DOT member @precedence(DOT)
   | SplitMember: expr DOT FLOAT_DOT member @precedence(DOT)
-  | Call:        expr open:"(" args_opt ")" @fold(list, open)
+  | Call:        c:expr open:"(" args_opt ")" @fold(list, open) @style(function, c)
   | Index:       expr open:"[" expr "]" @fold(list, open)
   | Try:         expr QMARK
   | Neg:         MINUS expr @precedence(BANG)
@@ -1360,7 +1380,7 @@ rule pipe_second = | OrSecond: PIPE | OrSecondOr: PIPE_PIPE
 // ---- expressions: the condition tier ----
 
 rule cond =
-  | CAtom:        atom
+  | CAtom:        a:atom @style(inherit, a)
   | CBlockLike:   block_like
   | CLet:         "let" pat EQ cond @precedence(AMP_AMP)
   | CClosure:     closure_head cond @precedence("return")
@@ -1369,11 +1389,11 @@ rule cond =
   | CReturnValue: "return" cond @precedence("return")
   | CBreak:       "break" @precedence(DOT_DOT)
   | CBreakValue:  "break" cond @precedence("return")
-  | CBreakLabel:  "break" lifetime @precedence(DOT_DOT)
-  | CBreakLabelValue: "break" lifetime cond @precedence("return")
+  | CBreakLabel:  "break" l:lifetime @precedence(DOT_DOT) @style(label, l)
+  | CBreakLabelValue: "break" l:lifetime cond @precedence("return") @style(label, l)
   | CMember:      cond DOT member @precedence(DOT)
   | CSplitMember: cond DOT FLOAT_DOT member @precedence(DOT)
-  | CCall:        cond open:"(" args_opt ")" @fold(list, open)
+  | CCall:        c:cond open:"(" args_opt ")" @fold(list, open) @style(function, c)
   | CIndex:       cond open:"[" expr "]" @fold(list, open)
   | CTry:         cond QMARK
   | CNeg:         MINUS cond @precedence(BANG)
@@ -1423,7 +1443,7 @@ rule cond =
 // ---- expressions: the statement tier ----
 
 rule stmt_expr =
-  | SAtom:        atom
+  | SAtom:        a:atom @style(inherit, a)
   | SStructExpr:  struct_lit
   | SBlockMember: block_like DOT member @precedence(DOT)
   | SBlockSplitMember: block_like DOT FLOAT_DOT member @precedence(DOT)
@@ -1434,11 +1454,11 @@ rule stmt_expr =
   | SReturnValue: "return" expr @precedence("return")
   | SBreak:       "break" @precedence("return")
   | SBreakValue:  "break" expr @precedence("return")
-  | SBreakLabel:  "break" lifetime @precedence("return")
-  | SBreakLabelValue: "break" lifetime expr @precedence("return")
+  | SBreakLabel:  "break" l:lifetime @precedence("return") @style(label, l)
+  | SBreakLabelValue: "break" l:lifetime expr @precedence("return") @style(label, l)
   | SMember:      stmt_expr DOT member @precedence(DOT)
   | SSplitMember: stmt_expr DOT FLOAT_DOT member @precedence(DOT)
-  | SCall:        stmt_expr open:"(" args_opt ")" @fold(list, open)
+  | SCall:        c:stmt_expr open:"(" args_opt ")" @fold(list, open) @style(function, c)
   | SIndex:       stmt_expr open:"[" expr "]" @fold(list, open)
   | STry:         stmt_expr QMARK
   | SNeg:         MINUS expr @precedence(BANG)

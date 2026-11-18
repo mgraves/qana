@@ -33,6 +33,22 @@
         }
       }
     },
+    "semanticTokenTypes": [
+      {
+        "id": "punctuation",
+        "description": "Punctuation: separators and the like (qana's `punctuation` class)."
+      },
+      {
+        "id": "bracket",
+        "superType": "punctuation",
+        "description": "A bracket (qana's `bracket` class)."
+      },
+      {
+        "id": "lifetime",
+        "superType": "typeParameter",
+        "description": "A lifetime (qana's `lifetime` class)."
+      }
+    ],
     "semanticTokenScopes": [
       {
         "language": "chartlang",
@@ -45,7 +61,15 @@
           "operator": ["keyword.operator.chartlang"],
           "punctuation": ["punctuation.separator.chartlang"],
           "bracket": ["punctuation.bracket.chartlang"],
-          "regexp": ["string.regexp.chartlang"]
+          "regexp": ["string.regexp.chartlang"],
+          "type": ["entity.name.type.chartlang"],
+          "function": ["entity.name.function.chartlang"],
+          "method": ["entity.name.function.member.chartlang"],
+          "macro": ["entity.name.function.macro.chartlang"],
+          "decorator": ["meta.attribute.chartlang"],
+          "lifetime": ["storage.modifier.lifetime.chartlang"],
+          "label": ["entity.name.label.chartlang"],
+          "comment.documentation": ["comment.block.documentation.chartlang"]
         }
       },
       {
@@ -59,7 +83,15 @@
           "operator": ["keyword.operator.qana"],
           "punctuation": ["punctuation.separator.qana"],
           "bracket": ["punctuation.bracket.qana"],
-          "regexp": ["string.regexp.qana"]
+          "regexp": ["string.regexp.qana"],
+          "type": ["entity.name.type.qana"],
+          "function": ["entity.name.function.qana"],
+          "method": ["entity.name.function.member.qana"],
+          "macro": ["entity.name.function.macro.qana"],
+          "decorator": ["meta.attribute.qana"],
+          "lifetime": ["storage.modifier.lifetime.qana"],
+          "label": ["entity.name.label.qana"],
+          "comment.documentation": ["comment.block.documentation.qana"]
         }
       }
     ]

@@ -347,3 +347,25 @@ fn a_grammar_without_binding_walks_nothing() {
         assert!(delta.repaints.is_empty(), "keystroke {keystroke}: nothing else repaints");
     }
 }
+
+/// The classes the syntax gives are kept by subtree: a keystroke in one
+/// function reads again the piece it is in and the constructs around it,
+/// not the file.
+#[test]
+fn a_keystroke_reads_the_syntax_of_the_piece_it_is_in() {
+    let mut doc = Doc::open(&c_lang(), &document(FUNCTIONS));
+    let size = doc.session.buf.reproduce().len();
+    assert_eq!(doc.painter.syntax_read(), size, "opening reads the whole file");
+
+    let line = doc.line_of("int acc = fn_299(a, b) + LIMIT;");
+    let mut typed = String::from("    int acc = fn_299(a, b) + LIMIT");
+    for keystroke in 0..10 {
+        typed.push_str(" + 1");
+        doc.retype(line, &format!("{typed};"));
+        let read = doc.painter.syntax_read();
+        assert!(
+            read <= 4 * qana_services::syntax::PIECE_BYTES as usize,
+            "keystroke {keystroke}: the syntax of {read} of {size} bytes was read again"
+        );
+    }
+}

@@ -37,10 +37,10 @@ fn pipeline() -> (CompiledLexer, SynGrammar, LrTables, DemoIds) {
 
 #[test]
 fn semantic_tokens_encode_expected_classes() {
-    let (lexer, _sg, _tables, ids) = pipeline();
+    let (lexer, sg, tables, ids) = pipeline();
     let styles = demo_styles(&ids);
-    let buf = LexedBuffer::new(&lexer, "let a = 1; // note");
-    let st = semantic_tokens_full(&lexer, &buf, &styles);
+    let s = IncSession::new(&lexer, &sg, &tables, "let a = 1; // note").unwrap();
+    let st = semantic_tokens_full(&lexer, &s.buf, s.tree().unwrap(), &styles);
     // let(kw) a(var) =(op) 1(num) ;(punct) //note(comment) = 6 styled tokens.
     assert_eq!(st.data.len(), 6 * 5);
     let classes: Vec<u32> = st.data.chunks(5).map(|q| q[3]).collect();
@@ -68,7 +68,7 @@ fn semantic_token_delta_equals_fresh_full_under_random_edits() {
         let n = 15 + rng.below(40);
         let src: String = (0..n).map(|_| format!("{}\n", POOL[rng.below(POOL.len())])).collect();
         let mut s = IncSession::new(&lexer, &sg, &tables, &src).unwrap();
-        let mut cache = semantic_tokens_full(&lexer, &s.buf, &styles);
+        let mut cache = semantic_tokens_full(&lexer, &s.buf, s.tree().unwrap(), &styles);
         for round in 0..4 {
             let lines = s.buf.lines.len() - 1;
             if lines == 0 {
@@ -81,8 +81,8 @@ fn semantic_token_delta_equals_fresh_full_under_random_edits() {
                 _ => ((start + 1).min(lines), vec![]),                                   // delete
             };
             let out = s.edit(&sg, &tables, &[LineEdit { start, end, replacement }]).unwrap();
-            cache.update(&lexer, &s.buf, &styles, &out.damage);
-            let fresh = semantic_tokens_full(&lexer, &s.buf, &styles);
+            cache.update(&lexer, &s.buf, s.tree().unwrap(), &styles, &out.damage);
+            let fresh = semantic_tokens_full(&lexer, &s.buf, s.tree().unwrap(), &styles);
             assert_eq!(
                 cache, fresh,
                 "iter {iter} round {round}: delta-updated cache must equal fresh encode\ndoc:\n{}",

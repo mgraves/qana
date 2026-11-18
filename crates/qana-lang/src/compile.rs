@@ -960,6 +960,19 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
     let mut fold_kinds: Vec<String> = Vec::new();
     let mut prod_spans: Vec<(u32, u32)> = Vec::new();
     let mut labels_seen: HashMap<String, ()> = HashMap::new();
+    // Rule-level `@style`s: the production, the symbol position, the
+    // class (`None`: `inherit`), and the label's name and span.
+    struct SynStyle {
+        prod: u16,
+        position: usize,
+        class: Option<&'static str>,
+        label: String,
+        span: (u32, u32),
+    }
+    let mut syn_styles: Vec<SynStyle> = Vec::new();
+    // The rules EBNF sugar generates (`x*`, `x?`, `x+ % ","`): a class
+    // given to one passes to its elements.
+    let mut sugar_nts: Vec<u16> = Vec::new();
 
     fn gen_prod(
         sg: &mut SynGrammar,
@@ -1012,6 +1025,12 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                     },
                 };
                 let sp = r.name_span;
+                sugar_nts.push(nt);
+                if let (SugarOp::Star, Some(_)) = (op, sepsym) {
+                    if let Some(&inner) = nt_ids.get(&format!("{}_ne", r.name)) {
+                        sugar_nts.push(inner);
+                    }
+                }
                 let g = &mut sg;
                 match (op, sepsym) {
                     (SugarOp::Opt, _) => {
@@ -1214,6 +1233,55 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             }
                         }
                     }
+                    "style" => {
+                        // `@style(class, label…)`: the labelled symbols
+                        // are painted `class`; `@style(inherit, label…)`:
+                        // the class this alternative's node is given.
+                        if a.args.len() < 2 {
+                            error(
+                                d,
+                                a.name_span,
+                                "on an alternative, @style takes a class and the labels it paints: `@style(type, n)`, or `@style(inherit, n)` for the class the alternative is given".into(),
+                            );
+                        } else {
+                            let (class, class_span, is_string) = &a.args[0];
+                            let class = if *is_string {
+                                error(d, *class_span, format!("a style class is a name, not `\"{class}\"`"));
+                                None
+                            } else if class == "inherit" {
+                                Some(None)
+                            } else {
+                                match LEGEND.iter().find(|e| *e == class) {
+                                    Some(e) => Some(Some(*e)),
+                                    None => {
+                                        error(
+                                            d,
+                                            *class_span,
+                                            format!(
+                                                "unknown style class `{class}` (legend: {}; or `inherit`)",
+                                                LEGEND.join(", ")
+                                            ),
+                                        );
+                                        None
+                                    }
+                                }
+                            };
+                            for label in &a.args[1..] {
+                                let Some(k) = pos_of(d, label) else { continue };
+                                if syn_styles.iter().any(|st| st.prod == prod && st.position == k) {
+                                    error(d, label.1, format!("`{}` is styled twice", label.0));
+                                } else if let Some(class) = class {
+                                    syn_styles.push(SynStyle {
+                                        prod,
+                                        position: k,
+                                        class,
+                                        label: label.0.clone(),
+                                        span: label.1,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     "outline" => {
                         if a.args.is_empty() || a.args.len() > 2 {
                             error(d, a.name_span, "@outline takes a label and an optional kind".into());
@@ -1342,7 +1410,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                         d,
                         a.name_span,
                         format!(
-                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @fold, @precedence, @type, @export, @import, @module, @qualify, @ns, @macro, @splice)"
+                            "unknown alternative attribute `@{other}` (expected @def, @ref, @scope, @outline, @fold, @style, @precedence, @type, @export, @import, @module, @qualify, @ns, @macro, @splice)"
                         ),
                     ),
                 }
@@ -1805,6 +1873,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
 
     // Inline-helper productions, after every explicit production.
     for h in &helper_list {
+        sugar_nts.push(h.nt);
         let hname = sg.nt_names[h.nt as usize].clone();
         let c = SynGrammar::camel_name(&hname);
         let g = &mut sg;
@@ -1847,6 +1916,10 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
         }
     }
 
+    apply_syntax_styles(d, &sg, &mut styles, &sugar_nts, syn_styles.iter().map(|st| {
+        (st.prod, st.position, st.class, st.label.as_str(), st.span)
+    }));
+
     // `@scope(unordered)` on the START rule means the FILE's own scope is
     // unordered — a declaration language, where top-level names see each
     // other regardless of order. Per-scope entries only govern ordering
@@ -1888,6 +1961,88 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
     )
 }
 
+
+/// Give `styles` the classes the syntax gives: the rule-level `@style`s
+/// (`requests`: production, symbol position, class or `None` for
+/// `inherit`, label, span), and the sugar rules' pass-through. A class
+/// given to a rule must reach a token: refused where the rule passes
+/// none on.
+fn apply_syntax_styles<'r>(
+    d: &mut Vec<QanaDiag>,
+    sg: &SynGrammar,
+    styles: &mut Styles,
+    sugar_nts: &[u16],
+    requests: impl Iterator<Item = (u16, usize, Option<&'static str>, &'r str, (u32, u32))>,
+) {
+    let requests: Vec<_> = requests.collect();
+    // Where a class given to a production's node goes: the productions'
+    // `inherit`s, and every symbol of a sugar production but a separated
+    // list's separator (the middle of `list SEP element`).
+    let mut passes: Vec<Vec<usize>> = vec![Vec::new(); sg.prods.len()];
+    for (prod, p) in sg.prods.iter().enumerate() {
+        if sugar_nts.contains(&p.lhs) {
+            for k in 0..p.rhs.len() {
+                let separator = p.rhs.len() == 3 && k == 1 && matches!(p.rhs[k], Sym::T(_));
+                if !separator {
+                    passes[prod].push(k);
+                }
+            }
+        }
+    }
+    for &(prod, k, class, _, _) in &requests {
+        if class.is_none() {
+            passes[prod as usize].push(k);
+        }
+    }
+    // Which rules pass a class they are given on to a token, directly or
+    // through rules that do.
+    let mut carries = vec![false; sg.nt_names.len()];
+    loop {
+        let mut grew = false;
+        for (prod, p) in sg.prods.iter().enumerate() {
+            if carries[p.lhs as usize] {
+                continue;
+            }
+            let reaches = passes[prod].iter().any(|&k| match p.rhs[k] {
+                Sym::T(_) => true,
+                Sym::N(m) => carries[m as usize],
+            });
+            if reaches {
+                carries[p.lhs as usize] = true;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    for &(prod, k, class, label, span) in &requests {
+        if let Sym::N(m) = sg.prods[prod as usize].rhs[k] {
+            if !carries[m as usize] {
+                d.push(QanaDiag {
+                    span,
+                    msg: format!(
+                        "`{label}` is the rule `{}`, which passes no class on to a token: give the alternatives that hold its name `@style(inherit, …)`",
+                        sg.nt_names[m as usize]
+                    ),
+                    severity: 1,
+                });
+                continue;
+            }
+        }
+        match class {
+            Some(class) => styles.paint_symbol(prod, k, class),
+            None => styles.pass_style(prod, k),
+        }
+    }
+    for (prod, ks) in passes.iter().enumerate() {
+        if sugar_nts.contains(&sg.prods[prod].lhs) {
+            for &k in ks {
+                styles.pass_style(prod as u16, k);
+            }
+        }
+    }
+}
 
 /// Label → symbol position that must hold a RULE (shared by the module
 /// and type attribute arms).

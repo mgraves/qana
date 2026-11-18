@@ -48,7 +48,7 @@ fn main() {
     }
     let mut session = IncSession::new(&lexer, &sg, &tables, &src).expect("parses");
 
-    let (mut cache, d) = time(|| semantic_tokens_full(&lexer, &session.buf, &styles));
+    let (mut cache, d) = time(|| semantic_tokens_full(&lexer, &session.buf, session.tree().unwrap(), &styles));
     println!(
         "semantic tokens (full):      {:>10}   ({} styled tokens, {} u32s)",
         fmt_dur(d),
@@ -67,7 +67,7 @@ fn main() {
         };
         let t0 = Instant::now();
         let out = session.edit(&sg, &tables, &[edit]).expect("valid");
-        let delta = cache.update(&lexer, &session.buf, &styles, &out.damage);
+        let delta = cache.update(&lexer, &session.buf, session.tree().unwrap(), &styles, &out.damage);
         deltas.push((t0.elapsed(), delta.map(|d| d.insert.len()).unwrap_or(0)));
     }
     deltas.sort_by_key(|d| d.0);
@@ -77,7 +77,7 @@ fn main() {
         fmt_dur(median),
         ins
     );
-    let fresh = semantic_tokens_full(&lexer, &session.buf, &styles);
+    let fresh = semantic_tokens_full(&lexer, &session.buf, session.tree().unwrap(), &styles);
     assert!(cache == fresh, "DELTA GATE FAILED AT SCALE");
     println!("delta gate at scale:             verified   (200 edits, cache == fresh encode)");
 

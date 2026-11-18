@@ -70,6 +70,14 @@ fn colour_classes(colour: &CompiledLexer, measured: &CompiledLexer) -> Vec<Class
                 // `1.` alone, a float the parser may split, as rustc_lexer
                 // cuts it.
                 "FLOAT_DOT" => by_name["FLOAT"],
+                // Doc comments are comments, cut where rust_lex.qana cuts
+                // its comments, in a mode that reads as its BLOCK.
+                "DOC_LINE" => by_name["LINE_COMMENT"],
+                "BLOCK_OPEN_EOL" | "DOC_OPEN" => by_name["BLOCK_OPEN"],
+                "D_OPEN" => by_name["B_OPEN"],
+                "D_CLOSE" => by_name["B_CLOSE"],
+                "D_CONTENT" => by_name["B_CONTENT"],
+                "D_MISC" => by_name["B_MISC"],
                 other => *by_name.get(other).unwrap_or_else(|| {
                     panic!("rust.qana has a token rust_lex.qana does not, with no class: {other}")
                 }),
@@ -86,9 +94,24 @@ fn the_grammar_is_in_the_envelope() {
     certify(&out.def).expect("rust.qana is in the envelope");
 }
 
+/// The mode a token named `name` is read in.
+fn mode_of(lexer: &CompiledLexer, name: &str) -> u16 {
+    let id = lexer.vocab.names.iter().position(|n| n == name).unwrap_or_else(|| panic!("{name}"));
+    lexer.vocab.modes[id]
+}
+
 /// Every line is cut where the measured grammar cuts it, and hands the
-/// next line the mode the measured grammar hands it.
+/// next line the mode the measured grammar hands it: the same depth of
+/// modes, the innermost the same. A block doc comment's mode is a block
+/// comment's (the measured grammar does not tell doc comments apart), and
+/// one holds only itself, as a block comment's does.
 fn assert_same_cuts(colour: &CompiledLexer, measured: &CompiledLexer, src: &str, what: &str) {
+    let (doc, block) = (mode_of(colour, "D_OPEN"), mode_of(colour, "B_OPEN"));
+    assert_eq!(block, mode_of(measured, "B_OPEN"), "BLOCK is the same mode in both");
+    let exit = |m: qana_grammar::MStack| {
+        let current = m.current_mode();
+        (m.depth(), if current == doc { block } else { current })
+    };
     let ours = LexedBuffer::new(colour, src);
     let theirs = LexedBuffer::new(measured, src);
     assert!(ours.verify_coverage(), "{what}: every byte is in a token");
@@ -97,7 +120,7 @@ fn assert_same_cuts(colour: &CompiledLexer, measured: &CompiledLexer, src: &str,
         let cuts =
             |tokens: &[qana_grammar::Token]| tokens.iter().map(|t| t.len).collect::<Vec<_>>();
         assert_eq!(cuts(&a.tokens), cuts(&b.tokens), "{what}:{}: the same tokens", n + 1);
-        assert_eq!(a.exit, b.exit, "{what}:{}: the same mode after the line", n + 1);
+        assert_eq!(exit(a.exit), exit(b.exit), "{what}:{}: the same mode after the line", n + 1);
     }
 }
 

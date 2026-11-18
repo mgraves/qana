@@ -85,6 +85,22 @@ Comments fold on their own (`comment`): one over lines, and lines in a
 row holding nothing but comments, such as doc comments.
 `cargo test -p qana-lang --test rust_folds` pins them.
 
-qana's style legend has no class for types, functions, macros,
-attributes, lifetimes or doc comments, so those are coloured as names,
-punctuation or comments.
+## Colouring
+
+Doc comments (`///`, `//!`, `/** */`, `/*! */`, as rustc_lexer tells them
+from plain comments) and lifetimes are coloured by their tokens; a block
+doc comment reads its body in a mode of its own, which cuts and nests as a
+block comment's does. The rest is coloured by where a name stands
+(`@style` on alternatives): the name a path in a type ends in, and a
+type's, a type parameter's and an associated type's name where they are
+defined, are a `type`; a function's name where it is defined and the name
+a call calls are a `function` (a tuple struct or variant called as a
+function is one too: the syntax cannot tell them apart); the name a
+method call calls is a `method`; a macro invocation's name and `!`, and
+`macro_rules!` and the name it defines, are a `macro`; an attribute's
+`#[`, `]` and path are a `decorator`; a loop's or block's label, where it
+is given and where `break` or `continue` names it, is a `label`. A path's
+qualifiers (`std::collections::` in `std::collections::HashMap`) are
+names: whether one is a module or a type is not the syntax's to say.
+`cargo test -p qana-lang --test rust_classes` pins them, and that a live
+document keeps them through edits.

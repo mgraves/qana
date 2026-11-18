@@ -79,7 +79,7 @@ fn product_certifies_and_parses_composed_documents_losslessly() {
 
     // Product highlighting: chartlang keyword class outside, qana regexp
     // class inside — one legend, one pass.
-    let toks = qana_services::semantic_tokens_full(&tc.lexer, &s.buf, &tc.styles);
+    let toks = qana_services::semantic_tokens_full(&tc.lexer, &s.buf, s.tree().unwrap(), &tc.styles);
     let classes: Vec<u32> = toks.data.chunks(5).map(|q| q[3]).collect();
     let legend = &tc.styles.legend;
     let keyword = legend.iter().position(|c| *c == "keyword").unwrap() as u32;

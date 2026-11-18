@@ -154,9 +154,42 @@ constructs are expressed with modes, not multi-line tokens.
 
 ### Style classes
 
-`keyword`, `variable`, `number`, `string`, `comment`, `operator`,
-`punctuation`, `bracket`, `regexp`. These are the LSP semantic-token
-legend; the VS Code extension maps them to TextMate scopes.
+The legend is one closed set, shared by every grammar, so that a theme
+says once what each class looks like:
+
+| Class | What it is |
+| --- | --- |
+| `keyword` | a keyword |
+| `variable` | a name |
+| `number` | a number |
+| `string` | a string or character literal |
+| `comment` | a comment |
+| `doc_comment` | a comment that documents what follows it (`///`, `/** */`) |
+| `operator` | an operator |
+| `punctuation` | punctuation |
+| `bracket` | a bracket |
+| `regexp` | a pattern literal |
+| `lifetime` | a lifetime (`'a`) |
+| `type` | the name of a type |
+| `function` | a function's name, where it is defined and where it is called |
+| `method` | the name a method call calls (`x.name()`) |
+| `macro` | a macro's name, where it is invoked or defined |
+| `decorator` | an attribute or annotation (`#[derive(Debug)]`) |
+| `label` | a label a loop or block is given, and a `break` names |
+
+A token's `@style(class)` gives the class to every token of its kind.
+What a name is depends on where it stands, so a class can also be given by
+the syntax: an alternative's `@style(class, label…)` (see **Classes from
+the syntax** below). Where the syntax gives a token a class, it is the
+token's class; elsewhere the token's kind's is.
+
+The classes are LSP's semantic token types where LSP has one. The LSP
+server sends `doc_comment` as `comment` with the `documentation` modifier,
+and the rest by their names; `punctuation`, `bracket` and `lifetime` are
+qana's own, which the VS Code extension declares (falling back to
+`punctuation` and `typeParameter`) and maps, with the others, to TextMate
+scopes. `qana ts` exports the token kinds' classes to `highlights.scm`;
+the syntax's are not exported, and it says so.
 
 ---
 
@@ -277,7 +310,7 @@ handles `@outline`/`@def`/`@ref` refer to.
 | --- | --- |
 | `name` | another rule, or a token by name |
 | `"lit"` | a token by its literal text |
-| `label:name` | a named position (`@def`/`@ref`/`@outline` target it) |
+| `label:name` | a named position (`@def`/`@ref`/`@outline`/`@style` target it) |
 | `label:"lit"` | a named literal position |
 | `name?` `name*` `name+` | optional / zero-or-more / one-or-more |
 
@@ -335,6 +368,8 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@scope` | This node opens a lexical scope (names inside are invisible outside) |
 | `@scope(unordered)` | A scope where forward references are legal (declaration languages) |
 | `@outline(label)` / `@outline(label, kind)` | Contribute a document symbol named by the symbol at `label`: a token's text, or for a rule, the first `@def` inside it, and failing that its text (`Point<T>`); kinds are `variable` (default), `constant`, `function`, `struct`, `module`, `class` |
+| `@style(class, label…)` | The symbols at the labels are painted `class`: a token takes it, a rule is given it and passes it on where its alternatives say (see **Classes from the syntax** below) |
+| `@style(inherit, label…)` | The symbols at the labels are painted the class this alternative's node is given, if it is given one |
 | `@fold(kind)` / `@fold(kind, from)` / `@fold(kind, from, to)` | The construct folds when it runs over lines: from its first token, or the first token of the symbol labelled `from`, to its last token, or the last token of the symbol labelled `to` (see **Folding** below) |
 | `@precedence(token)` | Override this alternative's precedence (yacc's `%prec`) |
 | `@type(…)` | Declare this alternative's typing rule (see **The type tier** below) |
@@ -370,6 +405,49 @@ There is no separate symbol-table pass to write.
 unordered scope — a declaration language, where a top-level name is
 visible to references that appear before it. Without it, top-level names
 follow definition-before-use.
+
+### Classes from the syntax
+
+A token's `@style` colours every token of its kind alike, but what a name
+is depends on where it stands: `Vec` in `x: Vec<u8>` is a type, `push` in
+`v.push(1)` a method, `println` before `!` a macro. An alternative says so:
+
+```
+rule fn_def = FnDef: "fn" n:name "(" params ")" block @style(function, n)
+rule call   = Call:  c:expr "(" args ")"            @style(function, c)
+rule ty     = PathType: p:path                      @style(type, p)
+```
+
+A label on a token paints that token. A label on a rule GIVES the rule the
+class, and the rule passes it on where its own alternatives say, with
+`@style(inherit, label…)`. That is how a class reaches the one token that
+names a construct, however deep it is:
+
+```
+rule path =
+  | One:  n:name                    @style(inherit, n)   // `Vec`
+  | More: path "::" n:name          @style(inherit, n)   // `std::collections::HashMap`: only `HashMap`
+rule name = Name: t:IDENT           @style(inherit, t)
+rule expr =
+  | PathExpr: p:path                @style(inherit, p)   // `f` in `f(x)`
+  | Paren:    "(" expr ")"                               // `(f)(x)`: nothing passed on
+```
+
+A list or an option (`x*`, `x+ % ","`, `x?`) passes what it is given to
+each element; a list's separators get nothing. What recovery set aside gets
+nothing; a token recovery inserted holds its symbol's place. A token is
+painted by its parent's alternative alone, so two classes never meet on
+one token. A rule given a class must pass it on to a token, directly or
+through rules that do: one that passes nothing on is a compile error, as
+are an unknown class, a label styled twice, and `@style` on an alternative
+with no label.
+
+A live document keeps these classes across edits by subtree, as it keeps
+its folds: a subtree the parser did not rebuild, given the class it was
+given before, is not read again. An edit repaints the lines it changed,
+and also the other lines whose classes it changed (typing `(` at the start
+of the next line makes a name a call). `qana_services::syntax_classes`
+lists what a tree's syntax paints.
 
 ### Folding
 

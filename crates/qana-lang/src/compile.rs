@@ -819,6 +819,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
     }
     let vocab = Vocab::of(&lex);
     let mut sg = SynGrammar::new(&format!("{lang_name}Syn"), vocab.names.clone());
+    sg.brackets_from(&vocab);
     let mut nt_ids: HashMap<String, u16> = HashMap::new();
     for r in &ir.rules {
         if nt_ids.contains_key(&r.name) {

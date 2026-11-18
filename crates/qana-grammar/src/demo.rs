@@ -247,6 +247,7 @@ pub fn demo_syn_grammar_prec(
     prec: &[(TokenId, u8, Assoc)],
 ) -> SynGrammar {
     let mut sg = SynGrammar::new("DemoSyn", vocab.names.clone());
+    sg.brackets_from(vocab);
     let t = |id: TokenId| Sym::T(id);
 
     let file = sg.nt("file");

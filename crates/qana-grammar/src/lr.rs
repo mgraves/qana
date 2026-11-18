@@ -10,7 +10,7 @@
 //! shortest-path examples, not full unifying derivations (Isradisaikul &
 //! Myers 2015) — an upgrade path, not a rewrite.
 
-use crate::model::TokenId;
+use crate::model::{BracketKind, TokenId};
 use crate::syn::{Assoc, Sym, SynGrammar, EOF};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
@@ -57,6 +57,20 @@ pub struct LrTables {
     /// `L → L α` (nt not recurring in α, non-fragile) and one seed prod.
     /// Their trees use balanced LIST/RUN nodes instead of cons spines.
     pub lists: std::collections::HashMap<u16, ListShape>,
+    /// States that take every token the grammar uses but the closers of
+    /// its bracket pairs: a token tree's. That a token is accepted there
+    /// says nothing about whether it belongs there, which is what error
+    /// recovery needs to know when it validates a repair against the
+    /// tokens that follow.
+    pub permissive: Vec<bool>,
+    /// For each state, the kind of bracket shifting into it opened, if
+    /// it is entered by shifting an opener (every transition into an LR
+    /// state is on the same symbol). A state on the parse stack with one
+    /// stands for an open bracket whose closer has not come: what lies
+    /// beneath it cannot claim a token before that closer, which error
+    /// recovery needs to know before it protects a token as wanted by an
+    /// enclosing construct.
+    pub opens: Vec<Option<BracketKind>>,
 }
 
 /// One symbol of a list's repetition unit, for splice-alignment checks:
@@ -172,6 +186,44 @@ fn item_display(g: &SynGrammar, aug: &[(u16, Vec<Sym>)], item: Item) -> String {
         &g.nt_names[*lhs_disp as usize]
     };
     format!("[{} → {} , {}]", lhs_name, parts.join(" "), g.term_name(la))
+}
+
+/// The states that take every token a production uses, closers aside
+/// (see [`LrTables::permissive`]). None without declared closers.
+fn permissive_states(g: &SynGrammar, action: &[HashMap<TokenId, LrAct>]) -> Vec<bool> {
+    if !g.brackets.iter().any(|b| matches!(b, Some((_, false)))) {
+        return vec![false; action.len()];
+    }
+    let mut used: Vec<TokenId> = g
+        .prods
+        .iter()
+        .flat_map(|p| p.rhs.iter())
+        .filter_map(|s| match s {
+            Sym::T(t) if !g.is_closer(*t) => Some(*t),
+            _ => None,
+        })
+        .collect();
+    used.sort_unstable();
+    used.dedup();
+    action
+        .iter()
+        .map(|row| {
+            used.iter().all(|t| matches!(row.get(t), Some(LrAct::Shift(_) | LrAct::Reduce(_))))
+        })
+        .collect()
+}
+
+/// The bracket each state is entered by opening (see [`LrTables::opens`]).
+fn opening_states(g: &SynGrammar, action: &[HashMap<TokenId, LrAct>]) -> Vec<Option<BracketKind>> {
+    let mut opens = vec![None; action.len()];
+    for row in action {
+        for (&t, act) in row {
+            if let (LrAct::Shift(n), Some((kind, true))) = (act, g.bracket(t)) {
+                opens[*n as usize] = Some(kind);
+            }
+        }
+    }
+    opens
 }
 
 pub fn build_lr(g: &SynGrammar) -> LrTables {
@@ -595,6 +647,8 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
     }
 
     let lists = detect_lists(g, &fragile);
+    let permissive = permissive_states(g, &action);
+    let opens = opening_states(g, &action);
     LrTables {
         action,
         goto_,
@@ -603,5 +657,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
         resolved_by_prec: resolved,
         fragile,
         lists,
+        permissive,
+        opens,
     }
 }

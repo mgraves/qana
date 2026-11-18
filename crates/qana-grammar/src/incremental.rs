@@ -20,8 +20,8 @@
 //! `docs/incremental_recovery.md`.
 
 use crate::green::{
-    flat_children, is_seq_prod, GreenChild, GreenNode, GreenToken, LrEnds, TokWithText, LIST_PROD,
-    MAX_RUN, RUN_PROD,
+    is_seq_prod, GreenChild, GreenNode, GreenToken, LrEnds, TokWithText, LIST_PROD, MAX_RUN,
+    RUN_PROD,
 };
 use crate::lr::{LrAct, LrTables};
 use crate::model::TokenId;
@@ -462,14 +462,25 @@ struct Snap {
 /// before its own first symbol was taken (the material drained in front
 /// of it already decided), and `end`, just after its last symbol was.
 /// The repairs between them are its own.
+///
+/// An entry that took no symbol (`empty`: an ε-node, or a node of them)
+/// begins where it was reduced and ends just after the symbol before it,
+/// so neither a node it begins nor one it ends reaches across a recovery
+/// that came between that symbol and its reduction: a node it begins
+/// starts after the recovery, one it ends stops before it.
 #[derive(Clone, Copy, Debug)]
 struct Span {
     at: Snap,
     end: Snap,
+    empty: bool,
 }
 
 /// Recovery's insert search validates this many terminals ahead.
 const K: usize = 3;
+/// How far recovery reads to rank insertions that the K-terminal window
+/// cannot tell apart (see `search_inserts`): the most it ever reads past
+/// where it is entered.
+const FAR: usize = 32;
 /// Past this many repairs in a document, the rest of the input becomes
 /// error material.
 const MAX_REPAIRS: usize = 200;
@@ -683,15 +694,27 @@ fn simulate(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) -> usi
 /// `struct Point P` + `{` it lives inside a fabricated K&R body (and
 /// after `(`, inside a fabricated parameter list) — both of which
 /// absorb unboundedly. The final depth is the tell.
+///
+/// What it counts is the terminals the feed validates: one shifted in a
+/// permissive state (a token tree's, which takes any token) validates
+/// nothing, and is fed on without being counted. Inserting `! {` after a
+/// stray name would otherwise make every token after it valid, inside a
+/// macro invocation that swallows the rest of the file; and a token tree
+/// in the way (`#[serde(…)]`) would otherwise end a reading that goes on
+/// past it.
 fn simulate_depth(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) -> (usize, usize) {
     let mut states = base.to_vec();
     let mut i = 0usize;
+    let mut counted = 0usize;
     let mut steps = 0usize;
-    while i < feed.len() && steps < 400 {
+    while i < feed.len() && steps < 400 + 4 * feed.len() {
         steps += 1;
         let s = *states.last().unwrap();
         match t.action[s as usize].get(&feed[i]).copied() {
             Some(LrAct::Shift(n)) => {
+                if !t.permissive[s as usize] {
+                    counted += 1;
+                }
                 states.push(n);
                 i += 1;
             }
@@ -699,20 +722,20 @@ fn simulate_depth(g: &SynGrammar, t: &LrTables, base: &[u16], feed: &[TokenId]) 
                 let prod = &g.prods[p as usize];
                 let k = prod.rhs.len();
                 if states.len() <= k {
-                    return (i, states.len());
+                    return (counted, states.len());
                 }
                 states.truncate(states.len() - k);
                 let top = *states.last().unwrap();
                 match t.goto_[top as usize].get(&prod.lhs) {
                     Some(&n) => states.push(n),
-                    None => return (i, states.len()),
+                    None => return (counted, states.len()),
                 }
             }
-            Some(LrAct::Accept) => return (feed.len(), states.len()),
-            _ => return (i, states.len()),
+            Some(LrAct::Accept) => return (counted + feed.len() - i, states.len()),
+            _ => return (counted, states.len()),
         }
     }
-    (i, states.len())
+    (counted, states.len())
 }
 
 /// Apply one insertion on a cloned state stack (reduces, then the shift).
@@ -748,77 +771,167 @@ fn apply_insert_sim(g: &SynGrammar, t: &LrTables, base: &[u16], x: TokenId) -> O
     }
 }
 
-/// Bounded search for an INSERT SEQUENCE (length ≤ 3) that lets the parse
-/// consume ≥1 real upcoming terminal — the mini-CPCT+ core. Prefers
-/// shorter sequences, then higher real consumption, then
-/// lexicographically smaller sequences (determinism).
-fn search_inserts(
+/// One step of a repair: a token pretended into existence before the
+/// lookahead, or the lookahead skipped as error material. Insertions order
+/// first, so that between repairs equal in every other respect the one
+/// keeping the user's tokens wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Op {
+    Insert(TokenId),
+    Delete,
+}
+
+/// Whether a construct beneath the top of `states` still wants `x` (a
+/// closer, a separator): some state beneath acts on it, with no bracket
+/// opened in between that `x` does not close. A bracket on the stack
+/// whose closer has not come holds everything up to that closer: in
+/// `[a, x[b, c], d]` the `,` after `b` is the index's, not the array's,
+/// whatever the array's state takes.
+fn wanted_below(g: &SynGrammar, t: &LrTables, states: &[u16], x: TokenId) -> bool {
+    for k in 1..=states.len().saturating_sub(1).min(128) {
+        if let Some(kind) = t.opens[states[states.len() - k] as usize] {
+            if g.bracket(x) != Some((kind, false)) {
+                return false;
+            }
+        }
+        if t.action[states[states.len() - 1 - k] as usize].contains_key(&x) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A repair the search found, with what ranks it.
+struct Found {
+    ops: Vec<Op>,
+    /// How far into `far` the parse gets: the terminals deleted and those
+    /// the parse then validates (see [`simulate_depth`]).
+    reached: usize,
+    deletes: usize,
+    /// The stack depth after the window's terminals.
+    depth: usize,
+}
+
+impl Found {
+    /// Further first, then cheaper, then keeping more of the user's
+    /// tokens, then leaving the following text shallower, then the
+    /// smaller sequence (determinism).
+    fn beats(&self, other: &Found) -> bool {
+        use std::cmp::Reverse;
+        (
+            self.reached,
+            Reverse(self.ops.len()),
+            Reverse(self.deletes),
+            Reverse(self.depth),
+            Reverse(&self.ops),
+        ) > (
+            other.reached,
+            Reverse(other.ops.len()),
+            Reverse(other.deletes),
+            Reverse(other.depth),
+            Reverse(&other.ops),
+        )
+    }
+}
+
+/// Bounded search for a REPAIR at the error: up to three steps, each
+/// inserting a token before the lookahead or deleting it (`Op`), that let
+/// the parse validate at least one of the next `window` terminals after
+/// them — the mini-CPCT+ core. A repair that does is complete; one that
+/// does not is extended by a step. Of the complete ones, the one under
+/// which the parse gets furthest through `far` (the next `FAR` terminals)
+/// wins, a deleted terminal counting as passed; then the cheaper, the one
+/// deleting fewer, the one leaving the stack shallower, and the smaller
+/// sequence.
+///
+/// The window says whether a repair works; it often cannot say which.
+/// After `struct P {x` and before `#[doc = "…"] pub a: T,`, inserting
+/// `: T ,` and `: T }` both make the next four terminals valid, the
+/// attribute fitting a field and an item alike; they part at `pub a :`,
+/// twenty terminals on, where only a field goes. Closing the struct there
+/// turned every later field into broken items, two hundred repairs of
+/// them. And the cheapest repair can be the wrong one: in
+/// `[a, x[b, c], d]` (an `x` typed into an array of pairs) inserting `]`
+/// before the index's `,` validates `, c ]` and then closes the array at
+/// the real `]`; deleting `, c` costs a step more and validates everything
+/// after it. So the window decides validity, and the far reading decides
+/// between valid repairs of any cost.
+///
+/// A token a construct beneath still wants is never deleted
+/// ([`wanted_below`]); the caller weighs deleting the lookahead against
+/// the best repair itself when it is. A complete repair reaching the end
+/// of `far` cannot be beaten by a costlier one, and ends the search.
+fn search_repairs(
     g: &SynGrammar,
     t: &LrTables,
     base: &[u16],
-    peeked: &[TokenId],
-) -> Option<(Vec<TokenId>, usize)> {
-    let mut frontier: Vec<(Vec<TokenId>, Vec<u16>)> = vec![(Vec::new(), base.to_vec())];
-    let mut budget = 600usize;
+    far: &[TokenId],
+    window: usize,
+) -> Option<Found> {
+    // Every step the configuration takes is tried: none is left out for
+    // its token number. Repairs that leave the parse in the same
+    // configuration (`: u8` and `: r#a` both end a type) have the same
+    // future, so only the first (in step order) goes on to the next
+    // length. The budget bounds the work on a pathological table.
+    let mut frontier: Vec<(Vec<Op>, Vec<u16>, usize)> = vec![(Vec::new(), base.to_vec(), 0)];
+    let mut seen: std::collections::HashSet<(Vec<u16>, usize)> = std::collections::HashSet::new();
+    let mut budget = 4000usize;
+    let mut best: Option<Found> = None;
     for _len in 1..=3usize {
-        let mut next: Vec<(Vec<TokenId>, Vec<u16>)> = Vec::new();
-        // (seq, score, post-SIMULATION stack depth): among equal
-        // scores, the repair that leaves the FOLLOWING TEXT at the
-        // shallowest depth wins. A completing insert (`;` after
-        // `struct Point P`) puts the next function back at file scope;
-        // an opening insert (`(` or `{` in the same spot) fabricates a
-        // viable-but-wrong prefix — a parameter list or K&R body —
-        // that the rest of the document feeds without ever erroring
-        // (each ate a 249k-line file). All of them simulate perfectly
-        // inside the K-token horizon; where the lookahead ENDS UP is
-        // the tell. Note the probe point: post-insert depth is not
-        // enough — inserting `{` first REDUCES the declaration head
-        // (landing shallow) and only then opens the door.
-        // (Lexicographic order stays as the last tie-break for
-        // determinism — it just no longer decides between a
-        // terminator and an absorber by accident of token numbering.)
-        let mut best_at_len: Option<(Vec<TokenId>, usize, usize)> = None;
-        for (seq, states) in &frontier {
+        let mut next: Vec<(Vec<Op>, Vec<u16>, usize)> = Vec::new();
+        for (ops, states, pos) in &frontier {
             let s = *states.last().unwrap();
-            let mut cands: Vec<TokenId> =
-                t.action[s as usize].keys().copied().filter(|&c| c != EOF).collect();
-            cands.sort_unstable();
-            cands.truncate(16);
-            for cand in cands {
+            let mut steps: Vec<Op> = t.action[s as usize]
+                .keys()
+                .copied()
+                .filter(|&c| c != EOF)
+                .map(Op::Insert)
+                .collect();
+            if *pos < far.len() && !wanted_below(g, t, states, far[*pos]) {
+                steps.push(Op::Delete);
+            }
+            steps.sort_unstable();
+            for step in steps {
                 if budget == 0 {
                     break;
                 }
                 budget -= 1;
-                let Some(states2) = apply_insert_sim(g, t, states, cand) else { continue };
-                let mut seq2 = seq.clone();
-                seq2.push(cand);
-                let (score, depth) = simulate_depth(g, t, &states2, peeked);
+                let (states2, pos2) = match step {
+                    Op::Insert(c) => match apply_insert_sim(g, t, states, c) {
+                        Some(states2) => (states2, *pos),
+                        None => continue,
+                    },
+                    Op::Delete => (states.clone(), *pos + 1),
+                };
+                let mut ops2 = ops.clone();
+                ops2.push(step);
+                let rest = &far[pos2..];
+                let (score, depth) =
+                    simulate_depth(g, t, &states2, &rest[..rest.len().min(window)]);
                 if score >= 1 {
-                    let better = match &best_at_len {
-                        None => true,
-                        Some((bseq, bscore, bdepth)) => {
-                            score > *bscore
-                                || (score == *bscore && depth < *bdepth)
-                                || (score == *bscore && depth == *bdepth && seq2 < *bseq)
-                        }
+                    let found = Found {
+                        reached: pos2 + simulate_depth(g, t, &states2, rest).0,
+                        deletes: ops2.iter().filter(|&&o| o == Op::Delete).count(),
+                        ops: ops2,
+                        depth,
                     };
-                    if better {
-                        best_at_len = Some((seq2, score, depth));
+                    if best.as_ref().is_none_or(|b| found.beats(b)) {
+                        best = Some(found);
                     }
-                } else {
-                    next.push((seq2, states2));
+                } else if seen.insert((states2.clone(), pos2)) {
+                    next.push((ops2, states2, pos2));
                 }
             }
         }
-        if let Some((seq, score, _)) = best_at_len {
-            return Some((seq, score));
+        if best.as_ref().is_some_and(|b| b.reached == far.len()) {
+            break;
         }
         frontier = next;
         if frontier.is_empty() || budget == 0 {
             break;
         }
     }
-    None
+    best
 }
 
 fn error_node_of(tok: GreenToken) -> GreenChild {
@@ -1167,26 +1280,35 @@ fn reduces_alike(t: &LrTables, n: &GreenNode, la: TokenId) -> bool {
     if t.action[e.end as usize].get(&la) != Some(&LrAct::Reduce(e.prod)) {
         return false;
     }
-    let children: Vec<&GreenChild> =
-        if is_seq_prod(n.prod) { flat_children(n) } else { n.children.iter().collect() };
-    for c in children.into_iter().rev() {
-        match c {
-            GreenChild::Token(tk) if tk.trivia => {}
-            // The last symbol is a token: shifted, not reduced.
-            GreenChild::Token(_) => return true,
-            GreenChild::Node(m) => {
-                if !reduces_alike(t, m, la) {
-                    return false;
+    // Down the right edge: a list's runs are its representation, not
+    // reductions, so they are stepped through (never flattened: a list
+    // can hold a hundred thousand elements).
+    fn last_reductions(t: &LrTables, n: &GreenNode, la: TokenId) -> Option<bool> {
+        for c in n.children.iter().rev() {
+            match c {
+                GreenChild::Token(tk) if tk.trivia => {}
+                // The last symbol is a token: shifted, not reduced.
+                GreenChild::Token(_) => return Some(true),
+                GreenChild::Node(m) if m.prod == RUN_PROD => {
+                    if let Some(done) = last_reductions(t, m, la) {
+                        return Some(done);
+                    }
                 }
-                // An ε-node was reduced on the same terminal as what
-                // comes before it.
-                if m.terms > 0 {
-                    return true;
+                GreenChild::Node(m) => {
+                    if !reduces_alike(t, m, la) {
+                        return Some(false);
+                    }
+                    // An ε-node was reduced on the same terminal as what
+                    // comes before it.
+                    if m.terms > 0 {
+                        return Some(true);
+                    }
                 }
             }
         }
+        None
     }
-    true
+    last_reductions(t, n, la).unwrap_or(true)
 }
 
 /// The terminal after the item at the front of the input: what a parse
@@ -1238,6 +1360,8 @@ pub fn incremental_parse(
             }
         };
     }
+    // Where the parse stands before its first symbol.
+    let origin = snap!();
 
     macro_rules! reduce {
         ($pidx:expr) => {{
@@ -1256,18 +1380,30 @@ pub fn incremental_parse(
             let top = *states.last().unwrap();
             let next = *t.goto_[top as usize].get(&prod.lhs).expect("goto after reduce");
             let shape = t.lists.get(&prod.lhs).copied();
-            // From the first popped symbol to the last (an ε reduce stands
-            // where the parse is).
+            // From the first popped symbol to the last. A reduction taking
+            // no symbol begins here and ends just after the symbol before
+            // it (see `Span`): a recovery between that symbol and this
+            // reduction (one that deleted the terminals up to the one it is
+            // decided on) comes between the last symbol and the reduction
+            // of a node it ends, and before a node it begins.
+            let empty = popped.iter().all(|e| e.span.empty);
             let span = Span {
                 at: popped.first().map_or(snap!(), |e| e.span.at),
-                end: popped.last().map_or(snap!(), |e| e.span.end),
+                end: popped
+                    .last()
+                    .map_or(stack[..split].last().map_or(origin, |e| e.span.end), |e| e.span.end),
+                empty,
             };
             // Whether this reduction was decided by the symbols and the
             // terminal after them alone: recovery is not making it, and no
-            // recovery came between the last popped symbol and it.
+            // recovery came between the last popped symbol and it. A
+            // reduction taking no symbol has none for a recovery to come
+            // between: the state and the terminal decide it, whatever came
+            // before them.
             let settled = !recovering
-                && repairs.len() == span.end.repairs_len
-                && books.len() == span.end.books_len;
+                && (empty
+                    || (repairs.len() == span.end.repairs_len
+                        && books.len() == span.end.books_len));
             // The popped entries as list pieces (the cons head, the builder
             // itself, aside): material, then the symbol, settled as it was
             // and, for the last, as this reduction is.
@@ -1336,6 +1472,53 @@ pub fn incremental_parse(
         }};
     }
 
+    // Bring the next real terminal to the front of the input, as the
+    // parse loop would on its way to it: trivia into the pending
+    // material, repair-inserted tokens dropped, subtrees broken down (an
+    // ERROR node into its tokens). Recovery deleting more than its
+    // lookahead deletes terminals the parse has not reached yet.
+    macro_rules! expose_terminal {
+        () => {{
+            loop {
+                match input.front() {
+                    Some(Item::Fresh(tok)) if tok.trivia => {
+                        let Some(Item::Fresh(tok)) = input.pop_front() else { unreachable!() };
+                        pending.push(GreenChild::Token(GreenToken {
+                            id: tok.id,
+                            trivia: true,
+                            text: tok.text,
+                        }));
+                    }
+                    Some(Item::Sub(GreenChild::Token(tk))) if tk.trivia => {
+                        let Some(Item::Sub(c)) = input.pop_front() else { unreachable!() };
+                        pending.push(c);
+                    }
+                    Some(Item::Sub(GreenChild::Token(tk))) if tk.is_missing() => {
+                        input.pop_front();
+                    }
+                    Some(Item::Sub(GreenChild::Node(_))) => {
+                        let Some(Item::Sub(GreenChild::Node(node))) = input.pop_front() else {
+                            unreachable!()
+                        };
+                        stats.breakdowns += 1;
+                        if node.nt == crate::green::ERROR_NT {
+                            let mut tokens = Vec::new();
+                            tokens_of(&GreenChild::Node(node), &mut tokens);
+                            for c in tokens.into_iter().rev() {
+                                input.push_front(Item::Sub(c));
+                            }
+                        } else {
+                            for c in node.children.iter().rev() {
+                                input.push_front(Item::Sub(c.clone()));
+                            }
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }};
+    }
+
     macro_rules! delete_la {
         () => {{
             match input.pop_front() {
@@ -1383,7 +1566,7 @@ pub fn incremental_parse(
                                 trivia: false,
                                 text: String::new(),
                             })),
-                            span: Span { at: snap!(), end: snap!() },
+                            span: Span { at: snap!(), end: snap!(), empty: false },
                         });
                         states.push(n);
                         break;
@@ -1551,6 +1734,7 @@ pub fn incremental_parse(
                 let escalated = repair_cluster >= REPAIR_CLUSTER_ESCALATE;
 
                 let peeked = peek_terms(&input, K + 1);
+                let far = peek_terms(&input, FAR);
                 let la = peeked.first().copied();
                 // A lookahead some ENCLOSING state still wants (a
                 // closer, a separator) is LOAD-BEARING: deleting it
@@ -1564,21 +1748,10 @@ pub fn incremental_parse(
                 // incomplete member re-earned one document-sized
                 // error region at 3-4 SECONDS each (the world-swallow,
                 // measured by the keystroke lab). Such a token is
-                // never deleted: a completing insert wins ties, and
-                // failing that the in-progress item is set aside as
-                // error material until the token can act.
-                let la_wanted_below = la.is_some_and(|x| {
-                    states[..states.len().saturating_sub(1)]
-                        .iter()
-                        .rev()
-                        .take(128)
-                        .any(|&s| t.action[s as usize].contains_key(&x))
-                });
-                let delete_score = if peeked.is_empty() {
-                    0
-                } else {
-                    simulate(g, t, &states, &peeked[1..])
-                };
+                // never deleted: a repair keeping it wins ties with
+                // deleting it, and failing that the in-progress item is
+                // set aside as error material until the token can act.
+                let la_wanted_below = la.is_some_and(|x| wanted_below(g, t, &states, x));
                 // LIST-BOUNDARY RESYNC: an error while the stack top
                 // is a list under construction means the lookahead
                 // could not START an element. Garbage must never
@@ -1594,11 +1767,18 @@ pub fn incremental_parse(
                 // K-terminal validation is exactly what a repair
                 // spiral exploits (and the BFS is the expensive part
                 // of a repair storm).
-                let insert_hit = if escalated || at_list_boundary {
+                let found = if escalated || at_list_boundary {
                     None
                 } else {
-                    search_inserts(g, t, &states, &peeked)
+                    search_repairs(g, t, &states, &far, peeked.len())
                 };
+                // Deleting a wanted lookahead is weighed, never made: if
+                // it would get further than the best repair keeping it,
+                // the in-progress item is set aside instead.
+                let found = found.filter(|f| {
+                    !la_wanted_below
+                        || f.reached >= 1 + simulate(g, t, &states, &far[1..])
+                });
                 if std::env::var_os("QANA_TRACE_REPAIR").is_some() {
                     let top = match stack.last() {
                         None => "-",
@@ -1633,30 +1813,37 @@ pub fn incremental_parse(
                         }
                     }
                     eprintln!(
-                        "[repair] term={consumed_terms} la={:?} top={top} depth={} ladder={ladder} list_boundary={at_list_boundary} wanted_below={la_wanted_below} delete_score={delete_score} insert={:?}",
+                        "[repair] term={consumed_terms} la={:?} top={top} depth={} ladder={ladder} list_boundary={at_list_boundary} wanted_below={la_wanted_below} repair={:?}",
                         la.map(|x| g.term_name(x)),
                         stack.len(),
-                        insert_hit
-                            .as_ref()
-                            .map(|(seq, sc)| (seq.iter().map(|&x| g.term_name(x)).collect::<Vec<_>>(), *sc)),
+                        found.as_ref().map(|f| (
+                            f.ops
+                                .iter()
+                                .map(|o| match o {
+                                    Op::Insert(x) => g.term_name(*x).to_string(),
+                                    Op::Delete => "-".to_string(),
+                                })
+                                .collect::<Vec<_>>(),
+                            f.reached
+                        )),
                     );
                 }
-                // Choose: higher real consumption wins; ties prefer the
-                // single delete over an insert sequence (lower cost) —
-                // EXCEPT under a wanted-below lookahead, where the
-                // insert is what keeps the wanted token alive and so
-                // wins ties too.
-                match insert_hit {
-                    Some((seq, score))
-                        if score > delete_score
-                            || (la_wanted_below && score > 0 && score >= delete_score) =>
-                    {
-                        for &x in &seq {
-                            repairs.push(Repair {
-                                at_terminal: consumed_terms,
-                                kind: RepairKind::Inserted(x),
-                            });
-                            apply_insert!(x);
+                match found {
+                    Some(f) => {
+                        for op in f.ops {
+                            match op {
+                                Op::Insert(x) => {
+                                    repairs.push(Repair {
+                                        at_terminal: consumed_terms,
+                                        kind: RepairKind::Inserted(x),
+                                    });
+                                    apply_insert!(x);
+                                }
+                                Op::Delete => {
+                                    expose_terminal!();
+                                    delete_la!();
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -1856,7 +2043,7 @@ pub fn incremental_parse(
                                     true,
                                     (ends.end, ends.prod),
                                 )),
-                                span: Span { at, end: at },
+                                span: Span { at, end: at, empty: false },
                             });
                             states.push(next);
                         }
@@ -1874,6 +2061,9 @@ pub fn incremental_parse(
                         b.last = (ends.end, ends.prod);
                         debug_assert!(drains.is_empty(), "a list with a terminal takes its drain");
                         span.end = end;
+                        // It has taken symbols now, as the cons reductions
+                        // a batch parse makes of the same units say.
+                        span.empty = false;
                         continue;
                     }
                 } else {
@@ -1923,7 +2113,7 @@ pub fn incremental_parse(
                         stack.push(Entry {
                             leading: Vec::new(),
                             sym: SymSlot::Child(child),
-                            span: Span { at, end: snap!() },
+                            span: Span { at, end: snap!(), empty: false },
                         });
                         states.push(next);
                         continue;
@@ -1982,7 +2172,7 @@ pub fn incremental_parse(
                 stack.push(Entry {
                     leading: std::mem::take(&mut pending),
                     sym: SymSlot::Child(sym),
-                    span: Span { at, end: snap!() },
+                    span: Span { at, end: snap!(), empty: false },
                 });
                 states.push(next);
             }
@@ -2104,12 +2294,12 @@ pub fn salvage(old: &Arc<GreenNode>, regions: &[FreshRegion]) -> VecDeque<Item> 
     // replacement.
     let mut emitted = 0usize;
     let mut tok_index = 0u32;
-    // For each region, the old token where the last `K + 1` terminals
+    // For each region, the old token where the last `FAR` terminals
     // before it begin: a node carrying an error must end at or before it
     // to be reused (see `walk`).
     let err_guards: Vec<u32> = regions
         .iter()
-        .map(|r| match terms_before(old, r.old_toks.0).checked_sub(K + 1) {
+        .map(|r| match terms_before(old, r.old_toks.0).checked_sub(FAR) {
             Some(term) => tok_of_term(old, term),
             None => 0,
         })
@@ -2191,11 +2381,12 @@ pub fn salvage(old: &Arc<GreenNode>, regions: &[FreshRegion]) -> VecDeque<Item> 
                 // they were: the parse checks the rest (the state it
                 // stands in, and how the node's last reductions are
                 // decided on the terminal after it now: `LrEnds`). A node
-                // carrying an error needs the `K + 1` terminals after it
-                // as they were too: recovery inside it reads that far (its
+                // carrying an error needs the `FAR` terminals after it as
+                // they were too: recovery inside it reads that far (its
                 // last recovery is entered at the latest at the terminal
-                // after it, and reads K more), and its record checks what
-                // it read before it (`docs/incremental_recovery.md`).
+                // after it, and reads `FAR` from there), and its record
+                // checks what it read before it
+                // (`docs/incremental_recovery.md`).
                 // Re-running recovery for every error on every keystroke
                 // cost a file with 27k transient errors ~2s per character.
                 let reusable = !dirty(span, regions)

@@ -8,7 +8,7 @@
 //! conflicts that survive them are compile errors with traces, never
 //! runtime nondeterminism).
 
-use crate::model::TokenId;
+use crate::model::{BracketKind, TokenId};
 
 /// Terminal id used for end-of-input in lookaheads and ACTION tables.
 pub const EOF: TokenId = u16::MAX;
@@ -51,6 +51,13 @@ pub struct SynGrammar {
     pub start: NtId,
     /// Token precedence: (level, assoc). Higher level binds tighter.
     pub token_prec: Vec<Option<(u8, Assoc)>>,
+    /// Each token's declared bracket role, indexed by TokenId: its kind,
+    /// and whether it opens (`true`) or closes. What tells a token
+    /// tree's states (which take every token but the closers) from the
+    /// rest (see [`crate::lr::LrTables::permissive`]), and which states
+    /// stand inside an open bracket (see [`crate::lr::LrTables::opens`]).
+    /// Empty when the grammar declares none.
+    pub brackets: Vec<Option<(BracketKind, bool)>>,
 }
 
 pub(crate) fn camel(s: &str) -> String {
@@ -79,7 +86,23 @@ impl SynGrammar {
             prods: Vec::new(),
             start: 0,
             token_prec: vec![None; n],
+            brackets: Vec::new(),
         }
+    }
+
+    /// Take `vocab`'s bracket pairs as this grammar's.
+    pub fn brackets_from(&mut self, vocab: &crate::model::Vocab) {
+        self.brackets = vocab.brackets.clone();
+    }
+
+    /// The bracket role of `t`, if it has one.
+    pub fn bracket(&self, t: TokenId) -> Option<(BracketKind, bool)> {
+        self.brackets.get(t as usize).copied().flatten()
+    }
+
+    /// Whether `t` closes a declared bracket pair.
+    pub fn is_closer(&self, t: TokenId) -> bool {
+        matches!(self.bracket(t), Some((_, false)))
     }
 
     pub fn nt(&mut self, name: &str) -> NtId {

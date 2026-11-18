@@ -47,6 +47,19 @@ reduction was bound up with a recovery decision:
   the repair budget is spent);
 * a recovery came between its last symbol and its reduction.
 
+An ε-node (or a node of them) takes no symbol, and so has two places: it
+begins where it is reduced and ends just after the symbol before it. A
+recovery that deletes terminals and leaves an ε-reduction to be decided on
+the one it exposed falls between the two. A node the ε-node ends stops
+before that recovery: it neither counts the deletions among its own
+repairs nor vouches for its ends (the deleted terminals are material in
+front of the next symbol, outside it). A node the ε-node begins starts
+after it, as any node starts after the material in front of it. The
+ε-node itself vouches for its ends: the state and the terminal decide an
+ε-reduction, whatever came before them, and an incremental parse reusing
+the node that holds it, parsed where nothing was skipped, decides it the
+same way.
+
 A node without a terminal (an ε-node, an empty list) is never reused at
 all. It saves nothing, and nothing in the tree says what it was reduced
 on: the tree places it in front of the material pending when it was
@@ -73,7 +86,8 @@ Recovery's decisions depend on more than the top state:
    `la_wanted_below`, which scans up to 128 states down);
 2. which stack entries are lists, and whether those have pieces (list
    boundaries skip; the set-aside probe stops at a non-empty list);
-3. the next K+1 terminals;
+3. the next `FAR` terminals (`FAR` = 32), which rank the repairs that
+   tie on the K-terminal window (see below);
 4. the repair-density state (where the last recovery was entered, and its
    cluster size);
 5. the repair budget.
@@ -91,8 +105,8 @@ inside it can tell them apart:
 * budget: nothing while the budget cannot be reached inside it, the exact
   count before it when it can.
 
-It is reused where all of that is as recorded and the K+1 terminals after
-it are unchanged (salvage keeps that margin). Splicing it appends its
+It is reused where all of that is as recorded and the `FAR` terminals
+after it are unchanged (salvage keeps that margin). Splicing it appends its
 repairs, shifted to where it now stands, and sets the density state to its
 recorded end. Because a record keeps only what recovery can tell apart, a
 node reused under a configuration that differs only where recovery cannot
@@ -102,6 +116,54 @@ A node gets no record when it began where a recovery had just been entered
 (its first symbol was decided by that recovery), when its own first
 recovery was entered at its first terminal (that recovery's material can
 precede its first symbol), or when it made no repair of its own.
+
+## Ranking repairs
+
+A repair is up to three steps at the error, each inserting a token before
+the lookahead or deleting it (`search_repairs`). A repair is complete when
+the parse then validates at least one of the next K terminals; one that
+does not is extended by a step (repairs leaving the same stack at the same
+point are extended once). Of the complete repairs, the winner is the one
+under which the parse gets furthest through the next `FAR` terminals, a
+deleted terminal counting as passed, and then:
+
+1. the cheaper (fewer steps);
+2. the one deleting fewer of the user's tokens;
+3. the one leaving the stack shallower (a fabricated body or parameter
+   list absorbs unboundedly);
+4. the smaller sequence, insertions before deletions and tokens in order,
+   so the choice never depends on the order repairs were found.
+
+A complete repair reaching the end of the `FAR` terminals cannot be beaten
+by a costlier one, and ends the search. Among insertions of one length the
+order is the window's score and then the far reach, as it was when only
+insertions were searched; what the far reading adds is choosing between
+lengths and kinds. In `[a, x[b, c], d]` (an `x` typed into an array of
+pairs) the cheapest repair, inserting `]` before the index's `,`,
+validates `, c ]` and then closes the array at the real `]`, and the
+rest of a 20,000-element table broke into 200 repairs. Replacing the `,`
+costs a step more and validates everything after it.
+
+A terminal shifted in a permissive state, one that shifts or reduces on
+every terminal the grammar uses except the closing brackets (a token
+tree's), validates nothing: the simulation feeds it on without counting
+it. Otherwise inserting `! {` after a stray name would make the rest of
+the file valid inside a macro invocation, and a token tree in the way
+(`#[serde(rename = "…")]` after `struct P {x`) would end the reading of
+every candidate at the same place, leaving the choice between `: T }` and
+`: T ,` to the tie-breaks. `LrTables::permissive` is computed with the
+tables, from the grammar's bracket pairs.
+
+A lookahead some construct beneath the top still wants (a closer, a
+separator) is never deleted: deleting the `}` of a struct hands what
+follows to the member in progress, a catastrophe the window cannot see.
+If deleting it would get further than the best repair keeping it, the
+construct in progress is set aside as error material instead. A bracket
+opened on the stack and not yet closed holds everything up to its closer:
+nothing beneath it wants a token that is not that closer
+(`LrTables::opens` marks the states entered by an opener). In
+`x[b, c]` inside an array, the `,` belongs to the index, whatever the
+array would take.
 
 ## Material in front of a node
 

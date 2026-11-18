@@ -159,6 +159,7 @@ pub fn compose(
         &format!("{}+{}", host_syn.name, guest_syn.name),
         vocab.names.clone(),
     );
+    syn.brackets_from(&vocab);
     // Host precedence at unchanged ids; guest precedence at offset ids.
     for (t, p) in host_syn.token_prec.iter().enumerate() {
         if let Some((level, assoc)) = p {

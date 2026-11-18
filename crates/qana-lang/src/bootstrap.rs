@@ -238,6 +238,7 @@ pub struct QanaProds {
 
 pub fn qana_syn_grammar(ids: &QanaIds, vocab: &Vocab) -> (SynGrammar, QanaProds) {
     let mut sg = SynGrammar::new("QanaSyn", vocab.names.clone());
+    sg.brackets_from(&vocab);
     let t = |id: TokenId| Sym::T(id);
     let k = |w: &str| Sym::T(ids.kw_id(w));
 

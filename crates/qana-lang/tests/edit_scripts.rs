@@ -258,3 +258,29 @@ fn an_eps_seeded_list_in_front_of_skipped_material_is_not_reused() {
         ";",
     );
 }
+
+/// A recovery that inserted a token after `#define` and then deleted the
+/// `}` and `)` that followed left the directive's empty list to be reduced
+/// on `v`, the token the deletions exposed. Standing where the parse then
+/// was, the ε-list ran the directive past the deletions: the directive
+/// counted them as its own repairs and was reused whole, replaying them,
+/// while the deleted tokens, in front of the next symbol, went back to the
+/// input and were deleted again. An ε-node ends just after the symbol
+/// before it, so the recovery came between the directive's last symbol and
+/// its reduction.
+#[test]
+fn an_eps_node_reduced_after_a_recovery_does_not_take_its_repairs() {
+    equals_batch_after_edit("#define\n})v)*(v)\n#i*/f\nl=l<1^(t&F);\ne Z 1#e Z 1\n", 5, 6, "\n\n");
+}
+
+/// The translation unit's list opens with an ε seed and, in an
+/// incremental parse, grows by splicing reused runs of declarations
+/// instead of by the cons reductions batch makes. A list that took no
+/// symbol stands where an ε-node does; one that has taken runs must not:
+/// still taken for empty, it let the unit vouch for its ends across the
+/// recovery that skipped the `,` after `f`.
+#[test]
+fn a_list_grown_by_reused_runs_has_taken_symbols() {
+    let doc = format!("{}\n", "t a;\n".repeat(20));
+    equals_batch_after_edit(&doc, 20, 21, "f,\n");
+}

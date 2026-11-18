@@ -344,7 +344,7 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@ref(label)` / `@ref(label, call)` | The token at `label` references a name; kinds are `var` (default) and `call` |
 | `@scope` | This node opens a lexical scope (names inside are invisible outside) |
 | `@scope(unordered)` | A scope where forward references are legal (declaration languages) |
-| `@outline(label)` / `@outline(label, kind)` | Contribute a document symbol; kinds are `variable` (default), `constant`, `function`, `struct`, `module`, `class` |
+| `@outline(label)` / `@outline(label, kind)` | Contribute a document symbol named by the symbol at `label`: a token's text, or for a rule, the first `@def` inside it, and failing that its text (`Point<T>`); kinds are `variable` (default), `constant`, `function`, `struct`, `module`, `class` |
 | `@precedence(token)` | Override this alternative's precedence (yacc's `%prec`) |
 | `@type(…)` | Declare this alternative's typing rule (see **The type tier** below) |
 | `@export` | This alternative's `@def` is visible to other files (see **The module tier**) |

@@ -305,10 +305,13 @@ pub struct Symbol {
 /// Outline configuration: which (nt, prod) pairs are outline-worthy and
 /// which RHS symbol position carries the name — a TOKEN child directly,
 /// or a NODE child by DELEGATION: the name is the first `@def` inside
-/// that child's subtree (pre-order). Delegation is what lets a C
-/// function outline as `handler` when its name sits at unbounded depth
-/// in the declarator nest — the binding tier already knows where it
-/// is, so the outline borrows its answer.
+/// that child's subtree (pre-order), and where it holds none, the
+/// child's own text. Delegation is what lets a C function outline as
+/// `handler` when its name sits at unbounded depth in the declarator
+/// nest — the binding tier already knows where it is, so the outline
+/// borrows its answer. A child with no definition in it names its
+/// construct by what it says: a Rust function's `name`, an impl's type
+/// (`Point<T>`).
 #[derive(Clone, Debug, Default)]
 pub struct OutlineConfig {
     pub entries: Vec<OutlineEntry>,
@@ -429,10 +432,11 @@ fn own_symbol(n: &GreenNode, base: u32, cfg: &OutlineConfig) -> Option<Symbol> {
                         selection: (off, off + w),
                     }),
                     // DELEGATION: the name is the first def
-                    // inside this child's subtree.
-                    GreenChild::Node(m) => first_def_in(m, off, &cfg.defs).map(|(name, sel)| {
-                        Symbol { name, kind: e.kind, span, selection: sel }
-                    }),
+                    // inside this child's subtree; failing that,
+                    // the child's own text.
+                    GreenChild::Node(m) => first_def_in(m, off, &cfg.defs)
+                        .or_else(|| significant_text(m, off))
+                        .map(|(name, sel)| Symbol { name, kind: e.kind, span, selection: sel }),
                 };
             }
             sym_idx += 1;
@@ -442,30 +446,84 @@ fn own_symbol(n: &GreenNode, base: u32, cfg: &OutlineConfig) -> Option<Symbol> {
     None
 }
 
+/// The text of a node's real tokens, trivia between two of them read as
+/// one space (`HashMap<K,\n    V>` is `HashMap<K, V>`), and their span:
+/// what a construct named by the node is called. `None` for a node with
+/// no real token.
+fn significant_text(n: &GreenNode, base: u32) -> Option<(String, (u32, u32))> {
+    fn walk(n: &GreenNode, off: &mut u32, text: &mut String, gap: &mut bool, span: &mut Option<(u32, u32)>) {
+        for c in &n.children {
+            match c {
+                // The child's tokens from where it starts; the loop moves
+                // past it below.
+                GreenChild::Node(m) => walk(m, &mut { *off }, text, gap, span),
+                GreenChild::Token(t) if t.trivia => *gap = true,
+                GreenChild::Token(t) if t.is_missing() => {}
+                GreenChild::Token(t) => {
+                    if span.is_some() && *gap {
+                        text.push(' ');
+                    }
+                    text.push_str(&t.text);
+                    let end = *off + t.text.len() as u32;
+                    *span = Some(span.map_or((*off, end), |(s, _)| (s, end)));
+                    *gap = false;
+                }
+            }
+            *off += c.width();
+        }
+    }
+    let (mut off, mut text, mut gap, mut span) = (base, String::new(), false, None);
+    walk(n, &mut off, &mut text, &mut gap, &mut span);
+    span.map(|span| (text, span))
+}
+
 /// `[first, last)` byte span of a node's significant content —
 /// trivia and missing tokens trimmed from BOTH ends, recursively
 /// (a first/last child that is itself a node starts/ends with its
 /// own attached trivia). `None` for an all-trivia node.
+///
+/// It descends to the first real token and to the last, through the
+/// children that hold one (a node's `terms` counts its real tokens), so
+/// it costs the node's depth, not its size: the outline asks it of a
+/// module that is a whole file on every revision.
 fn significant_span(n: &GreenNode, base: u32) -> Option<(u32, u32)> {
-    let mut first: Option<u32> = None;
-    let mut last: Option<u32> = None;
-    let mut off = base;
-    for c in &n.children {
-        let w = c.width();
-        let sub = match c {
-            GreenChild::Token(t) if !t.trivia && !t.is_missing() => Some((off, off + w)),
-            GreenChild::Node(m) => significant_span(m, off),
-            _ => None,
-        };
-        if let Some((s, e)) = sub {
-            if first.is_none() {
-                first = Some(s);
+    let real = |c: &GreenChild| match c {
+        GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+        GreenChild::Node(m) => m.terms > 0,
+    };
+    // The first real token's start.
+    let (mut node, mut off) = (n, base);
+    let first = loop {
+        let mut at = off;
+        let c = node.children.iter().find(|c| {
+            let hit = real(c);
+            if !hit {
+                at += c.width();
             }
-            last = Some(e);
+            hit
+        })?;
+        match c {
+            GreenChild::Token(_) => break at,
+            GreenChild::Node(m) => (node, off) = (m, at),
         }
-        off += w;
-    }
-    Some((first?, last?))
+    };
+    // The last real token's end.
+    let (mut node, mut end) = (n, base + n.width);
+    let last = loop {
+        let mut at = end;
+        let c = node.children.iter().rev().find(|c| {
+            let hit = real(c);
+            if !hit {
+                at -= c.width();
+            }
+            hit
+        })?;
+        match c {
+            GreenChild::Token(_) => break at,
+            GreenChild::Node(m) => (node, end) = (m, at),
+        }
+    };
+    Some((first, last))
 }
 
 // ---------------------------------------------------------------------------

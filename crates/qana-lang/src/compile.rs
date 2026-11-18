@@ -1252,9 +1252,9 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             let r = TokRefIr { text: arg.0.clone(), span: arg.1, is_string: arg.2 };
                             if let Some(id) = resolve_tok(&r, &token_ids, d) {
                                 match prec_levels.get(&id) {
-                                    Some(&(level, _)) => {
+                                    Some(&prec) => {
                                         let idx = sg.prods.len() - 1;
-                                        sg.prods[idx].prec = Some(level);
+                                        sg.prods[idx].prec = Some(prec);
                                     }
                                     None => error(
                                         d,

@@ -475,6 +475,49 @@ rule expr =
     }
 }
 
+/// `@precedence(tok)` takes the token's associativity with its level. A
+/// comparison spelled with two tokens (`>` then `=`, as Rust's lexer cuts
+/// `>=`) ends in `=`, an assignment's token, and takes `<`'s precedence
+/// instead: non-associative, so `1 > = 2 > = 3` is refused. The override
+/// used to take the level alone and make it left-associative, which
+/// grouped the chain as `(1 >= 2) >= 3`.
+#[test]
+fn a_precedence_override_takes_the_tokens_associativity() {
+    const PREC: &str = r#"
+language Cmp
+
+token WS = /\s+/ @trivia
+token NUM = /\d+/ @style(number)
+token LT = "<" @style(operator)
+token GT = ">" @style(operator)
+token EQ = "=" @style(operator)
+
+prec right "="
+prec nonassoc "<" ">"
+
+start expr
+
+rule expr =
+  | Asg: expr "=" expr
+  | Lt: expr "<" expr
+  | Ge: expr ">" "=" expr @precedence("<")
+  | Lit: NUM
+"#;
+    let tc = QanaToolchain::new();
+    let out = compile_source(&tc, PREC);
+    assert!(out.diags.is_empty(), "grammar compiles: {:?}", out.diags);
+    let (lexer, tables) = certify(&out.def).expect("precedence keeps it deterministic");
+
+    let session = IncSession::new(&lexer, &out.def.sg, &tables, "1 > = 2").unwrap();
+    assert!(session.last_repairs.is_empty(), "one comparison parses");
+    assert_eq!(out.def.sg.prod_name(session.tree().unwrap().prod as usize), "Ge");
+
+    for chain in ["1 > = 2 > = 3", "1 > = 2 < 3", "1 < 2 > = 3"] {
+        let session = IncSession::new(&lexer, &out.def.sg, &tables, chain).unwrap();
+        assert!(!session.last_repairs.is_empty(), "`{chain}` chains a non-associative level");
+    }
+}
+
 /// `prec nonassoc`: operators of the level do not chain. Rust's
 /// comparisons and ranges are this way (`a == b == c` is a syntax error,
 /// not `(a == b) == c`): the automaton has no action for a second

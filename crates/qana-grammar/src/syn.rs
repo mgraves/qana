@@ -32,9 +32,10 @@ pub enum Assoc {
 pub struct Prod {
     pub lhs: NtId,
     pub rhs: Vec<Sym>,
-    /// Explicit precedence override; defaults to the precedence of the
-    /// last terminal in `rhs` (yacc semantics).
-    pub prec: Option<u8>,
+    /// Explicit precedence override, the level and associativity of the
+    /// token it names (yacc's `%prec`); defaults to the precedence of the
+    /// last terminal in `rhs`.
+    pub prec: Option<(u8, Assoc)>,
     /// CamelCase variant name for the typed AST (e.g. "LetStmt").
     /// Unnamed productions get positional names in generated code.
     pub name: Option<String>,
@@ -96,7 +97,7 @@ impl SynGrammar {
         self.prods.len() - 1
     }
 
-    pub fn prod_prec(&mut self, lhs: NtId, rhs: Vec<Sym>, prec: u8) -> usize {
+    pub fn prod_prec(&mut self, lhs: NtId, rhs: Vec<Sym>, prec: (u8, Assoc)) -> usize {
         self.prods.push(Prod { lhs, rhs, prec: Some(prec), name: None });
         self.prods.len() - 1
     }
@@ -127,8 +128,8 @@ impl SynGrammar {
 
     /// Effective precedence of a production (yacc default: last terminal).
     pub fn prod_precedence(&self, p: &Prod) -> Option<(u8, Assoc)> {
-        if let Some(level) = p.prec {
-            return Some((level, Assoc::Left));
+        if let Some(prec) = p.prec {
+            return Some(prec);
         }
         p.rhs
             .iter()

@@ -36,7 +36,7 @@ token QMARK = "?" @style(operator)
 token PERCENT = "%" @style(operator)
 
 // The surface's own reserved words (quoted: they ARE .qana keywords).
-keywords NAME = "language" "max_stack" "keywords" "token" "mode" "pair" "prec" "left" "right" "nonassoc" "start" "rule"
+keywords NAME = "language" "max_stack" "keywords" "token" "mode" "pair" "prec" "left" "right" "nonassoc" "start" "rule" "extensions"
 
 pair LPAREN RPAREN
 pair LBRACE RBRACE
@@ -50,6 +50,7 @@ rule decls = decl*
 rule decl =
   | LangDecl: "language" NAME
   | MaxStackDecl: "max_stack" NUM
+  | ExtDecl: "extensions" kw_list
   | KwDecl: "keywords" base:NAME "=" kw_list @ref(base)
   | TokenDecl: token_def
   | ModeDecl: "mode" name:NAME open:"{" token_defs "}" @outline(name, module) @fold(block, open)

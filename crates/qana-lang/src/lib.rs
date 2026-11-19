@@ -66,6 +66,11 @@ pub struct QanaOutcome {
 /// server uses; grammar loads are rare and small).
 #[derive(Clone)]
 pub struct EmbeddedLang {
+    /// The language's name, as its `language` declaration gives it.
+    pub name: String,
+    /// The file extensions it declares as its own (`extensions "rs"`),
+    /// without the dot. Empty when it declares none.
+    pub extensions: Vec<String>,
     pub lexer: &'static CompiledLexer,
     pub sg: &'static SynGrammar,
     pub tables: &'static LrTables,
@@ -100,6 +105,8 @@ impl EmbeddedLang {
         }
         let (lexer, tables) = compile::certify(&out.def)?;
         Ok(EmbeddedLang {
+            name: out.def.lex.name.clone(),
+            extensions: out.def.extensions.clone(),
             lexer: Box::leak(Box::new(lexer)),
             sg: Box::leak(Box::new(out.def.sg)),
             tables: Box::leak(Box::new(tables)),

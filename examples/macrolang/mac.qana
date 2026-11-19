@@ -14,6 +14,7 @@
 // the named v1 refinement.
 
 language MacLang
+extensions "mac"
 
 token WS      = /\s+/ @trivia
 token COMMENT = /\/\/.*/ @trivia @style(comment)

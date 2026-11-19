@@ -36,6 +36,7 @@
 // resolution, but declared instead of defaulted.
 
 language C
+extensions "c" "h"
 
 token WS           = /\s+/ @trivia
 token LINE_COMMENT = /\/\/.*/ @trivia @style(comment)

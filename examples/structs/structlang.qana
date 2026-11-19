@@ -9,6 +9,7 @@
 // The toolchain still ships zero types.
 
 language Structlang
+extensions "sl"
 
 token WS           = /\s+/ @trivia
 token LINE_COMMENT = /#.*/ @trivia @style(comment)

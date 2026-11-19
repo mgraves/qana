@@ -17,6 +17,7 @@ order, so the conventional layout is:
 
 ```
 language Name
+extensions "ext"       // the file extensions that are this language's
 max_stack 8            // only when using modes that push
 
 token …                // lexical layer
@@ -36,6 +37,20 @@ Comments are `//` to end of line.
 ## `language Name`
 
 Names the language. Used in generated artifacts and reports.
+
+## `extensions a "b" …`
+
+The file extensions that are this language's, without the dot:
+`extensions "c" "h"`. An editor that hosts several languages picks the
+language for a file by them, so it needs no table of its own. They are
+read when the grammar compiles (`compile_source(..).def.extensions`),
+which does not certify it, and a certified `EmbeddedLang` carries them
+with its `name`. Words and quoted strings are both accepted, as in
+`keywords`; quote one that starts with a digit or is a `.qana` keyword.
+An extension written with its dot (`".rs"`), an empty one, one with a
+dot, slash or space in it, one listed twice (case aside) and a second
+`extensions` declaration are refused. Declaring none is allowed: the
+language is then not chosen by extension.
 
 ## `max_stack N`
 
@@ -218,7 +233,7 @@ offers a keyword by its text, never by its token's name.
 Bare words and quoted strings are both accepted; quote a word when it
 collides with a `.qana` keyword (`language`, `max_stack`, `keywords`,
 `token`, `mode`, `pair`, `prec`, `left`, `right`, `nonassoc`, `start`,
-`rule`).
+`rule`, `extensions`).
 
 ---
 

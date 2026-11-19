@@ -69,6 +69,7 @@
 // objects. examples/rust/README.md has what it was measured on.
 
 language Rust
+extensions "rs"
 max_stack 8
 
 token WS           = /\s+/      @trivia

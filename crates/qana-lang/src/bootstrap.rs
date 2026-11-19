@@ -18,7 +18,7 @@ use qana_grammar::Vocab;
 /// style class of the same name in attribute arguments.)
 pub const RG_KEYWORDS: &[&str] = &[
     "language", "max_stack", "keywords", "token", "mode", "pair", "prec", "left", "right",
-    "nonassoc", "start", "rule",
+    "nonassoc", "start", "rule", "extensions",
 ];
 
 pub struct QanaIds {
@@ -192,6 +192,7 @@ pub struct QanaProds {
     pub decls_more: usize,
     pub lang_decl: usize,
     pub max_stack_decl: usize,
+    pub ext_decl: usize,
     pub kw_decl: usize,
     pub token_decl: usize,
     pub mode_decl: usize,
@@ -272,6 +273,7 @@ pub fn qana_syn_grammar(ids: &QanaIds, vocab: &Vocab) -> (SynGrammar, QanaProds)
 
     let p_lang = sg.prod_named(decl, "LangDecl", vec![k("language"), t(ids.name)]);
     let p_max_stack = sg.prod_named(decl, "MaxStackDecl", vec![k("max_stack"), t(ids.num)]);
+    let p_ext_decl = sg.prod_named(decl, "ExtDecl", vec![k("extensions"), n(kw_list)]);
     let p_kw_decl =
         sg.prod_named(decl, "KwDecl", vec![k("keywords"), t(ids.name), t(ids.eq), n(kw_list)]);
     let p_token_decl = sg.prod_named(decl, "TokenDecl", vec![n(token_def)]);
@@ -381,6 +383,7 @@ pub fn qana_syn_grammar(ids: &QanaIds, vocab: &Vocab) -> (SynGrammar, QanaProds)
         decls_more: p_decls_more,
         lang_decl: p_lang,
         max_stack_decl: p_max_stack,
+        ext_decl: p_ext_decl,
         kw_decl: p_kw_decl,
         token_decl: p_token_decl,
         mode_decl: p_mode_decl,

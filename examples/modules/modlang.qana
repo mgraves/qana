@@ -13,6 +13,7 @@
 // (delete `pub`) and watch app.ml's import turn into an access error.
 
 language Modlang
+extensions "ml"
 
 token WS           = /\s+/ @trivia
 token LINE_COMMENT = /#.*/ @trivia @style(comment)

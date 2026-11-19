@@ -37,6 +37,9 @@ pub struct QanaDiag {
 pub struct LangDef {
     pub lex: LexGrammar,
     pub sg: SynGrammar,
+    /// The file extensions the language declares as its own (`extensions
+    /// "rs"`), without the dot, as written. Empty when it declares none.
+    pub extensions: Vec<String>,
     pub binding: BindingConfig,
     /// The declared type tier (`@type` annotations, as data). Empty
     /// when the grammar declares none — and then so is the tier.
@@ -218,6 +221,7 @@ enum IdEvent {
 struct FileIr {
     language: Option<(String, (u32, u32))>,
     max_stack: Option<(u8, (u32, u32))>,
+    extensions: Option<Vec<String>>,
     events: Vec<IdEvent>,
     mode_names: Vec<(String, (u32, u32))>,
     brackets: Vec<(TokRefIr, TokRefIr)>,
@@ -369,6 +373,35 @@ fn lower(tree: &GreenNode, p: &QanaProds, diags: &mut Vec<QanaDiag>) -> FileIr {
                     }),
                 }
             }
+        } else if prod == p.ext_decl {
+            let Some((_, keyword)) = d.tok(0) else { continue };
+            if ir.extensions.is_some() {
+                diags.push(QanaDiag { span: keyword, msg: "duplicate `extensions`".into(), severity: 1 });
+                continue;
+            }
+            let mut extensions: Vec<String> = Vec::new();
+            if let Some(list) = d.node(1) {
+                for item in list.items() {
+                    let Some((t, s)) = item.tok(0) else { continue };
+                    let text = if item.n.prod == p.kw_str as u16 { unquote(&t.text) } else { t.text.clone() };
+                    let problem = if text.is_empty() {
+                        Some("an extension is not empty".to_string())
+                    } else if let Some(bare) = text.strip_prefix('.') {
+                        Some(format!("an extension is written without its dot: `{bare}`, not `{text}`"))
+                    } else if text.contains(['.', '/', '\\']) || text.chars().any(char::is_whitespace) {
+                        Some(format!("`{text}` is not a file extension"))
+                    } else if extensions.iter().any(|e| e.eq_ignore_ascii_case(&text)) {
+                        Some(format!("extension `{text}` is declared twice"))
+                    } else {
+                        None
+                    };
+                    match problem {
+                        Some(msg) => diags.push(QanaDiag { span: s, msg, severity: 1 }),
+                        None => extensions.push(text),
+                    }
+                }
+            }
+            ir.extensions = Some(extensions);
         } else if prod == p.kw_decl {
             let Some((base, base_span)) = d.tok(1) else { continue };
             let mut items = Vec::new();
@@ -528,6 +561,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
     };
 
     let lang_name = ir.language.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| "Lang".into());
+    let extensions = ir.extensions.clone().unwrap_or_default();
     let mode_names: Vec<String> = std::iter::once("DEFAULT".to_string())
         .chain(ir.mode_names.iter().map(|(n, _)| n.clone()))
         .collect();
@@ -1947,6 +1981,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             LangDef {
                 lex,
                 sg,
+                extensions,
                 binding,
                 types: type_cfg,
                 macros,

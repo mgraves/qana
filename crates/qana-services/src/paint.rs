@@ -191,9 +191,14 @@ fn overlay_marks(db: &mut SemDb, uri: &str) -> Vec<((u32, u32), u8)> {
             Some(Target::Local { .. }) => MOD_REF,
             Some(Target::Foreign { .. }) => MOD_REF | MOD_FOREIGN,
             // Import refs that share a def's token (`use x;`) stay
-            // quiet when unresolved-as-import but present-as-def.
-            _ if r.kind == RefKind::Qualified || r.kind == RefKind::Var
-                || r.kind == RefKind::Call || r.kind == RefKind::Import =>
+            // quiet when unresolved-as-import but present-as-def. A ref
+            // that escapes (`Target::Escapes`) is never unresolved: it
+            // may name what this file cannot see.
+            Some(Target::Unresolved)
+                if (r.kind == RefKind::Qualified
+                    || r.kind == RefKind::Var
+                    || r.kind == RefKind::Call
+                    || r.kind == RefKind::Import) =>
             {
                 MOD_UNRESOLVED
             }
@@ -708,7 +713,10 @@ pub fn facts_at(db: &mut SemDb, uri: &str, text: &str, offset: u32) -> Option<Fa
         card.name = r.name.clone();
         card.ns = (!r.ns.is_empty()).then(|| r.ns.clone());
         card.def_site = db.definition(uri, offset);
-        if card.def_site.is_none() {
+        // A name that escapes is not a problem: it may be defined where
+        // this file cannot see.
+        card.escapes = card.def_site.is_none() && db.escapes(uri, offset);
+        if card.def_site.is_none() && !card.escapes {
             let not_exp = db.not_exported(uri);
             card.problem = Some(if not_exp.iter().any(|(_, s)| *s == r.span) {
                 format!("`{}` exists but is not exported", r.name)

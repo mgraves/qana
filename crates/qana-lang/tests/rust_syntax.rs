@@ -123,7 +123,7 @@ fn what_rustc_refuses_is_refused() {
 fn a_condition_takes_no_struct_literal() {
     assert_eq!(
         stmt("if x == S {} else {}"),
-        "(IfElse if (CEq x = = S) (Block { }) else (Block { }))"
+        "(IfElse if (IfThen (CEq x = = S) (Block { })) else (Block { }))"
     );
     assert_eq!(
         stmt("let s = S { a: 1 };"),
@@ -147,12 +147,12 @@ fn a_block_like_expression_ends_its_statement() {
     );
     assert_eq!(
         stmt("if a {} else {}?;"),
-        "(ExprStmt (SBlockTry (IfElse if a (Block { }) else (Block { })) ?) ;)"
+        "(ExprStmt (SBlockTry (IfElse if (IfThen a (Block { })) else (Block { })) ?) ;)"
     );
     // In an operand's place it is an operand.
     assert_eq!(
         stmt("let x = if a { 1 } else { 2 } + 1;"),
-        "(LetStmt let x (LetInit = (Add (IfElse if a (Block { 1 }) else (Block { 2 })) + 1)) ;)"
+        "(LetStmt let x (LetInit = (Add (IfElse if (IfThen a (Block { 1 })) else (Block { 2 })) + 1)) ;)"
     );
 }
 
@@ -160,7 +160,7 @@ fn a_block_like_expression_ends_its_statement() {
 fn let_chains_and_let_else() {
     assert_eq!(
         stmt("if let Some(a) = x && a > 0 {}"),
-        "(IfNoElse if (CAnd (CLet let (TupleStructPat Some ( a )) = x) & & (CGt a > 0)) (Block { }))"
+        "(IfNoElse if (IfThen (CAnd (CLet let (TupleStructPat Some ( a )) = x) & & (CGt a > 0)) (Block { })))"
     );
     assert_eq!(
         stmt("let Some(x) = y else { return };"),
@@ -169,7 +169,7 @@ fn let_chains_and_let_else() {
     // `else` after `if` belongs to the `if`.
     assert_eq!(
         stmt("let x = if a { b } else { c };"),
-        "(LetStmt let x (LetInit = (IfElse if a (Block { b }) else (Block { c }))) ;)"
+        "(LetStmt let x (LetInit = (IfElse if (IfThen a (Block { b })) else (Block { c }))) ;)"
     );
 }
 

@@ -54,7 +54,8 @@ pub struct LrTables {
     /// re-check on a nonterminal shift.
     pub fragile: Vec<bool>,
     /// List-shaped nonterminals (envelope L4): exactly one cons prod
-    /// `L → L α` (nt not recurring in α, non-fragile) and one seed prod.
+    /// `L → L α` (nt not recurring in α, non-fragile) and one seed prod,
+    /// neither keeping its node ([`crate::syn::Prod::keep_node`]).
     /// Their trees use balanced LIST/RUN nodes instead of cons spines.
     pub lists: std::collections::HashMap<u16, ListShape>,
     /// States that take every token the grammar uses but the closers of
@@ -123,6 +124,10 @@ fn detect_lists(g: &SynGrammar, fragile: &[bool]) -> std::collections::HashMap<u
             _ => continue,
         };
         if fragile[cons as usize] || fragile[seed as usize] {
+            continue;
+        }
+        // A production whose node means something keeps it.
+        if g.prods[cons as usize].keep_node || g.prods[seed as usize].keep_node {
             continue;
         }
         let alpha = &g.prods[cons as usize].rhs[1..];

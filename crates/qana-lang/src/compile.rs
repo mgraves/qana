@@ -1004,6 +1004,10 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
         span: (u32, u32),
     }
     let mut syn_styles: Vec<SynStyle> = Vec::new();
+    // Definitions and references labelled on a RULE (production, symbol
+    // position, label, span): they reach their name token through the
+    // binding passes, checked once every chain is known.
+    let mut bind_rules: Vec<(u16, usize, String, (u32, u32))> = Vec::new();
     // The rules EBNF sugar generates (`x*`, `x?`, `x+ % ","`): a class
     // given to one passes to its elements.
     let mut sugar_nts: Vec<u16> = Vec::new();
@@ -1132,6 +1136,10 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             }
             let prod = sg.prod_named(nt, &alt.label, rhs) as u16;
             prod_spans.push(alt.label_span);
+            // An alternative's attributes are said of its node, which a
+            // balanced list would not keep. `@precedence` is said of the
+            // parse, not the node.
+            sg.prods[prod as usize].keep_node = alt.attrs.iter().any(|a| a.name != "precedence");
 
             // `@type`, `@export`, and `@import` are resolved AFTER the
             // other attributes: they read the binding entries `@def`/
@@ -1142,11 +1150,13 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             let mut pending_export: Option<(u32, u32)> = None;
             let mut pending_import: Option<usize> = None;
             let mut pending_ns: Option<usize> = None;
+            let mut pending_child_ns: Vec<usize> = Vec::new();
             let mut pending_macro: Option<usize> = None;
             let mut pending_splice: Option<usize> = None;
             let mut pending_reflect: Option<usize> = None;
             let mut pending_module: Option<usize> = None;
             let mut pending_qualify: Option<usize> = None;
+            let mut pending_defer: Option<usize> = None;
 
             for (ai, a) in alt.attrs.iter().enumerate() {
                 let pos_of = |d: &mut Vec<QanaDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
@@ -1164,12 +1174,38 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                 };
                 match a.name.as_str() {
                     "def" => {
-                        if a.args.len() == 1 {
-                            if let Some(k) = pos_of(d, &a.args[0]) {
-                                binding.defs.push((nt, prod, k));
+                        // `@def(x)`, then any of `hoisted` (visible
+                        // throughout its scope whatever the order) and
+                        // `open` (its namespace has members the binding
+                        // cannot see), each once.
+                        if a.args.is_empty() || a.args.len() > 3 {
+                            error(d, a.name_span, "@def takes a label, then `hoisted` or `open` or both".into());
+                        } else if let Some(k) = pos_of(d, &a.args[0]) {
+                            let mut seen: Vec<&str> = Vec::new();
+                            for flag in &a.args[1..] {
+                                match flag.0.as_str() {
+                                    f if seen.contains(&f) => {
+                                        error(d, flag.1, format!("`{f}` is given twice"))
+                                    }
+                                    "hoisted" => {
+                                        seen.push("hoisted");
+                                        binding.hoisted.push((nt, prod));
+                                    }
+                                    "open" => {
+                                        seen.push("open");
+                                        binding.open.push((nt, prod));
+                                    }
+                                    other => error(
+                                        d,
+                                        flag.1,
+                                        format!("unknown definition kind `{other}` (`hoisted` or `open`)"),
+                                    ),
+                                }
                             }
-                        } else {
-                            error(d, a.name_span, "@def takes one label argument".into());
+                            if matches!(sg.prods[prod as usize].rhs.get(k), Some(Sym::N(_))) {
+                                bind_rules.push((prod, k, a.args[0].0.clone(), a.args[0].1));
+                            }
+                            binding.defs.push((nt, prod, k));
                         }
                     }
                     "ref" => {
@@ -1179,34 +1215,72 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             let kind = match a.args.get(1).map(|x| x.0.as_str()) {
                                 None | Some("var") => RefKind::Var,
                                 Some("call") => RefKind::Call,
+                                Some("escaping") => RefKind::Escaping,
                                 Some(other) => {
                                     error(
                                         d,
                                         a.args[1].1,
-                                        format!("unknown ref kind `{other}` (var, call)"),
+                                        format!("unknown ref kind `{other}` (var, call, escaping)"),
                                     );
                                     RefKind::Var
                                 }
                             };
+                            if matches!(sg.prods[prod as usize].rhs.get(k), Some(Sym::N(_))) {
+                                bind_rules.push((prod, k, a.args[0].0.clone(), a.args[0].1));
+                            }
                             binding.refs.push((nt, prod, k, kind));
                         }
                     }
-                    "scope" => {
-                        // `@scope` = ordered lexical scope; `@scope(unordered)`
-                        // = declaration-language scope (forward refs legal).
-                        let unordered = match a.args.first() {
-                            None => false,
-                            Some((arg, _, _)) if arg == "unordered" => true,
-                            Some((arg, span, _)) => {
-                                error(
-                                    d,
-                                    *span,
-                                    format!("unknown scope kind `{arg}` (only `unordered`)"),
-                                );
-                                false
+                    "defer" => {
+                        // `@defer(pat[, after])`: the defs inside `pat`
+                        // take effect after the node, or after `after`.
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@defer takes the pattern's label and an optional label to take effect after".into());
+                        } else if pending_defer.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @defer".into());
+                        } else if let Some(pat) = pos_of(d, &a.args[0]) {
+                            let after = match a.args.get(1) {
+                                None => Some(None),
+                                Some(arg) => pos_of(d, arg).map(Some),
+                            };
+                            if let Some(after) = after {
+                                if after.is_some_and(|after| after < pat) {
+                                    error(d, a.args[1].1, format!("`{}` comes before the pattern: its defs would take effect before they are read", a.args[1].0));
+                                } else {
+                                    binding.defers.push((nt, prod, pat, after));
+                                }
                             }
-                        };
-                        binding.scopes.push((nt, prod, unordered, false));
+                        }
+                    }
+                    "scope" => {
+                        // `@scope` = ordered lexical scope, and any of:
+                        // `unordered` (forward refs legal: a declaration
+                        // language), `barrier` (names outside it are not
+                        // seen inside: a Rust module), `members` (its own
+                        // defs are reached only by qualified names).
+                        let (mut unordered, mut barrier, mut members) = (false, false, false);
+                        for (arg, span, _) in &a.args {
+                            let flag = match arg.as_str() {
+                                "unordered" => &mut unordered,
+                                "barrier" => &mut barrier,
+                                "members" => &mut members,
+                                _ => {
+                                    error(
+                                        d,
+                                        *span,
+                                        format!("unknown scope kind `{arg}` (`unordered`, `barrier` or `members`)"),
+                                    );
+                                    continue;
+                                }
+                            };
+                            if std::mem::replace(flag, true) {
+                                error(d, *span, format!("`{arg}` is given twice"));
+                            }
+                        }
+                        binding.scopes.push((nt, prod, unordered, barrier));
+                        if members {
+                            binding.members.push((nt, prod));
+                        }
                     }
                     "fold" => {
                         if a.args.is_empty() || a.args.len() > 3 {
@@ -1378,8 +1452,10 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                         // live in a NAMED namespace. Named namespaces
                         // resolve hoisted (order-free) in every scope:
                         // per-namespace ordering as declared data.
-                        if a.args.len() != 1 || a.args[0].2 {
-                            error(d, a.name_span, "@ns takes one bare namespace name".into());
+                        if a.args.is_empty() || a.args[0].2 {
+                            error(d, a.name_span, "@ns takes a bare namespace name, and the labels whose subtrees stand in it".into());
+                        } else if a.args.len() > 1 {
+                            pending_child_ns.push(ai);
                         } else if pending_ns.replace(ai).is_some() {
                             error(d, a.name_span, "duplicate @ns".into());
                         }
@@ -1460,13 +1536,38 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             }
             // ---- per-namespace ordering: `@ns` ----
             if let Some(ai) = pending_ns {
+                // `@ns(name)`: this alternative's def and refs live in
+                // `name`.
                 let a = &alt.attrs[ai];
                 let has_site = binding.defs.iter().any(|e| e.0 == nt && e.1 == prod)
                     || binding.refs.iter().any(|r| r.0 == nt && r.1 == prod);
                 if has_site {
                     binding.namespaces.push((nt, prod, a.args[0].0.clone()));
                 } else {
-                    error(d, a.name_span, "@ns requires @def or @ref on the same alternative".into());
+                    error(d, a.name_span, "@ns(name) requires @def or @ref on the same alternative (`@ns(name, label…)` places the labelled children's subtrees)".into());
+                }
+            }
+            for &ai in &pending_child_ns {
+                // `@ns(name, label…)`: the defs and refs in the subtrees of
+                // the labelled children live in `name` (where a path
+                // stands decides what it names), each child in one.
+                let a = &alt.attrs[ai];
+                for label in &a.args[1..] {
+                    if let Some(k) = rule_pos_of(d, &positions, &sg, prod, label) {
+                        if binding
+                            .child_namespaces
+                            .iter()
+                            .any(|e| e.0 == nt && e.1 == prod && e.2 == k)
+                        {
+                            error(
+                                d,
+                                label.1,
+                                format!("`{}` already stands in a namespace", label.0),
+                            );
+                        } else {
+                            binding.child_namespaces.push((nt, prod, k, a.args[0].0.clone()));
+                        }
+                    }
                 }
             }
             if let Some(ai) = pending_import {
@@ -1531,17 +1632,14 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                         );
                         None
                     }
-                    Some(&k) => match sg.prods[prod as usize].rhs.get(k) {
-                        Some(Sym::T(_)) => Some(k),
-                        _ => {
-                            error(
-                                d,
-                                a.args[1].1,
-                                format!("`{}` labels a rule — the qualified name must be a token", a.args[1].0),
-                            );
-                            None
+                    Some(&k) => {
+                        // A rule reaches its name token through the
+                        // binding passes, as `@def` and `@ref` do.
+                        if matches!(sg.prods[prod as usize].rhs.get(k), Some(Sym::N(_))) {
+                            bind_rules.push((prod, k, a.args[1].0.clone(), a.args[1].1));
                         }
-                    },
+                        Some(k)
+                    }
                 };
                 if let (Some(base_child), Some(name_child)) = (base, name) {
                     if binding.refs.iter().any(|r| r.0 == nt && r.1 == prod && r.3 == RefKind::Import) {
@@ -1953,6 +2051,13 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
     apply_syntax_styles(d, &sg, &mut styles, &sugar_nts, syn_styles.iter().map(|st| {
         (st.prod, st.position, st.class, st.label.as_str(), st.span)
     }));
+    binding.passes = binding_passes(
+        d,
+        &sg,
+        &sugar_nts,
+        syn_styles.iter().filter(|st| st.class.is_none()).map(|st| (st.prod, st.position)),
+        &bind_rules,
+    );
 
     // `@scope(unordered)` on the START rule means the FILE's own scope is
     // unordered — a declaration language, where top-level names see each
@@ -2077,6 +2182,108 @@ fn apply_syntax_styles<'r>(
             }
         }
     }
+}
+
+/// Where a definition or reference labelled on a rule finds its name: for
+/// each production that passes the name it is given to ONE child (an
+/// `@style(inherit, …)` with one label, or an option's element), that
+/// child. A name passed to several children (a list's elements, an
+/// inherit with several labels) has no one token to bind, so a binding
+/// that reaches such a production through its rule is refused, as is one
+/// whose rule passes no name on to a token at all.
+fn binding_passes(
+    d: &mut Vec<QanaDiag>,
+    sg: &SynGrammar,
+    sugar_nts: &[u16],
+    inherits: impl Iterator<Item = (u16, usize)>,
+    bind_rules: &[(u16, usize, String, (u32, u32))],
+) -> Vec<(u16, u16, usize)> {
+    // What each production passes a name to: the same pass-through the
+    // style classes follow.
+    let mut passes: Vec<Vec<usize>> = vec![Vec::new(); sg.prods.len()];
+    for (prod, p) in sg.prods.iter().enumerate() {
+        if sugar_nts.contains(&p.lhs) {
+            for k in 0..p.rhs.len() {
+                let separator = p.rhs.len() == 3 && k == 1 && matches!(p.rhs[k], Sym::T(_));
+                if !separator {
+                    passes[prod].push(k);
+                }
+            }
+        }
+    }
+    for (prod, k) in inherits {
+        passes[prod as usize].push(k);
+    }
+    // Which rules hand a name on to one token, through rules that do.
+    let mut carries = vec![false; sg.nt_names.len()];
+    loop {
+        let mut grew = false;
+        for (prod, p) in sg.prods.iter().enumerate() {
+            if carries[p.lhs as usize] || passes[prod].len() != 1 {
+                continue;
+            }
+            let reaches = match p.rhs[passes[prod][0]] {
+                Sym::T(_) => true,
+                Sym::N(m) => carries[m as usize],
+            };
+            if reaches {
+                carries[p.lhs as usize] = true;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    for (prod, k, label, span) in bind_rules {
+        let Sym::N(m) = sg.prods[*prod as usize].rhs[*k] else { continue };
+        // Every production the name can travel through passes it to one
+        // child.
+        let mut several = false;
+        let mut seen = vec![false; sg.nt_names.len()];
+        let mut todo = vec![m];
+        while let Some(nt) = todo.pop() {
+            if std::mem::replace(&mut seen[nt as usize], true) {
+                continue;
+            }
+            for (q, p) in sg.prods.iter().enumerate().filter(|(_, p)| p.lhs == nt) {
+                if passes[q].len() > 1 {
+                    several = true;
+                    d.push(QanaDiag {
+                        span: *span,
+                        msg: format!(
+                            "`{label}` reaches the rule `{}`, whose alternative `{}` passes its name to {} symbols: there is no one token to bind",
+                            sg.nt_names[nt as usize],
+                            sg.prod_name(q),
+                            passes[q].len()
+                        ),
+                        severity: 1,
+                    });
+                }
+                for &c in &passes[q] {
+                    if let Sym::N(next) = p.rhs[c] {
+                        todo.push(next);
+                    }
+                }
+            }
+        }
+        if !several && !carries[m as usize] {
+            d.push(QanaDiag {
+                span: *span,
+                msg: format!(
+                    "`{label}` is the rule `{}`, which passes no name on to a token: give the alternatives that hold its name `@style(inherit, …)` with one label",
+                    sg.nt_names[m as usize]
+                ),
+                severity: 1,
+            });
+        }
+    }
+    sg.prods
+        .iter()
+        .enumerate()
+        .filter(|(prod, _)| passes[*prod].len() == 1)
+        .map(|(prod, p)| (p.lhs, prod as u16, passes[prod][0]))
+        .collect()
 }
 
 /// Label → symbol position that must hold a RULE (shared by the module

@@ -618,6 +618,9 @@ fn cmd_defs(args: &Args) {
             }
             Some((duri, _)) => green(&format!("→ {duri}")),
             None if unresolved.contains(&(r.name.clone(), r.span)) => red("unresolved"),
+            // Not defined here, and possibly defined where this file
+            // cannot see: not a problem.
+            None if db.escapes(doc_path, r.span.0) => render::yellow("escapes the file"),
             // The name exists somewhere in the file but is not in scope
             // at this point — declared later in an ordered language, or
             // sealed inside another scope.

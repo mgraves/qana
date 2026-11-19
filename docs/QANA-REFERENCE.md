@@ -378,10 +378,11 @@ Attributes attach to a **labelled alternative**, after its symbols.
 
 | Attribute | Effect |
 | --- | --- |
-| `@def(label)` | The token at `label` defines a name |
-| `@ref(label)` / `@ref(label, call)` | The token at `label` references a name; kinds are `var` (default) and `call` |
+| `@def(label)` / `@def(label, flag…)` | The name at `label` is defined (see **Names through rules** for a label on a rule). Flags, each at most once: `hoisted` — visible throughout its scope, before it as well as after, even in an ordered scope (Rust's items in a block, or at the top of a file whose `let`s stay define-before-use); `open` — the namespace the name introduces has members the binding cannot see (a Rust type's `impl` blocks, a macro's expansion, a glob import), so a qualified name under it that is not among the members it does see escapes instead of being an error. Without `@module`, an open name has no members the binding sees: `Point::new` under `struct Point` escapes |
+| `@ref(label)` / `@ref(label, kind)` | The name at `label` is referenced; kinds are `var` (default), `call`, and `escaping` — a name that may be defined where the file cannot see (a prelude, another crate, a glob import, a macro's expansion): it binds as `var` does when the file defines it, and otherwise is never diagnosed or painted unresolved |
+| `@defer(pattern)` / `@defer(pattern, after)` | The names the `pattern` child defines take effect after the `after` child, or after this whole node: `let x = x;` reads the earlier `x`, and `for x in xs` reads `xs` before the loop's `x` exists |
 | `@scope` | This node opens a lexical scope (names inside are invisible outside) |
-| `@scope(unordered)` | A scope where forward references are legal (declaration languages) |
+| `@scope(kind…)` | A scope with any of these, each at most once: `unordered` — forward references are legal (declaration languages); `barrier` — names outside it are not seen inside (a Rust module, which sees its parent's items only through `use super::…`); `members` — what is defined directly in it is reached only by a qualified name, never a plain one (a type's fields, an enum's variants, an `impl`'s or a trait's items) |
 | `@outline(label)` / `@outline(label, kind)` | Contribute a document symbol named by the symbol at `label`: a token's text, or for a rule, the first `@def` inside it, and failing that its text (`Point<T>`); kinds are `variable` (default), `constant`, `function`, `struct`, `module`, `class` |
 | `@style(class, label…)` | The symbols at the labels are painted `class`: a token takes it, a rule is given it and passes it on where its alternatives say (see **Classes from the syntax** below) |
 | `@style(inherit, label…)` | The symbols at the labels are painted the class this alternative's node is given, if it is given one |
@@ -390,9 +391,10 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@type(…)` | Declare this alternative's typing rule (see **The type tier** below) |
 | `@export` | This alternative's `@def` is visible to other files (see **The module tier**) |
 | `@import(label)` | The `label` token names an import: it resolves against other files' EXPORTS only (see **The module tier**) |
-| `@module(body)` | The `@def` on this alternative introduces a NAMESPACE; the defs inside the `body` child are its members |
-| `@qualify(base, name)` | The `name` token resolves among the members of what `base` resolves to (`a::b` paths; nest via a recursive path rule) |
+| `@module(body)` | The `@def` on this alternative introduces a NAMESPACE; its members are the body's own defs — the shallowest inside the `body` child, so a `let` in one of a module's functions is none of them |
+| `@qualify(base, name)` | The `name` token resolves among the members of what `base` resolves to (`a::b` paths; nest via a recursive path rule). The base is the name the `base` child passes on (`Vec` of `Vec::<T>`), or, when it passes none, the last reference inside it |
 | `@ns(name)` | This alternative's `@def`/`@ref` live in the NAMED namespace `name`: refs only bind same-namespace defs, and named namespaces resolve hoisted (order-free) in every scope — per-namespace ordering (C struct tags are forward-declarable while values stay define-before-use) |
+| `@ns(name, label…)` | The subtrees at the labels stand in namespace `name`: every def and ref inside them without a namespace of its own takes it. One path rule serves values, types and macros, each use giving it its namespace (`MacUse: p:path "!" … @ns(macro, p)`). It places only the labelled children: an alternative whose own `@def` stands in the namespace too says `@ns(name)` as well, and one whose children stand in different namespaces gives several, each child in one |
 | `@macro([params,] body)` | The meta tier: this alternative's `@def` introduces a MACRO whose parameters are the defs inside the `params` child and whose template is the `body` child — real syntax, parsed and bound at the definition. Substitution is binding-guided: body refs that resolve to a parameter get the corresponding argument's text. It is also SHAPE-PRESERVING: the expander compares the declared `prec` strengths of the argument, the hole, the body, and the use site, and where splicing would regroup them it wraps the text in the rule's own grouping production (`Paren: "(" expr ")"` — discovered by shape, whatever the delimiters are). A body with no declared shape (C's `pp_tokens`) splices textually, and a rule with no grouping production yields a diagnostic rather than a silent regrouping |
 | `@splice(name[, args])` | Expansion may happen HERE: when `name`'s `@ref` resolves to a macro, this node is replaced by the substituted body (`args` is the argument-list child for parameterized macros). Refs without `@splice` never expand — C's `#ifdef X` stays closed while `return X;` opens. Run `qana expand` to materialize (deterministic `<stem>.exp.<ext>` + provenance sidecar, write-if-changed, `--check` = the read-only drift gate). Expansion is HYGIENIC: every reference that survives must resolve to the same definition afterwards as where it was written, and where it would not, the expander renames the binder that swallowed it (reported as a note) — falling back to a diagnostic when no name the grammar admits is available |
 | `@reflect(ty[, "sep"[, facet…]])` | REFLECTION, on a `@splice` alternative: the macro's parameters bind PER MEMBER of the type `ty` resolves to — one body per member, joined by `sep`. The parameters take the declared FACETS in order (default `name, type`; available: `name`, `type`, `owner`, `index`, `count`), and a facet/parameter count mismatch is diagnosed. `name`/`type`/`owner` are copies of the declaration, so provenance points at the field or the struct; `index`/`count` are computed. The member map is the type tier's own `deftype`/`def` declarations, in whichever file declared them: a type resolving into a sibling reflects its members from there. Macro bodies are type-EXEMPT at the definition (templates type per instantiation, in the materialized output) |
@@ -415,6 +417,24 @@ rule expr =
 `@def`, `@ref`, and `@scope` are the entire configuration for
 go-to-definition, find-references, rename, and scope-aware completion.
 There is no separate symbol-table pass to write.
+
+**Names through rules.** The label of a `@def`, `@ref` or `@qualify`
+may name a rule rather than a token. The name is then the token the rule
+passes its class to: through `@style(inherit, label)` with a single
+label, and through the rules EBNF sugar generates, however deep the
+chain. With `rule name = Name: t:IDENT @style(inherit, t)`,
+`Bind: n:name @def(n)` defines the identifier, and so does a pattern
+rule that passes to `name`. A rule that passes to several symbols, or
+to none, has no one token to bind, and naming it is an error.
+
+**Lists that keep their nodes.** A rule of list shape (two
+alternatives, `L → L α` and a seed) is stored as balanced runs, whose
+nodes are not its alternatives'. When either alternative carries an
+attribute (other than `@precedence`), the rule keeps its nodes
+instead, so that what the attribute says of the node holds:
+`More: b:path "::" n:name @qualify(b, n)` qualifies every segment. A
+rule kept this way is a chain as deep as the list is long; for a long
+list, annotate the element rule rather than the list.
 
 `@scope(unordered)` on the **start rule** declares the whole file an
 unordered scope — a declaration language, where a top-level name is
@@ -612,6 +632,13 @@ re-export chains (`pub use` is just `@export` on an import; it needs
 no new form). Same-file paths see all members; crossing a file
 requires the member exported. Path errors are precise: "no member",
 "is not a module", and "exists in the module but is not exported".
+A qualified name ESCAPES — is neither an error nor painted unresolved —
+when its base escapes (`@ref(base, escaping)`, unresolved), segment
+after segment (`std::mem::swap` in a file that cannot see `std`); when
+its base holds no reference (`self::x` before the grammar declares path
+roots); and when its base names an open namespace (`@def(x, open)`)
+that does not show the name. A base that resolves to a closed module
+keeps the precise errors above.
 `@type(ref, label)` selects which reference feeds a type on
 multi-reference productions (a path's base and name).
 

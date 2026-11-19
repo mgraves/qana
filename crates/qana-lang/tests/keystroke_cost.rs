@@ -312,23 +312,26 @@ fn a_keystroke_that_changes_no_name_keeps_the_items_fragment() {
     }
 }
 
-/// Rust's grammar declares no binding. Its items declare nothing, and
-/// nothing is walked to find that out: not at open, not on a keystroke
-/// inside a module that is one item of a hundred thousand lines. Each
-/// keystroke's fragment is the one the item had, so nothing is resolved
-/// and the painter has nothing to look up.
-#[test]
-fn a_grammar_without_binding_walks_nothing() {
-    let lang = EmbeddedLang::from_qana_source(RUST_QANA).expect("rust.qana certifies");
-    assert!(
-        lang.binding.defs.is_empty() && lang.binding.refs.is_empty() && lang.binding.scopes.is_empty(),
-        "the grammar declares no binding"
-    );
+/// A module of `functions` functions: one item of the file.
+fn one_large_module(functions: usize) -> String {
     let mut text = String::from("pub mod m {\n");
-    for i in 0..2000 {
+    for i in 0..functions {
         text.push_str(&format!("    pub fn f{i}(a: u8) -> u8 {{\n        a + {i}\n    }}\n\n"));
     }
     text.push_str("}\n");
+    text
+}
+
+/// A grammar that declares no binding — Rust's, its binding taken away.
+/// Its items declare nothing, and nothing is walked to find that out:
+/// not at open, not on a keystroke inside a module that is one item of
+/// eight thousand lines. Each keystroke's fragment is the one the item
+/// had, so nothing is resolved and the painter has nothing to look up.
+#[test]
+fn a_grammar_without_binding_walks_nothing() {
+    let mut lang = EmbeddedLang::from_qana_source(RUST_QANA).expect("rust.qana certifies");
+    lang.binding = qana_sem::BindingConfig::default();
+    let text = one_large_module(2000);
     let mut doc = Doc::open(&lang, &text);
     assert_eq!(doc.db.stats.bytes_walked, 0, "open walks nothing");
 
@@ -346,6 +349,48 @@ fn a_grammar_without_binding_walks_nothing() {
         assert_eq!(doc.painter.window_items(), 0, "keystroke {keystroke}: no item to look up");
         assert!(delta.repaints.is_empty(), "keystroke {keystroke}: nothing else repaints");
     }
+}
+
+/// Rust's binding: a module of eight thousand lines is one item, and a
+/// keystroke in one of its functions walks the piece typed in, putting
+/// the rest of the module's fragment together from the parts the last
+/// revision read.
+#[test]
+fn a_keystroke_in_a_large_rust_module_walks_a_piece_or_two() {
+    let lang = EmbeddedLang::from_qana_source(RUST_QANA).expect("rust.qana certifies");
+    let text = one_large_module(2000);
+    let mut doc = Doc::open(&lang, &text);
+    let opened = doc.db.stats;
+    assert!(
+        opened.bytes_walked as usize > text.len() * 9 / 10,
+        "open walks the file, {} bytes of {}",
+        opened.bytes_walked,
+        text.len()
+    );
+
+    let line = doc.line_of("a + 1000");
+    let mut typed = String::from("        a + 1000");
+    for keystroke in 0..10 {
+        typed.push_str(" + a");
+        let before = doc.db.stats;
+        let delta = doc.retype(line, &typed);
+        let cost = since(before, doc.db.stats);
+        assert_eq!(cost.fragments_computed, 1, "keystroke {keystroke}: one item was built");
+        assert!(
+            cost.bytes_walked <= 2 * PIECE_BYTES as u64,
+            "keystroke {keystroke}: a piece or two walked, {} bytes of a {}-byte module",
+            cost.bytes_walked,
+            text.len()
+        );
+        assert!(delta.repaints.is_empty(), "keystroke {keystroke}: nothing else repaints");
+    }
+
+    // What was put together is what the open of the same text says.
+    let now = doc.session.buf.reproduce();
+    let mut fresh = Doc::open(&lang, &now);
+    assert_eq!(*doc.db.symbols(URI), *fresh.db.symbols(URI));
+    assert_eq!(doc.db.resolve(URI), fresh.db.resolve(URI));
+    assert_eq!(doc.painter.frame().lines, fresh.painter.frame().lines);
 }
 
 /// The classes the syntax gives are kept by subtree: a keystroke in one

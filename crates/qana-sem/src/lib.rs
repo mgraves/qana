@@ -71,6 +71,14 @@ pub enum RefKind {
     /// namespaces, the binding-level twin of the type tier's member
     /// form. Resolved eagerly at query time, not in the env fold.
     Qualified,
+    /// A name that may be defined outside what this file can see
+    /// (`@ref(x, escaping)`): a prelude, another crate, a glob import, a
+    /// macro's expansion. It resolves as a variable read does when the
+    /// file defines the name; when it does not, it ESCAPES: it is never
+    /// diagnosed and never painted unresolved, and a project index (which
+    /// sees further) is left to place it. A qualified name whose base
+    /// escapes escapes too (see [`Target::Escapes`]).
+    Escaping,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -112,6 +120,42 @@ pub struct BindingConfig {
     /// That split is per-NAMESPACE ordering: C struct tags are
     /// forward-declarable while its values stay define-before-use.
     pub namespaces: Vec<(u16, u16, String)>,
+    /// (nt, prod, child, namespace) — the defs and refs inside the
+    /// subtree of `child` live in `namespace` (`@ns(name, label…)`),
+    /// unless a production inside declares its own. What a path names
+    /// depends on where the path stands: a macro's path names a macro,
+    /// an attribute's an attribute, and the path rules themselves are
+    /// shared.
+    pub child_namespaces: Vec<(u16, u16, usize, String)>,
+    /// (nt, prod) — this production's def is HOISTED (`@def(x,
+    /// hoisted)`): visible throughout its scope whatever the order,
+    /// while the scope's other defs keep its ordering (Rust's items
+    /// beside its `let`s).
+    pub hoisted: Vec<(u16, u16)>,
+    /// (nt, prod) — the namespace this production's def introduces is
+    /// OPEN (`@def(x, open)`): it has members the binding cannot see
+    /// (Rust's `impl` blocks, a macro's expansion, a glob import), so a
+    /// qualified name under it that is not among the members it can see
+    /// escapes rather than being an error. Without `@module` it has no
+    /// members the binding sees.
+    pub open: Vec<(u16, u16)>,
+    /// (nt, prod) — the scope this production opens holds MEMBERS
+    /// (`@scope(members)`): what is defined directly in it is reached
+    /// only through a qualified name (`E::A`, `Self::new`), never by a
+    /// plain one — a type's fields, an enum's variants, an impl's or a
+    /// trait's items. What is defined in scopes opened inside it is not
+    /// a member, and binds as anything does.
+    pub members: Vec<(u16, u16)>,
+    /// (nt, prod, pattern child, after child) — the defs inside the
+    /// `pattern` child take effect after the node, or after the `after`
+    /// child when given (`@defer(pat[, after])`): `let x = x + 1;` reads
+    /// the earlier `x`, and `for x in xs` does not let `xs` see `x`.
+    pub defers: Vec<(u16, u16, usize, Option<usize>)>,
+    /// (nt, prod, child) — a def or ref labelled on a RULE reaches its
+    /// name token through these: where a production's node is given a
+    /// name, the one child it passes it to (the grammar's
+    /// `@style(inherit, …)` chains, where they pass to one child).
+    pub passes: Vec<(u16, u16, usize)>,
 }
 
 impl BindingConfig {
@@ -167,6 +211,29 @@ pub fn compose_binding(
             ns.clone(),
         ));
     }
+    for (nt, prod, k, ns) in &guest.child_namespaces {
+        out.child_namespaces.push((
+            nt + map.guest_nt_offset,
+            prod + map.guest_prod_offset,
+            *k,
+            ns.clone(),
+        ));
+    }
+    for &(nt, prod) in &guest.hoisted {
+        out.hoisted.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset));
+    }
+    for &(nt, prod) in &guest.open {
+        out.open.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset));
+    }
+    for &(nt, prod) in &guest.members {
+        out.members.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset));
+    }
+    for &(nt, prod, pat, after) in &guest.defers {
+        out.defers.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset, pat, after));
+    }
+    for &(nt, prod, k) in &guest.passes {
+        out.passes.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset, k));
+    }
     out.unordered = host.unordered;
     out
 }
@@ -215,6 +282,12 @@ pub struct Def {
     /// Declared namespace (`@ns`); "" is the default namespace. Named
     /// namespaces resolve hoisted (order-free) in every scope.
     pub ns: String,
+    /// Declared hoisted (`@def(x, hoisted)`): visible throughout its
+    /// scope whatever the order.
+    pub hoisted: bool,
+    /// Declared open (`@def(x, open)`): the namespace it introduces has
+    /// members the binding cannot see.
+    pub open: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,6 +339,9 @@ struct Fragment {
     scope_unordered: Vec<bool>,
     /// Per-scope barrier: visibility and escape stop here.
     scope_barrier: Vec<bool>,
+    /// Per-scope: its own defs are members, reached only by qualified
+    /// names (`@scope(members)`).
+    scope_members: Vec<bool>,
     /// Indices into `defs` of scope-0 definitions, in order — the
     /// item's contribution to the environment (and the signature).
     top_defs: Vec<u32>,
@@ -275,7 +351,9 @@ struct Fragment {
     /// (def index, body span rel) — defs that introduce a NAMESPACE
     /// whose members are the defs inside the span (`@module`).
     modules: Vec<(u32, (u32, u32))>,
-    /// (base child span rel, index into `refs` of the Qualified name).
+    /// (base span rel, index into `refs` of the Qualified name): the
+    /// span of the name the base child passes on, or of the whole child
+    /// when it passes none (see [`base_span`]).
     quals: Vec<((u32, u32), u32)>,
 }
 
@@ -344,16 +422,27 @@ impl Fragment {
 // question's is looked at, to confirm the name. Nothing is hashed but the
 // names being asked about, and nothing is allocated per item.
 
-/// Bit 0 of a signature: the name is in a NAMED namespace. Named
-/// namespaces are hoisted (visible to every item), plain names follow the
-/// root's ordering, and the environment fingerprints fold the two
-/// separately, so the fold has to tell them apart without the name.
-const SIG_NAMED: u64 = 1;
+/// Bit 0 of a signature: the definition is HOISTED, visible to every item
+/// whatever the root's ordering: it is in a named namespace, or declared
+/// hoisted. The environment fingerprints fold hoisted definitions apart
+/// from the plain ones, which follow the root's ordering, so the fold has
+/// to tell them apart without the name.
+const SIG_HOISTED: u64 = 1;
+
+/// Bit 1 of a signature: the definition is declared hoisted
+/// (`@def(x, hoisted)`), in any namespace. A plain name in an ordered root
+/// can then be answered by an item after the asking one.
+const SIG_DECLARED: u64 = 2;
+
+/// The bits of a signature that are not the name's: what a question
+/// compares without.
+const SIG_FLAGS: u64 = SIG_HOISTED | SIG_DECLARED;
 
 /// The signature of one top-level name: a hash of `(ns, name)`, with
-/// [`SIG_NAMED`] saying whether `ns` is a named namespace. Equal names
-/// have equal signatures. A scan always confirms a match against the
-/// names, so a collision there costs a comparison and nothing else.
+/// [`SIG_HOISTED`] set when `ns` is a named namespace. Equal names have
+/// equal signatures, but for [`SIG_FLAGS`]. A scan always confirms a match
+/// against the names, so a collision there costs a comparison and nothing
+/// else.
 fn name_sig(ns: &str, name: &str) -> u64 {
     let mut h = fnv(FNV_SEED, ns.as_bytes());
     h = fnv(h, &[1]);
@@ -363,10 +452,11 @@ fn name_sig(ns: &str, name: &str) -> u64 {
     h ^= h >> 32;
     h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     h ^= h >> 29;
+    let h = h & !SIG_FLAGS;
     if ns.is_empty() {
-        h & !SIG_NAMED
+        h
     } else {
-        h | SIG_NAMED
+        h | SIG_HOISTED
     }
 }
 
@@ -397,7 +487,7 @@ impl<'a> Wanted<'a> {
         Wanted {
             ns,
             name,
-            sig: name_sig(ns, name),
+            sig: name_sig(ns, name) & !SIG_FLAGS,
             anywhere: unordered || !ns.is_empty(),
             found: false,
         }
@@ -406,7 +496,8 @@ impl<'a> Wanted<'a> {
 
 /// Answer every question in `wanted` in one pass over the file's
 /// signatures. `k` is the asking item: a question that is not `anywhere`
-/// is answered by the items before `k` alone.
+/// is answered by the items before `k`, and by hoisted definitions after
+/// it.
 ///
 /// The pass stops as soon as nothing is left to ask. Its cost is one word
 /// compared per top-level definition, plus the names of the definitions
@@ -436,25 +527,32 @@ fn scan_top_defs(e: &FileEntry, k: usize, wanted: &mut [Wanted<'_>]) {
         }
     }
 
+    // Only a declared-hoisted definition answers a question that is not
+    // `anywhere` from after the asking item; without one in the file, the
+    // pass stops at the asking item as it always did.
+    let late = e.declared_hoisted > 0;
     let mut start = 0usize;
     for (j, &end) in e.top_ends.iter().enumerate() {
         let before = j < k;
-        if left_anywhere == 0 && (left_before == 0 || !before) {
+        if left_anywhere == 0 && (left_before == 0 || !(before || late)) {
             break;
         }
-        let mask = if before { mask_before | mask_anywhere } else { mask_anywhere };
         let end = end as usize;
         for (nth, &sig) in e.top_sigs[start..end].iter().enumerate() {
-            if mask & bit(sig) == 0 {
+            // A hoisted definition answers from anywhere.
+            let reach = before || sig & SIG_DECLARED != 0;
+            let key = sig & !SIG_FLAGS;
+            let mask = if reach { mask_before | mask_anywhere } else { mask_anywhere };
+            if mask & bit(key) == 0 {
                 continue;
             }
-            let first = by_sig.partition_point(|&(s, _)| s < sig);
-            let same = |&&(s, _): &&(u64, u32)| s == sig;
+            let first = by_sig.partition_point(|&(s, _)| s < key);
+            let same = |&&(s, _): &&(u64, u32)| s == key;
             // Open the fragment only for a question this item can still
             // answer: a name defined a thousand times is confirmed once.
             let open = by_sig[first..].iter().take_while(same).any(|&(_, wi)| {
                 let w = &wanted[wi as usize];
-                !w.found && (w.anywhere || before)
+                !w.found && (w.anywhere || reach)
             });
             if !open {
                 continue;
@@ -463,7 +561,7 @@ fn scan_top_defs(e: &FileEntry, k: usize, wanted: &mut [Wanted<'_>]) {
             let d = &frag.defs[frag.top_defs[nth] as usize];
             for &(_, wi) in by_sig[first..].iter().take_while(same) {
                 let w = &mut wanted[wi as usize];
-                if !w.found && (w.anywhere || before) && d.ns == w.ns && d.name == w.name {
+                if !w.found && (w.anywhere || reach) && d.ns == w.ns && d.name == w.name {
                     w.found = true;
                     if w.anywhere {
                         left_anywhere -= 1;
@@ -537,8 +635,8 @@ struct Facts {
     defs: Vec<Def>,
     refs: Vec<Ref>,
     /// The scopes opened, in order (scope `k` is entry `k - 1`): parent,
-    /// unordered, barrier.
-    scopes: Vec<(ScopeId, bool, bool)>,
+    /// unordered, barrier, members.
+    scopes: Vec<(ScopeId, bool, bool, bool)>,
     modules: Vec<(i64, (u32, u32))>,
     quals: Vec<((u32, u32), u32)>,
 }
@@ -563,6 +661,10 @@ struct Part {
     /// For a subtree read child by child, its node children in order: each
     /// one's offset within the subtree and its own part.
     kids: Vec<Kid>,
+    /// For a subtree read child by child whose node defers the defs of a
+    /// child (`@defer`): that child's span (relative), and how many of
+    /// `kids` are put in place before they take effect.
+    defer: Option<((u32, u32), usize)>,
     /// How many facts the whole subtree holds. A part holding none puts
     /// nothing in place, and is passed over.
     total: usize,
@@ -576,6 +678,9 @@ struct Kid {
     /// handed to another subtree while the part is kept.
     key: NodeKey,
     part: Arc<Part>,
+    /// The namespace the node gives this child's subtree (`@ns(name,
+    /// label)`), if it gives one; otherwise it stands in the node's.
+    ns: Option<String>,
 }
 
 /// Span of the k-th SYMBOL child (token or rule), relative to `base`.
@@ -599,8 +704,10 @@ fn child_span(n: &GreenNode, base: u32, k: usize) -> Option<(u32, u32)> {
     None
 }
 
-/// The text and offset of the k-th SYMBOL child, when it is a token.
-fn name_child(n: &GreenNode, k: usize) -> Option<(String, u32)> {
+/// The text and offset of the name the k-th SYMBOL child holds: the child
+/// itself when it is a token, and when it is a rule, the token its node
+/// passes a name to (`cfg.passes`), however deep.
+fn name_child(n: &GreenNode, k: usize, cfg: &BindingConfig) -> Option<(String, u32)> {
     let mut off = 0u32;
     let mut idx = 0usize;
     for c in &n.children {
@@ -611,10 +718,15 @@ fn name_child(n: &GreenNode, k: usize) -> Option<(String, u32)> {
         };
         if is_symbol {
             if idx == k {
-                if let GreenChild::Token(t) = c {
-                    return Some((t.text.clone(), off));
-                }
-                return None;
+                return match c {
+                    GreenChild::Token(t) => Some((t.text.clone(), off)),
+                    GreenChild::Node(m) => {
+                        let &(_, _, k2) =
+                            cfg.passes.iter().find(|&&(nt, p, _)| nt == m.nt && p == m.prod)?;
+                        let (name, inner) = name_child(m, k2, cfg)?;
+                        Some((name, off + inner))
+                    }
+                };
             }
             idx += 1;
         }
@@ -623,10 +735,80 @@ fn name_child(n: &GreenNode, k: usize) -> Option<(String, u32)> {
     None
 }
 
+/// Where the base of a qualified name names what it names: the name its
+/// child `k` passes on (`Vec` of `Vec::<T>`, the last segment of `a::b`),
+/// or, when it passes none, the whole child. The base resolves as the
+/// last ref inside this span.
+fn base_span(n: &GreenNode, base: u32, k: usize, cfg: &BindingConfig) -> Option<(u32, u32)> {
+    match name_child(n, k, cfg) {
+        Some((name, off)) => Some((base + off, base + off + name.len() as u32)),
+        None => child_span(n, base, k),
+    }
+}
+
+/// The namespace a def or ref takes from where it stands, until it is put
+/// in place: what encloses the subtree it was read from decides (see
+/// [`ItemFacts::put`]). Never left in a fragment.
+const CONTEXT_NS: &str = "\u{0}context";
+
+/// The namespace the subtree of child `k` of `n` stands in, when `n`
+/// declares one for it (`@ns(name, label…)`).
+fn child_ns<'c>(n: &GreenNode, k: usize, cfg: &'c BindingConfig) -> Option<&'c str> {
+    cfg.child_namespaces
+        .iter()
+        .find(|&&(nt, p, c, _)| nt == n.nt && p == n.prod && c == k)
+        .map(|t| t.3.as_str())
+}
+
+/// The symbol index of each child of `n` (`None` for trivia, a missing
+/// token, or an error node): the numbering labels use.
+fn symbol_indices(n: &GreenNode) -> impl Iterator<Item = Option<usize>> + '_ {
+    let mut idx = 0usize;
+    n.children.iter().map(move |c| {
+        let is_symbol = match c {
+            GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+            GreenChild::Node(m) => m.nt != ERROR_NT,
+        };
+        if is_symbol {
+            idx += 1;
+            Some(idx - 1)
+        } else {
+            None
+        }
+    })
+}
+
+/// How `n` defers the defs of one of its children (`@defer`): the span of
+/// the pattern child (relative to `n`), and the symbol index of the child
+/// after which they take effect (`None`: after `n` itself).
+fn defer_of(n: &GreenNode, base: u32, cfg: &BindingConfig) -> Option<((u32, u32), Option<usize>)> {
+    let &(_, _, pat, after) =
+        cfg.defers.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)?;
+    let span = child_span(n, base, pat)?;
+    Some((span, after))
+}
+
+/// Give the defs from `first` on whose spans lie inside `span` the order
+/// of the last fact read so far: they take effect after it.
+fn defer_defs(defs: &mut [Def], first: usize, span: (u32, u32), order: u32) {
+    for d in &mut defs[first..] {
+        if d.span.0 >= span.0 && d.span.1 <= span.1 {
+            d.order = order;
+        }
+    }
+}
+
 /// What node `n` itself declares, appended to `facts`: `n` stands at
 /// `base` and is entered in `scope`. Returns the scope its children are
 /// entered in. Its children are not read.
-fn node_facts(n: &GreenNode, base: u32, scope: ScopeId, cfg: &BindingConfig, facts: &mut Facts) -> ScopeId {
+fn node_facts(
+    n: &GreenNode,
+    base: u32,
+    scope: ScopeId,
+    ctx: Option<&str>,
+    cfg: &BindingConfig,
+    facts: &mut Facts,
+) -> ScopeId {
     let mut scope = scope;
     // When a production BOTH defines and opens a scope, the def
     // belongs to the ENCLOSING scope — function-name semantics:
@@ -637,22 +819,25 @@ fn node_facts(n: &GreenNode, base: u32, scope: ScopeId, cfg: &BindingConfig, fac
         if let Some(&(_, _, unordered, barrier)) =
             cfg.scopes.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
         {
-            facts.scopes.push((scope, unordered, barrier));
+            let members = cfg.members.contains(&(n.nt, n.prod));
+            facts.scopes.push((scope, unordered, barrier, members));
             scope = facts.scopes.len() as ScopeId;
         }
     }
-    // A production's declared namespace covers its def and refs.
+    // A production's declared namespace covers its def and refs; without
+    // one, they stand in the namespace of where the node stands.
     let node_ns = cfg
         .namespaces
         .iter()
         .find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
         .map(|t| t.2.as_str())
-        .unwrap_or("");
+        .or(ctx)
+        .unwrap_or(CONTEXT_NS);
     // Every def and ref takes the next order: the count of those before
     // it, plus one.
     let next_order = |facts: &Facts| (facts.defs.len() + facts.refs.len()) as u32 + 1;
     if let Some(&(_, _, k)) = cfg.defs.iter().find(|&&(nt, p, _)| nt == n.nt && p == n.prod) {
-        if let Some((name, off)) = name_child(n, k) {
+        if let Some((name, off)) = name_child(n, k, cfg) {
             let order = next_order(facts);
             facts.defs.push(Def {
                 span: (base + off, base + off + name.len() as u32),
@@ -662,6 +847,8 @@ fn node_facts(n: &GreenNode, base: u32, scope: ScopeId, cfg: &BindingConfig, fac
                 top_level: false,
                 exported: cfg.exports.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
                 ns: node_ns.to_string(),
+                hoisted: cfg.hoisted.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
+                open: cfg.open.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
             });
         }
     }
@@ -671,7 +858,7 @@ fn node_facts(n: &GreenNode, base: u32, scope: ScopeId, cfg: &BindingConfig, fac
         if nt2 != n.nt || p2 != n.prod {
             continue;
         }
-        if let Some((name, off)) = name_child(n, k) {
+        if let Some((name, off)) = name_child(n, k, cfg) {
             let order = next_order(facts);
             facts.refs.push(Ref {
                 span: (base + off, base + off + name.len() as u32),
@@ -696,7 +883,7 @@ fn node_facts(n: &GreenNode, base: u32, scope: ScopeId, cfg: &BindingConfig, fac
     if let Some(&(_, _, base_child, _)) =
         cfg.quals.iter().find(|&&(nt2, p2, _, _)| nt2 == n.nt && p2 == n.prod)
     {
-        if let Some(bspan) = child_span(n, base, base_child) {
+        if let Some(bspan) = base_span(n, base, base_child, cfg) {
             // The Qualified ref for this node was pushed just above: no
             // ref declared before this node has its span inside the node.
             if let Some(ri) = facts
@@ -712,15 +899,40 @@ fn node_facts(n: &GreenNode, base: u32, scope: ScopeId, cfg: &BindingConfig, fac
 }
 
 /// Everything subtree `n` declares, appended to `facts`: every node, in
-/// document order, each before its children.
-fn walk_whole(n: &GreenNode, base: u32, scope: ScopeId, cfg: &BindingConfig, facts: &mut Facts) {
-    let inner = node_facts(n, base, scope, cfg, facts);
+/// document order, each before its children. `ctx` is the namespace the
+/// subtree stands in, when something within the walk declared one.
+fn walk_whole(
+    n: &GreenNode,
+    base: u32,
+    scope: ScopeId,
+    ctx: Option<&str>,
+    cfg: &BindingConfig,
+    facts: &mut Facts,
+) {
+    let first_def = facts.defs.len();
+    let inner = node_facts(n, base, scope, ctx, cfg, facts);
+    let defer = defer_of(n, base, cfg);
+    let mut deferred = false;
     let mut off = base;
-    for c in &n.children {
+    for (c, sym) in n.children.iter().zip(symbol_indices(n)) {
         if let GreenChild::Node(m) = c {
-            walk_whole(m, off, inner, cfg, facts);
+            let kid_ctx = sym.and_then(|k| child_ns(n, k, cfg)).or(ctx);
+            walk_whole(m, off, inner, kid_ctx, cfg, facts);
         }
         off += c.width();
+        if let (Some((span, Some(after))), Some(k)) = (defer, sym) {
+            if k == after {
+                let order = (facts.defs.len() + facts.refs.len()) as u32;
+                defer_defs(&mut facts.defs, first_def, span, order);
+                deferred = true;
+            }
+        }
+    }
+    // After the node: where it says so, or where the child it names is
+    // missing (a node recovery left short).
+    if let (Some((span, _)), false) = (defer, deferred) {
+        let order = (facts.defs.len() + facts.refs.len()) as u32;
+        defer_defs(&mut facts.defs, first_def, span, order);
     }
 }
 
@@ -758,15 +970,15 @@ impl Parts<'_> {
         if self.whole(node) {
             self.walked += node.width as u64;
             let mut facts = Facts::default();
-            walk_whole(node, 0, 0, self.cfg, &mut facts);
+            walk_whole(node, 0, 0, None, self.cfg, &mut facts);
             let total = facts.len();
             if total == 0 {
                 return self.empty.clone();
             }
-            return Arc::new(Part { facts, inner: 0, kids: Vec::new(), total });
+            return Arc::new(Part { facts, inner: 0, kids: Vec::new(), defer: None, total });
         }
         let mut facts = Facts::default();
-        let inner = node_facts(node, 0, 0, self.cfg, &mut facts);
+        let inner = node_facts(node, 0, 0, None, self.cfg, &mut facts);
 
         // Last revision's subtrees, and their children, by identity: the
         // edit rebuilt the chain of subtrees above it, and the subtrees on
@@ -781,8 +993,13 @@ impl Parts<'_> {
         }
         let mut kids: Vec<Kid> = Vec::new();
         let mut fresh: Vec<usize> = Vec::new();
+        let defer = defer_of(node, 0, self.cfg);
+        // How many kids come before the child after which the deferred
+        // defs take effect, that child among them: error nodes, which no
+        // label counts, included.
+        let mut defer_before = None;
         let mut off = 0u32;
-        for c in &node.children {
+        for (c, sym) in node.children.iter().zip(symbol_indices(node)) {
             if let GreenChild::Node(m) = c {
                 let key = NodeKey::new(m.clone());
                 let part = match known.remove(&key) {
@@ -792,10 +1009,19 @@ impl Parts<'_> {
                         self.empty.clone()
                     }
                 };
-                kids.push(Kid { off, key, part });
+                let ns = sym.and_then(|k| child_ns(node, k, self.cfg)).map(str::to_string);
+                kids.push(Kid { off, key, part, ns });
             }
             off += c.width();
+            if let (Some((_, Some(after))), Some(k)) = (defer, sym) {
+                if k == after {
+                    defer_before = Some(kids.len());
+                }
+            }
         }
+        // Where the child it names is missing, or it names none: after
+        // the node.
+        let defer = defer.map(|(span, _)| (span, defer_before.unwrap_or(kids.len())));
         if !fresh.is_empty() {
             // What is left of the last revision, read child by child, may
             // hold the subtrees of the children read again.
@@ -809,7 +1035,7 @@ impl Parts<'_> {
         // Kept even when nothing beneath declares anything: the children
         // are what the next edit finds its subtrees among.
         let total = facts.len() + kids.iter().map(|k| k.part.total).sum::<usize>();
-        Arc::new(Part { facts, inner, kids, total })
+        Arc::new(Part { facts, inner, kids, defer, total })
     }
 }
 
@@ -823,6 +1049,7 @@ struct ItemFacts {
     scope_parents: Vec<ScopeId>,
     scope_unordered: Vec<bool>,
     scope_barrier: Vec<bool>,
+    scope_members: Vec<bool>,
     modules: Vec<(u32, (u32, u32))>,
     quals: Vec<((u32, u32), u32)>,
 }
@@ -835,6 +1062,7 @@ impl ItemFacts {
             scope_parents: vec![0],
             scope_unordered: vec![cfg.unordered],
             scope_barrier: vec![false],
+            scope_members: vec![false],
             modules: Vec::new(),
             quals: Vec::new(),
         }
@@ -843,29 +1071,46 @@ impl ItemFacts {
     /// Put `facts`, read from a subtree that stands at `at` and is entered
     /// in scope `enter`, in place after everything put so far. Returns the
     /// scope in place of relative scope `inner`.
-    fn put(&mut self, facts: std::borrow::Cow<'_, Facts>, at: u32, enter: ScopeId, inner: ScopeId) -> ScopeId {
+    fn put(
+        &mut self,
+        facts: std::borrow::Cow<'_, Facts>,
+        at: u32,
+        enter: ScopeId,
+        inner: ScopeId,
+        ctx: Option<&str>,
+    ) -> ScopeId {
         let scope_base = self.scope_parents.len() as ScopeId;
         let def_base = self.defs.len();
         let ref_base = self.refs.len();
         let order_base = (def_base + ref_base) as u32;
         let place = |rel: ScopeId| if rel == 0 { enter } else { scope_base + rel - 1 };
         let Facts { defs, refs, scopes, modules, quals } = facts.into_owned();
-        for (parent, unordered, barrier) in scopes {
+        for (parent, unordered, barrier, members) in scopes {
             self.scope_parents.push(place(parent));
             self.scope_unordered.push(unordered);
             self.scope_barrier.push(barrier);
+            self.scope_members.push(members);
         }
+        // What stands in the namespace of where the subtree stands takes
+        // it now: the subtree's own facts do not know it.
+        let context = ctx.unwrap_or("");
         self.defs.extend(defs.into_iter().map(|mut d| {
             d.span = (d.span.0 + at, d.span.1 + at);
             d.scope = place(d.scope);
             d.order += order_base;
             d.top_level = d.scope == 0;
+            if d.ns == CONTEXT_NS {
+                d.ns = context.to_string();
+            }
             d
         }));
         self.refs.extend(refs.into_iter().map(|mut r| {
             r.span = (r.span.0 + at, r.span.1 + at);
             r.scope = place(r.scope);
             r.order += order_base;
+            if r.ns == CONTEXT_NS {
+                r.ns = context.to_string();
+            }
             r
         }));
         for (def, span) in modules {
@@ -880,14 +1125,24 @@ impl ItemFacts {
         place(inner)
     }
 
-    /// Put a part, and everything beneath it, in place.
-    fn put_part(&mut self, part: &Part, at: u32, enter: ScopeId) {
+    /// Put a part, and everything beneath it, in place, the subtree
+    /// standing in namespace `ctx` (`None`: the default).
+    fn put_part(&mut self, part: &Part, at: u32, enter: ScopeId, ctx: Option<&str>) {
         if part.total == 0 {
             return;
         }
-        let inner = self.put(std::borrow::Cow::Borrowed(&part.facts), at, enter, part.inner);
-        for kid in &part.kids {
-            self.put_part(&kid.part, at + kid.off, inner);
+        let first_def = self.defs.len();
+        let inner = self.put(std::borrow::Cow::Borrowed(&part.facts), at, enter, part.inner, ctx);
+        for i in 0..=part.kids.len() {
+            if let Some((span, before)) = part.defer {
+                if i == before {
+                    let order = (self.defs.len() + self.refs.len()) as u32;
+                    defer_defs(&mut self.defs, first_def, (span.0 + at, span.1 + at), order);
+                }
+            }
+            if let Some(kid) = part.kids.get(i) {
+                self.put_part(&kid.part, at + kid.off, inner, kid.ns.as_deref().or(ctx));
+            }
         }
     }
 
@@ -898,6 +1153,7 @@ impl ItemFacts {
             && self.scope_parents == frag.scope_parents
             && self.scope_unordered == frag.scope_unordered
             && self.scope_barrier == frag.scope_barrier
+            && self.scope_members == frag.scope_members
             && self.modules == frag.modules
             && self.quals == frag.quals
     }
@@ -905,7 +1161,16 @@ impl ItemFacts {
     /// The fragment of these facts: what is derived from them, and a new
     /// identity.
     fn finish(self) -> Fragment {
-        let ItemFacts { defs, refs, scope_parents, scope_unordered, scope_barrier, modules, quals } = self;
+        let ItemFacts {
+            defs,
+            refs,
+            scope_parents,
+            scope_unordered,
+            scope_barrier,
+            scope_members,
+            modules,
+            quals,
+        } = self;
         let mut f = Fragment {
             uid: next_paint_uid(),
             defs,
@@ -913,6 +1178,7 @@ impl ItemFacts {
             scope_parents,
             scope_unordered,
             scope_barrier,
+            scope_members,
             top_defs: Vec::new(),
             top_sigs: Vec::new(),
             local: Vec::new(),
@@ -927,7 +1193,15 @@ impl ItemFacts {
         f.top_sigs = f
             .top_defs
             .iter()
-            .map(|&di| name_sig(&f.defs[di as usize].ns, &f.defs[di as usize].name))
+            .map(|&di| {
+                let d = &f.defs[di as usize];
+                let sig = name_sig(&d.ns, &d.name);
+                if d.hoisted {
+                    sig | SIG_HOISTED | SIG_DECLARED
+                } else {
+                    sig
+                }
+            })
             .collect();
         // Env-independent local resolution: candidates are fragment defs in
         // VISIBLE scopes (barriers stop the walk). Ordering is a per-scope
@@ -951,10 +1225,16 @@ impl ItemFacts {
                 if let Some(cands) = by_name.get(&(r.ns.as_str(), r.name.as_str())) {
                     for &i in cands {
                         let d = &f.defs[i as usize];
-                        if (f.scope_unordered[0] || !d.ns.is_empty()) && d.scope == 0 {
+                        if f.scope_members[d.scope as usize] {
+                            continue; // a member: reached only by a qualified name
+                        }
+                        if (f.scope_unordered[0] || !d.ns.is_empty() || d.hoisted) && d.scope == 0 {
                             continue; // top-level forward world: environment decides
                         }
-                        if (f.scope_unordered[d.scope as usize] || !d.ns.is_empty() || d.order < r.order)
+                        if (f.scope_unordered[d.scope as usize]
+                            || !d.ns.is_empty()
+                            || d.hoisted
+                            || d.order < r.order)
                             && f.visible(d.scope, r.scope)
                         {
                             let key = (depths[d.scope as usize], d.order, i);
@@ -993,12 +1273,12 @@ fn item_facts(
     if parts.whole(item) {
         parts.walked += item.width as u64;
         let mut facts = Facts::default();
-        walk_whole(item, 0, 0, parts.cfg, &mut facts);
-        out.put(std::borrow::Cow::Owned(facts), 0, 0, 0);
+        walk_whole(item, 0, 0, None, parts.cfg, &mut facts);
+        out.put(std::borrow::Cow::Owned(facts), 0, 0, 0, None);
         return (out, None);
     }
     let part = parts.part(item, old);
-    out.put_part(&part, 0, 0);
+    out.put_part(&part, 0, 0, None);
     (out, Some(part))
 }
 
@@ -1006,6 +1286,20 @@ fn item_facts(
 // Item resolutions (classification only — positions recovered at query
 // time, so caches survive unrelated edits)
 // ---------------------------------------------------------------------------
+
+/// Why a qualified name names nothing.
+enum QualifiedMiss {
+    /// Its base names nothing the binding sees (it holds no reference,
+    /// or its reference escapes), or a namespace open to members the
+    /// binding cannot see: not a problem.
+    Escapes,
+    /// What to report.
+    Error(String),
+}
+
+/// The miss of a qualified name whose base does not resolve: the base's
+/// own diagnostic, never reported a second time for the name.
+const BASE_UNRESOLVED: &str = "path base does not resolve";
 
 /// Cached classification of one ref.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1109,6 +1403,8 @@ struct FileEntry {
     /// Per item, where its run of `top_sigs` ends (it starts where the
     /// item before it ended).
     top_ends: Vec<u32>,
+    /// How many of `top_sigs` are declared hoisted ([`SIG_DECLARED`]).
+    declared_hoisted: usize,
     /// How many times this revision's repaint asked a name question by
     /// scan. Past [`SCAN_LIMIT`] the position index is cheaper, and is
     /// built.
@@ -1232,6 +1528,7 @@ impl SemDb {
             items: Vec::new(),
             top_sigs: Vec::new(),
             top_ends: Vec::new(),
+            declared_hoisted: 0,
             paint_scans: 0,
             frag_cache: HashMap::new(),
             top_counts: HashMap::new(),
@@ -1373,6 +1670,9 @@ impl SemDb {
                     *end = (*end as i64 + shift) as u32;
                 }
             }
+            let declared = |sigs: &[u64]| sigs.iter().filter(|&&s| s & SIG_DECLARED != 0).count();
+            e.declared_hoisted = e.declared_hoisted + declared(&window_sigs)
+                - declared(&e.top_sigs[old_lo_at..old_hi_at]);
             e.top_sigs.splice(old_lo_at..old_hi_at, window_sigs);
             e.top_ends.splice(lo..old_hi, window_ends);
         }
@@ -1511,7 +1811,7 @@ impl SemDb {
         let n_items = e.items.len();
         let mut named_h = FNV_SEED;
         for &sig in &e.top_sigs {
-            if sig & SIG_NAMED != 0 {
+            if sig & SIG_HOISTED != 0 {
                 named_h = fold_sig(named_h, sig);
             }
         }
@@ -1519,7 +1819,7 @@ impl SemDb {
         if unordered {
             let mut h = named_h;
             for &sig in &e.top_sigs {
-                if sig & SIG_NAMED == 0 {
+                if sig & SIG_HOISTED == 0 {
                     h = fold_sig(h, sig);
                 }
             }
@@ -1530,7 +1830,7 @@ impl SemDb {
             for &end in &e.top_ends {
                 env_fps.push(fold_sig(h, named_h));
                 for &sig in &e.top_sigs[start..end as usize] {
-                    if sig & SIG_NAMED == 0 {
+                    if sig & SIG_HOISTED == 0 {
                         h = fold_sig(h, sig);
                     }
                 }
@@ -1597,12 +1897,13 @@ impl SemDb {
             // forward, as an ordered root scope reads.
             set_builds += 1;
             let mut env: HashSet<(&str, &str)> = HashSet::new();
-            // Hoisted contributions first: every named-namespace top def is
-            // visible to every item, whatever the root's ordering says.
+            // Hoisted contributions first: every named-namespace or
+            // declared-hoisted top def is visible to every item, whatever
+            // the root's ordering says.
             for slot in &e.items {
                 for &di in &slot.frag.top_defs {
                     let d = &slot.frag.defs[di as usize];
-                    if unordered || !d.ns.is_empty() {
+                    if unordered || !d.ns.is_empty() || d.hoisted {
                         env.insert((d.ns.as_str(), d.name.as_str()));
                     }
                 }
@@ -1619,7 +1920,7 @@ impl SemDb {
                 if !unordered {
                     for &di in &slot.frag.top_defs {
                         let d = &slot.frag.defs[di as usize];
-                        if d.ns.is_empty() {
+                        if d.ns.is_empty() && !d.hoisted {
                             env.insert(("", d.name.as_str()));
                         }
                     }
@@ -1728,15 +2029,21 @@ impl SemDb {
     }
 
     /// Top-level def site for a (ns, name) visible to item `k`
-    /// (ordered: latest strictly-earlier item; unordered OR named
-    /// namespace: latest anywhere — per-namespace ordering).
+    /// (ordered: latest strictly-earlier item, or latest hoisted def
+    /// anywhere; unordered OR named namespace: latest anywhere —
+    /// per-namespace ordering).
     fn top_site(&mut self, uri: &str, ns: &str, name: &str, k: u32) -> Option<(u32, u32)> {
         self.ensure_top_index(uri);
-        let sites = self.files[uri].top_index.as_ref().unwrap().get(&tkey(ns, name))?;
+        let e = &self.files[uri];
+        let sites = e.top_index.as_ref().unwrap().get(&tkey(ns, name))?;
         if self.cfg.unordered || !ns.is_empty() {
             sites.last().copied()
         } else {
-            sites.iter().rev().find(|(i, _)| *i < k).copied()
+            sites
+                .iter()
+                .rev()
+                .find(|&&(i, di)| i < k || e.items[i as usize].frag.defs[di as usize].hoisted)
+                .copied()
         }
     }
 
@@ -1837,6 +2144,28 @@ impl SemDb {
                 Some((fu.clone(), self.abs_def_span(&fu, i, d)))
             }
             Classified::Unresolved => None,
+        }
+    }
+
+    /// Does the reference at `offset` ESCAPE: bind to nothing the
+    /// binding sees, without that being a problem? (See
+    /// [`Target::Escapes`].) False where there is no reference, and for
+    /// one that resolves or is unresolved.
+    pub fn escapes(&mut self, uri: &str, offset: u32) -> bool {
+        self.ensure_resolved(uri);
+        let Some(k) = self.item_at(uri, offset) else { return false };
+        let slot = &self.files[uri].items[k as usize];
+        let rel = offset - slot.base_off;
+        let Some(ri) = slot.frag.refs.iter().position(|r| r.span.0 <= rel && rel < r.span.1) else {
+            return false;
+        };
+        let escaping = slot.frag.refs[ri].kind == RefKind::Escaping;
+        let qualified =
+            matches!(slot.res.as_ref().map(|r| &r.3.targets[ri]), Some(Classified::Qualified));
+        if qualified {
+            matches!(self.resolve_qualified(uri, k, ri as u32), Err(QualifiedMiss::Escapes))
+        } else {
+            escaping && self.definition(uri, offset).is_none()
         }
     }
 
@@ -1965,16 +2294,14 @@ impl SemDb {
         uri: &str,
         item: u32,
         ri: u32,
-    ) -> Result<(String, (u32, u32)), String> {
+    ) -> Result<(String, (u32, u32)), QualifiedMiss> {
         let (name, name_span, base_span) = {
             let slot = &self.files[uri].items[item as usize];
             let r = &slot.frag.refs[ri as usize];
-            let q = slot
-                .frag
-                .quals
-                .iter()
-                .find(|(_, qri)| *qri == ri)
-                .ok_or_else(|| "malformed qualified reference".to_string())?;
+            let q =
+                slot.frag.quals.iter().find(|(_, qri)| *qri == ri).ok_or_else(|| {
+                    QualifiedMiss::Error("malformed qualified reference".to_string())
+                })?;
             (
                 r.name.clone(),
                 (slot.base_off + r.span.0, slot.base_off + r.span.1),
@@ -1983,23 +2310,50 @@ impl SemDb {
         };
         let _ = name_span;
         // The base's resolution = the resolution of the LAST reference
-        // inside the base child (leftward recursion for nested paths).
-        let base_ref_start = {
+        // inside the base's span (leftward recursion for nested paths).
+        // A base holding none names nothing the binding sees.
+        let (base_ri, base_ref_start, base_kind, base_qualified) = {
             let slot = &self.files[uri].items[item as usize];
-            slot.frag
+            let (bi, b) = slot
+                .frag
                 .refs
                 .iter()
-                .filter(|r| {
+                .enumerate()
+                .filter(|(_, r)| {
                     let s = slot.base_off + r.span.0;
                     s >= base_span.0 && s < base_span.1
                 })
-                .map(|r| slot.base_off + r.span.0)
-                .max()
-                .ok_or_else(|| "path base carries no reference".to_string())?
+                .max_by_key(|(_, r)| r.span.0)
+                .ok_or(QualifiedMiss::Escapes)?;
+            // `definition` takes a def on the token before a ref on it.
+            let def_on_it =
+                slot.frag.defs.iter().any(|d| d.span.0 <= b.span.0 && b.span.0 < d.span.1);
+            let qualified = !def_on_it
+                && matches!(
+                    slot.res.as_ref().map(|r| &r.3.targets[bi]),
+                    Some(Classified::Qualified)
+                );
+            (bi as u32, slot.base_off + b.span.0, b.kind, qualified)
         };
-        let (mut turi, mut tspan) = self
-            .definition(uri, base_ref_start)
-            .ok_or_else(|| "path base does not resolve".to_string())?;
+        // A base that does not resolve: the name escapes when the base
+        // does, and is otherwise the base's own error. A qualified base is
+        // asked once, not through `definition` and again on a miss: a
+        // path is resolved in time linear in its segments.
+        let base = if base_qualified {
+            self.resolve_qualified(uri, item, base_ri).map_err(|miss| match miss {
+                QualifiedMiss::Escapes => QualifiedMiss::Escapes,
+                QualifiedMiss::Error(_) => QualifiedMiss::Error(BASE_UNRESOLVED.to_string()),
+            })
+        } else {
+            self.definition(uri, base_ref_start).ok_or_else(|| {
+                if base_kind == RefKind::Escaping {
+                    QualifiedMiss::Escapes
+                } else {
+                    QualifiedMiss::Error(BASE_UNRESOLVED.to_string())
+                }
+            })
+        };
+        let (mut turi, mut tspan) = base?;
         // The base may land on an IMPORT binding (`use math;` then
         // `math::pi`): chase through it — definition() at the import
         // token jumps to the foreign export (bounded, re-export chains
@@ -2032,7 +2386,10 @@ impl SemDb {
                 _ => break,
             }
         }
-        // Locate the target def and its module body.
+        // Locate the target def and its module body. An OPEN namespace
+        // has members the binding cannot see: a name missing from it
+        // escapes.
+        let open: bool;
         self.ensure_resolved(&turi);
         let (body_abs, titem) = {
             let e = &self.files[&turi];
@@ -2040,32 +2397,47 @@ impl SemDb {
                 .items
                 .partition_point(|s| s.base_off <= tspan.0)
                 .checked_sub(1)
-                .ok_or_else(|| "target out of range".to_string())?;
+                .ok_or_else(|| QualifiedMiss::Error("target out of range".to_string()))?;
             let slot = &e.items[k];
             let rel = tspan.0 - slot.base_off;
-            let di = slot
-                .frag
-                .defs
-                .iter()
-                .position(|d| d.span.0 == rel)
-                .ok_or_else(|| "target is not a definition".to_string())?;
-            let m = slot
-                .frag
-                .modules
-                .iter()
-                .find(|(mdi, _)| *mdi == di as u32)
-                .ok_or_else(|| format!("`{}` is not a module", &self.files[&turi].items[k].frag.defs[di].name))?;
+            let di =
+                slot.frag.defs.iter().position(|d| d.span.0 == rel).ok_or_else(|| {
+                    QualifiedMiss::Error("target is not a definition".to_string())
+                })?;
+            let target = &slot.frag.defs[di];
+            open = target.open;
+            let m =
+                slot.frag.modules.iter().find(|(mdi, _)| *mdi == di as u32).ok_or_else(|| {
+                    if open {
+                        QualifiedMiss::Escapes
+                    } else {
+                        QualifiedMiss::Error(format!("`{}` is not a module", target.name))
+                    }
+                })?;
             ((slot.base_off + m.1 .0, slot.base_off + m.1 .1), k)
         };
         // Members: defs of the target item inside the body span.
         let crossing = turi != uri;
         let e = &self.files[&turi];
         let slot = &e.items[titem];
+        // The members are the body's own defs: the shallowest inside it.
+        // A `let` in one of a module's functions is no member of it.
+        let inside = |d: &Def| {
+            let s = slot.base_off + d.span.0;
+            s >= body_abs.0 && s < body_abs.1
+        };
+        let depth = slot
+            .frag
+            .defs
+            .iter()
+            .filter(|d| inside(d))
+            .map(|d| slot.frag.scope_depth(d.scope))
+            .min();
         let mut found_private = false;
         let mut hit: Option<(u32, u32)> = None;
         for d in &slot.frag.defs {
             let s = slot.base_off + d.span.0;
-            if s >= body_abs.0 && s < body_abs.1 && d.name == name {
+            if inside(d) && Some(slot.frag.scope_depth(d.scope)) == depth && d.name == name {
                 if crossing && !d.exported {
                     found_private = true;
                 } else {
@@ -2075,8 +2447,13 @@ impl SemDb {
         }
         match (hit, found_private) {
             (Some(span), _) => Ok((turi, span)),
-            (None, true) => Err(format!("`{name}` exists in the module but is not exported")),
-            (None, false) => Err(format!("no member `{name}` in this module")),
+            (None, true) => Err(QualifiedMiss::Error(format!(
+                "`{name}` exists in the module but is not exported"
+            ))),
+            (None, false) if open => Err(QualifiedMiss::Escapes),
+            (None, false) => {
+                Err(QualifiedMiss::Error(format!("no member `{name}` in this module")))
+            }
         }
     }
 
@@ -2093,21 +2470,18 @@ impl SemDb {
                 .flat_map(|(k, slot)| {
                     slot.frag.quals.iter().map(move |&(_, ri)| {
                         let r = &slot.frag.refs[ri as usize];
-                        (
-                            k as u32,
-                            ri,
-                            (slot.base_off + r.span.0, slot.base_off + r.span.1),
-                        )
+                        (k as u32, ri, (slot.base_off + r.span.0, slot.base_off + r.span.1))
                     })
                 })
                 .collect()
         };
         let mut out = Vec::new();
         for (k, ri, span) in quals {
-            if let Err(msg) = self.resolve_qualified(uri, k, ri) {
-                // An unresolved BASE is already the base ref's own
-                // diagnostic; do not double-report.
-                if msg != "path base does not resolve" {
+            // A name that escapes is not reported: what it names may be
+            // where this file cannot see. An unresolved BASE is already
+            // the base ref's own diagnostic; it is not reported twice.
+            if let Err(QualifiedMiss::Error(msg)) = self.resolve_qualified(uri, k, ri) {
+                if msg != BASE_UNRESOLVED {
                     out.push((msg, span));
                 }
             }
@@ -2145,6 +2519,11 @@ impl SemDb {
         let mut base_order = 0u32;
         for slot in &e.items {
             for d in &slot.frag.defs {
+                // A member is no name in scope: it is reached by a
+                // qualified name.
+                if slot.frag.scope_members[d.scope as usize] {
+                    continue;
+                }
                 if unordered || slot.base_off + d.span.0 < offset {
                     cands.push((
                         d.name.clone(),
@@ -2194,6 +2573,8 @@ impl SemDb {
                     top_level: d.top_level,
                     exported: d.exported,
                     ns: d.ns.clone(),
+                    hoisted: d.hoisted,
+                    open: d.open,
                 });
             }
             for r in &slot.frag.refs {
@@ -2298,11 +2679,16 @@ impl SemDb {
                                 None => Target::Unresolved,
                             }
                         }
-                        Err(_) => Target::Unresolved,
+                        Err(QualifiedMiss::Escapes) => Target::Escapes,
+                        Err(QualifiedMiss::Error(_)) => Target::Unresolved,
                     },
                     Classified::Unresolved => Target::Unresolved,
                 };
-                out.push(t);
+                // An escaping ref the file does not define escapes; a
+                // qualified name's miss was told above.
+                let escaping =
+                    self.files[uri].items[k as usize].frag.refs[ri].kind == RefKind::Escaping;
+                out.push(if t == Target::Unresolved && escaping { Target::Escapes } else { t });
             }
         }
         Arc::new(out)
@@ -2370,7 +2756,9 @@ impl SemDb {
         for (ri, r) in frag.refs.iter().enumerate() {
             let quiet_gate = |rp: RefPaint| {
                 // The unresolved BIT is kind-gated, exactly as the
-                // composed-view overlay gates it.
+                // composed-view overlay gates it: an escaping ref is never
+                // painted unresolved. (A qualified name that escapes is
+                // told quiet where it is resolved, below.)
                 if rp == RefPaint::Unresolved
                     && !matches!(
                         r.kind,
@@ -2418,7 +2806,8 @@ impl SemDb {
                             None => RefPaint::Unresolved,
                         }
                     }
-                    Err(_) => RefPaint::Unresolved,
+                    Err(QualifiedMiss::Escapes) => RefPaint::Quiet,
+                    Err(QualifiedMiss::Error(_)) => RefPaint::Unresolved,
                 },
                 Classified::Unresolved => RefPaint::Unresolved,
             };
@@ -2483,6 +2872,11 @@ fn collect_list_items<'t>(n: &'t GreenNode, base: u32, out: &mut Vec<(&'t Arc<Gr
 pub enum Target {
     Local { def: usize },
     Foreign { uri: String, def: usize },
+    /// Bound to nothing the binding sees, and not a problem: an escaping
+    /// reference, or a qualified name whose base escapes, holds no
+    /// reference, or names an open namespace (`@def(x, open)`). What it
+    /// names may lie beyond the files the database holds.
+    Escapes,
     Unresolved,
 }
 
@@ -2549,6 +2943,59 @@ mod part_tests {
         cfg
     }
 
+    /// What binding came to need after the walk's first annotations, on
+    /// the demo grammar's productions, mechanical as [`stress_config`] is:
+    /// a pattern whose defs take effect after a later child (`let`'s,
+    /// after its value), after a sibling subtree (the first block of an
+    /// `if … else`, after the second) and after the node itself; hoisted
+    /// defs; escaping refs, and a qualified name that escapes with its
+    /// base; a namespace a node gives one child's subtree, nested in
+    /// another's; a scope of members; and a def whose name is passed to
+    /// it through rules, two deep for `((a));`.
+    fn features_config(sg: &SynGrammar) -> BindingConfig {
+        let mut cfg = BindingConfig::default();
+        for i in 0..sg.prods.len() {
+            let (nt, prod) = (sg.prods[i].lhs, i as u16);
+            match sg.prod_name(i).as_str() {
+                "LetStmt" => {
+                    cfg.defs.push((nt, prod, 1));
+                    cfg.defers.push((nt, prod, 1, Some(3)));
+                }
+                "ExprStmt" => {
+                    cfg.defs.push((nt, prod, 0));
+                    cfg.hoisted.push((nt, prod));
+                }
+                "NameRef" => {
+                    cfg.refs.push((nt, prod, 0, RefKind::Escaping));
+                    cfg.passes.push((nt, prod, 0));
+                }
+                "ParenExpr" => cfg.passes.push((nt, prod, 1)),
+                "CallExpr" => {
+                    cfg.refs.push((nt, prod, 0, RefKind::Call));
+                    cfg.refs.push((nt, prod, 0, RefKind::Qualified));
+                    cfg.quals.push((nt, prod, 2, 0));
+                    cfg.namespaces.push((nt, prod, "fn".to_string()));
+                }
+                "Block" => cfg.scopes.push((nt, prod, false, false)),
+                "IfStmt" => {
+                    cfg.scopes.push((nt, prod, true, false));
+                    cfg.members.push((nt, prod));
+                    cfg.child_namespaces.push((nt, prod, 2, "cond".to_string()));
+                }
+                "IfElseStmt" => {
+                    cfg.defers.push((nt, prod, 4, Some(6)));
+                    cfg.child_namespaces.push((nt, prod, 6, "else".to_string()));
+                }
+                "BlockStmt" => {
+                    cfg.modules.push((nt, prod, 0));
+                    cfg.defers.push((nt, prod, 0, None));
+                }
+                _ => {}
+            }
+        }
+        cfg
+    }
+
     fn rng(mut seed: u64) -> impl FnMut(usize) -> usize {
         move |n: usize| {
             seed ^= seed << 13;
@@ -2560,7 +3007,7 @@ mod part_tests {
 
     /// One line of the demo language, not counting braces that open or
     /// close a block over lines.
-    fn statement(r: &mut impl FnMut(usize) -> usize) -> String {
+    fn statement(r: &mut dyn FnMut(usize) -> usize) -> String {
         let n = r(40);
         match r(8) {
             0 => format!("let a{n} = a{} + {};", r(40), r(9)),
@@ -2574,9 +3021,27 @@ mod part_tests {
         }
     }
 
+    /// One line for [`features_config`]: the demo's lines, and those that
+    /// reach what it adds — a name passed through two rules, a namespace
+    /// given inside another, and calls whose base escapes or does not.
+    fn feature_statement(r: &mut dyn FnMut(usize) -> usize) -> String {
+        let n = r(40);
+        match r(6) {
+            0 => format!("((a{n}));"),
+            1 => format!("if (a{n}) {{ if (b{n}) {{ g(a{n}); }} else {{ (c{n}); }} }} else {{ h(c{n}, {}); }}", r(9)),
+            2 => format!("if (f(a{n})) {{ let a{n} = a{n}; a{n}; }}"),
+            _ => statement(r),
+        }
+    }
+
     /// A file of a few small items and one block item of `lines` lines,
-    /// with blocks nested in it over several lines.
-    fn program(r: &mut impl FnMut(usize) -> usize, lines: usize) -> String {
+    /// with blocks nested in it over several lines, each line made by
+    /// `statement`.
+    fn program_of(
+        r: &mut dyn FnMut(usize) -> usize,
+        lines: usize,
+        statement: fn(&mut dyn FnMut(usize) -> usize) -> String,
+    ) -> String {
         let mut out = String::new();
         for _ in 0..4 {
             out.push_str(&statement(r));
@@ -2614,7 +3079,7 @@ mod part_tests {
     fn walked(item: &GreenNode, cfg: &BindingConfig) -> ItemFacts {
         let mut f = ItemFacts::new(cfg);
         let mut order = 0u32;
-        walk(item, 0, 0, cfg, &mut f, &mut order);
+        walk(item, 0, 0, "", cfg, &mut f, &mut order);
         for d in &mut f.defs {
             // The walk said so itself, per def.
             debug_assert_eq!(d.top_level, d.scope == 0);
@@ -2636,20 +3101,31 @@ mod part_tests {
         }
     }
 
+    /// The line generator for each config: what reaches its annotations.
+    type Statement = fn(&mut dyn FnMut(usize) -> usize) -> String;
+
+    fn configs(sg: &SynGrammar) -> [(&'static str, BindingConfig, Statement); 3] {
+        [
+            ("stress", stress_config(sg), statement),
+            ("demo", demo_binding_config(sg), statement),
+            ("features", features_config(sg), feature_statement),
+        ]
+    }
+
     /// Opened, read at every size from every node a part to the real
     /// one: the same fragments as the walk.
     #[test]
     fn parts_put_together_what_the_walk_finds() {
         let p = pipe();
-        let mut r = rng(0x9A27_5EED);
-        let text = program(&mut r, 400);
-        let s = IncSession::new(&p.lexer, &p.sg, &p.tables, &text).unwrap();
-        for cfg in [stress_config(&p.sg), demo_binding_config(&p.sg)] {
+        for (name, cfg, statement) in configs(&p.sg) {
+            let mut r = rng(0x9A27_5EED);
+            let text = program_of(&mut r, 400, statement);
+            let s = IncSession::new(&p.lexer, &p.sg, &p.tables, &text).unwrap();
             for piece in [0, 1, 24, 200, 1000, PIECE_BYTES] {
                 let mut db = SemDb::new(cfg.clone());
                 db.piece_bytes = piece;
                 db.set_tree("a", s.tree().unwrap().clone());
-                hold_to_the_walk(&db, "a", &format!("piece {piece}"));
+                hold_to_the_walk(&db, "a", &format!("{name} piece {piece}"));
                 assert!(db.files["a"].items.iter().any(|slot| slot.part.is_some()), "the block item is read in parts");
             }
         }
@@ -2664,148 +3140,238 @@ mod part_tests {
     #[test]
     fn parts_kept_across_edits_put_together_what_the_walk_finds() {
         let p = pipe();
-        for (seed, piece) in [(0x0001_C0DE, 0), (0x0002_C0DE, 48), (0x0003_C0DE, 300), (0x0004_C0DE, PIECE_BYTES)] {
-            let mut r = rng(seed);
-            let text = program(&mut r, 600);
-            let mut s = IncSession::new(&p.lexer, &p.sg, &p.tables, &text).unwrap();
-            let cfg = stress_config(&p.sg);
-            let mut db = SemDb::new(cfg.clone());
-            db.piece_bytes = piece;
-            db.set_tree("a", s.tree().unwrap().clone());
-            hold_to_the_walk(&db, "a", "opened");
-            for step in 0..150 {
-                let n = s.buf.lines.len();
-                let start = r(n.saturating_sub(1).max(1));
-                let line = match r(6) {
-                    0 => "{".to_string(),
-                    1 => "}".to_string(),
-                    _ => statement(&mut r),
-                };
-                let (end, replacement) = match r(4) {
-                    0 => (start, vec![Line::new(line, LineTerm::Lf)]),
-                    1 => (start + 1, vec![]),
-                    2 => {
-                        // The same line, a digit changed for another: the
-                        // facts do not move, and the fragment is kept.
-                        let old = s.buf.lines[start].text.clone();
-                        let swapped: String = old
-                            .chars()
-                            .map(|c| if c.is_ascii_digit() { char::from(b'0' + ((c as u8 - b'0' + 1) % 10)) } else { c })
-                            .collect();
-                        (start + 1, vec![Line::new(swapped, LineTerm::Lf)])
-                    }
-                    _ => (start + 1, vec![Line::new(line, LineTerm::Lf)]),
-                };
-                s.edit(&p.sg, &p.tables, &[LineEdit { start, end, replacement }]).unwrap();
-                db.set_tree("a", s.tree().unwrap().clone());
-                let what = format!("seed {seed:#x} piece {piece} step {step}");
-                hold_to_the_walk(&db, "a", &what);
-                if step % 10 == 0 {
-                    let mut fresh = SemDb::new(cfg.clone());
-                    fresh.set_tree("a", s.tree().unwrap().clone());
-                    assert_eq!(*db.symbols("a"), *fresh.symbols("a"), "{what}: symbols");
-                    assert_eq!(db.resolve("a"), fresh.resolve("a"), "{what}: resolutions");
-                    assert_eq!(db.unresolved("a"), fresh.unresolved("a"), "{what}: unresolved");
-                }
+        for (name, cfg, statement) in configs(&p.sg) {
+            if name == "demo" {
+                // Its annotations are a subset of the stress config's.
+                continue;
             }
-            assert!(db.stats.fragments_kept > 0, "seed {seed:#x}: some edit left an item's facts as they were");
+            for (seed, piece) in [
+                (0x0001_C0DE, 0),
+                (0x0002_C0DE, 48),
+                (0x0003_C0DE, 300),
+                (0x0004_C0DE, PIECE_BYTES),
+            ] {
+                let mut r = rng(seed);
+                let text = program_of(&mut r, 600, statement);
+                let mut s = IncSession::new(&p.lexer, &p.sg, &p.tables, &text).unwrap();
+                let mut db = SemDb::new(cfg.clone());
+                db.piece_bytes = piece;
+                db.set_tree("a", s.tree().unwrap().clone());
+                hold_to_the_walk(&db, "a", &format!("{name} opened"));
+                for step in 0..150 {
+                    let n = s.buf.lines.len();
+                    let start = r(n.saturating_sub(1).max(1));
+                    let line = match r(6) {
+                        0 => "{".to_string(),
+                        1 => "}".to_string(),
+                        _ => statement(&mut r),
+                    };
+                    let (end, replacement) = match r(4) {
+                        0 => (start, vec![Line::new(line, LineTerm::Lf)]),
+                        1 => (start + 1, vec![]),
+                        2 => {
+                            // The same line, a digit changed for another: the
+                            // facts do not move, and the fragment is kept.
+                            let old = s.buf.lines[start].text.clone();
+                            let swapped: String = old
+                                .chars()
+                                .map(|c| {
+                                    if c.is_ascii_digit() {
+                                        char::from(b'0' + ((c as u8 - b'0' + 1) % 10))
+                                    } else {
+                                        c
+                                    }
+                                })
+                                .collect();
+                            (start + 1, vec![Line::new(swapped, LineTerm::Lf)])
+                        }
+                        _ => (start + 1, vec![Line::new(line, LineTerm::Lf)]),
+                    };
+                    s.edit(&p.sg, &p.tables, &[LineEdit { start, end, replacement }]).unwrap();
+                    db.set_tree("a", s.tree().unwrap().clone());
+                    let what = format!("{name} seed {seed:#x} piece {piece} step {step}");
+                    hold_to_the_walk(&db, "a", &what);
+                    if step % 10 == 0 {
+                        let mut fresh = SemDb::new(cfg.clone());
+                        fresh.set_tree("a", s.tree().unwrap().clone());
+                        assert_eq!(*db.symbols("a"), *fresh.symbols("a"), "{what}: symbols");
+                        assert_eq!(db.resolve("a"), fresh.resolve("a"), "{what}: resolutions");
+                        assert_eq!(db.unresolved("a"), fresh.unresolved("a"), "{what}: unresolved");
+                    }
+                }
+                assert!(
+                    db.stats.fragments_kept > 0,
+                    "{name} seed {seed:#x}: some edit left an item's facts as they were"
+                );
+            }
         }
     }
 
-    /// The walk the parts replaced, verbatim.
-fn walk(
-    n: &GreenNode,
-    base: u32,
-    scope: ScopeId,
-    cfg: &BindingConfig,
-    f: &mut ItemFacts,
-    order: &mut u32,
-) {
-    let mut scope = scope;
-    // When a production BOTH defines and opens a scope, the def
-    // belongs to the ENCLOSING scope — function-name semantics:
-    // `macro m(x) => …` puts `m` outside and `x` inside. (Nothing
-    // else is sensible: a def inside its own scope is invisible.)
-    let outer = scope;
-    if n.prod != RUN_PROD {
-        if let Some(&(_, _, unordered, barrier)) =
-            cfg.scopes.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
-        {
-            let id = f.scope_parents.len() as ScopeId;
-            f.scope_parents.push(scope);
-            f.scope_unordered.push(unordered);
-            f.scope_barrier.push(barrier);
-            scope = id;
-        }
+    /// An item retyped without changing what it declares keeps its
+    /// fragment, though a qualified name in it escapes with its base:
+    /// that a name escapes is told by resolving it, and nothing of it is
+    /// kept with what the tree declares.
+    #[test]
+    fn a_fragment_whose_qualified_name_escapes_is_kept_when_its_facts_are() {
+        let p = pipe();
+        let cfg = features_config(&p.sg);
+        let mut s = IncSession::new(&p.lexer, &p.sg, &p.tables, "emit(a1, 2);\n").unwrap();
+        let mut db = SemDb::new(cfg);
+        db.set_tree("a", s.tree().unwrap().clone());
+        let syms = db.symbols("a");
+        let emit = syms
+            .refs
+            .iter()
+            .position(|r| r.name == "emit" && r.kind == RefKind::Qualified)
+            .unwrap();
+        assert_eq!(db.resolve("a")[emit], Target::Escapes, "`emit` escapes with `a1`, its base");
+        let replacement = vec![Line::new("emit(a1, 3);".to_string(), LineTerm::Lf)];
+        s.edit(&p.sg, &p.tables, &[LineEdit { start: 0, end: 1, replacement }]).unwrap();
+        db.set_tree("a", s.tree().unwrap().clone());
+        assert_eq!(db.stats.fragments_kept, 1, "the retyped item's fragment is kept");
+        assert!(db.unresolved("a").is_empty() && db.qualified_errors("a").is_empty());
     }
-    // A production's declared namespace covers its def and refs.
-    let node_ns = cfg
-        .namespaces
-        .iter()
-        .find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
-        .map(|t| t.2.as_str())
-        .unwrap_or("");
-    if let Some(&(_, _, k)) = cfg.defs.iter().find(|&&(nt, p, _)| nt == n.nt && p == n.prod) {
-        if let Some((name, off)) = name_child(n, k) {
-            *order += 1;
-            f.defs.push(Def {
-                span: (base + off, base + off + name.len() as u32),
-                name,
-                scope: outer,
-                order: *order,
-                top_level: outer == 0,
-                exported: cfg.exports.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
-                ns: node_ns.to_string(),
-            });
-        }
-    }
-    // A production may carry SEVERAL references (a qualified path
-    // has a base @ref and a @qualify name), so collect all entries.
-    for &(nt2, p2, k, kind) in cfg.refs.iter() {
-        if nt2 != n.nt || p2 != n.prod {
-            continue;
-        }
-        if let Some((name, off)) = name_child(n, k) {
-            *order += 1;
-            f.refs.push(Ref {
-                span: (base + off, base + off + name.len() as u32),
-                name,
-                scope,
-                order: *order,
-                kind,
-                ns: node_ns.to_string(),
-            });
-        }
-    }
-    if let Some(&(_, _, body)) =
-        cfg.modules.iter().find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
-    {
-        if let (false, Some(span)) = (f.defs.is_empty(), child_span(n, base, body)) {
-            // The def this production just pushed introduces the
-            // namespace; members are the defs inside `span`.
-            f.modules.push(((f.defs.len() - 1) as u32, span));
-        }
-    }
-    if let Some(&(_, _, base_child, _)) =
-        cfg.quals.iter().find(|&&(nt2, p2, _, _)| nt2 == n.nt && p2 == n.prod)
-    {
-        if let Some(bspan) = child_span(n, base, base_child) {
-            // The Qualified ref for this node was pushed just above.
-            if let Some(ri) = f
-                .refs
-                .iter()
-                .rposition(|r| r.kind == RefKind::Qualified && r.span.0 >= base && r.span.0 < base + n.width)
+
+    /// The walk the parts replaced, verbatim, with what was added since
+    /// written out its own way: the namespace a subtree stands in passed
+    /// down (`ns`), and a node that defers its pattern's defs re-ordering
+    /// them after the child it names (or after itself).
+    fn walk(
+        n: &GreenNode,
+        base: u32,
+        scope: ScopeId,
+        ns: &str,
+        cfg: &BindingConfig,
+        f: &mut ItemFacts,
+        order: &mut u32,
+    ) {
+        let mut scope = scope;
+        // When a production BOTH defines and opens a scope, the def
+        // belongs to the ENCLOSING scope — function-name semantics:
+        // `macro m(x) => …` puts `m` outside and `x` inside. (Nothing
+        // else is sensible: a def inside its own scope is invisible.)
+        let outer = scope;
+        if n.prod != RUN_PROD {
+            if let Some(&(_, _, unordered, barrier)) =
+                cfg.scopes.iter().find(|&&(nt, p, _, _)| nt == n.nt && p == n.prod)
             {
-                f.quals.push((bspan, ri as u32));
+                let id = f.scope_parents.len() as ScopeId;
+                f.scope_parents.push(scope);
+                f.scope_unordered.push(unordered);
+                f.scope_barrier.push(barrier);
+                f.scope_members.push(cfg.members.contains(&(n.nt, n.prod)));
+                scope = id;
             }
         }
-    }
-    let mut off = base;
-    for c in &n.children {
-        if let GreenChild::Node(m) = c {
-            walk(m, off, scope, cfg, f, order);
+        // A production's declared namespace covers its def and refs; without
+        // one they stand in `ns`.
+        let node_ns = cfg
+            .namespaces
+            .iter()
+            .find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
+            .map(|t| t.2.as_str())
+            .unwrap_or(ns);
+        let first_def = f.defs.len();
+        if let Some(&(_, _, k)) = cfg.defs.iter().find(|&&(nt, p, _)| nt == n.nt && p == n.prod) {
+            if let Some((name, off)) = name_child(n, k, cfg) {
+                *order += 1;
+                f.defs.push(Def {
+                    span: (base + off, base + off + name.len() as u32),
+                    name,
+                    scope: outer,
+                    order: *order,
+                    top_level: outer == 0,
+                    exported: cfg.exports.iter().any(|&(nt2, p2)| nt2 == n.nt && p2 == n.prod),
+                    ns: node_ns.to_string(),
+                    hoisted: cfg.hoisted.contains(&(n.nt, n.prod)),
+                    open: cfg.open.contains(&(n.nt, n.prod)),
+                });
+            }
         }
-        off += c.width();
+        // A production may carry SEVERAL references (a qualified path
+        // has a base @ref and a @qualify name), so collect all entries.
+        for &(nt2, p2, k, kind) in cfg.refs.iter() {
+            if nt2 != n.nt || p2 != n.prod {
+                continue;
+            }
+            if let Some((name, off)) = name_child(n, k, cfg) {
+                *order += 1;
+                f.refs.push(Ref {
+                    span: (base + off, base + off + name.len() as u32),
+                    name,
+                    scope,
+                    order: *order,
+                    kind,
+                    ns: node_ns.to_string(),
+                });
+            }
+        }
+        if let Some(&(_, _, body)) =
+            cfg.modules.iter().find(|&&(nt2, p2, _)| nt2 == n.nt && p2 == n.prod)
+        {
+            if let (false, Some(span)) = (f.defs.is_empty(), child_span(n, base, body)) {
+                // The def this production just pushed introduces the
+                // namespace; members are the defs inside `span`.
+                f.modules.push(((f.defs.len() - 1) as u32, span));
+            }
+        }
+        if let Some(&(_, _, base_child, _)) =
+            cfg.quals.iter().find(|&&(nt2, p2, _, _)| nt2 == n.nt && p2 == n.prod)
+        {
+            if let Some(bspan) = base_span(n, base, base_child, cfg) {
+                // The Qualified ref for this node was pushed just above.
+                if let Some(ri) = f.refs.iter().rposition(|r| {
+                    r.kind == RefKind::Qualified && r.span.0 >= base && r.span.0 < base + n.width
+                }) {
+                    f.quals.push((bspan, ri as u32));
+                }
+            }
+        }
+        let defer = cfg
+            .defers
+            .iter()
+            .find(|&&(nt2, p2, _, _)| nt2 == n.nt && p2 == n.prod)
+            .and_then(|&(_, _, pat, after)| child_span(n, base, pat).map(|span| (span, after)));
+        let mut deferred = false;
+        // The pattern's defs take the order of the last fact read so far.
+        let later = |f: &mut ItemFacts, span: (u32, u32), last: u32| {
+            for d in &mut f.defs[first_def..] {
+                if d.span.0 >= span.0 && d.span.1 <= span.1 {
+                    d.order = last;
+                }
+            }
+        };
+        let mut off = base;
+        let mut sym = 0usize;
+        for c in &n.children {
+            let is_symbol = match c {
+                GreenChild::Token(t) => !t.trivia && !t.is_missing(),
+                GreenChild::Node(m) => m.nt != ERROR_NT,
+            };
+            if let GreenChild::Node(m) = c {
+                let given = is_symbol
+                    .then(|| {
+                        cfg.child_namespaces
+                            .iter()
+                            .find(|&&(nt2, p2, k, _)| nt2 == n.nt && p2 == n.prod && k == sym)
+                            .map(|t| t.3.as_str())
+                    })
+                    .flatten();
+                walk(m, off, scope, given.unwrap_or(ns), cfg, f, order);
+            }
+            off += c.width();
+            if is_symbol {
+                if let Some((span, Some(after))) = defer {
+                    if after == sym {
+                        later(f, span, *order);
+                        deferred = true;
+                    }
+                }
+                sym += 1;
+            }
+        }
+        if let (Some((span, _)), false) = (defer, deferred) {
+            later(f, span, *order);
+        }
     }
-}
 }

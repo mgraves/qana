@@ -16,7 +16,9 @@ this grammar too. Which token a piece of text is differs:
 * **Keywords.** Rust 2021's strict keywords (with `async`, `await` and
   `dyn` from 2018) and its reserved words are tokens of their own.
   `self` and `Self` are two keywords. A raw identifier (`r#fn`) is a
-  name.
+  name. `_` alone is a token of its own too, as the Reference has it (an
+  identifier is not `_`): the wildcard pattern, the inferred type, the
+  underscore expression, `const _`, `as _`.
 * **Weak keywords** (`union`, `auto`, `default`, `raw`, `safe`) are
   keywords only before what makes them so, read from the rest of the
   line, and names everywhere else: `a.union(b)` and
@@ -42,14 +44,14 @@ statements, let chains and `let … else`, closures, casts, paths,
 patterns) and the errors rustc reports (chained comparisons, `&dyn A +
 B`, `x as u8 < y`).
 
-Measured over real code, 67,884 files: this workspace, Synkro, and
-the 1,990 crates of a cargo registry (rust-analyzer's parser tests among
-them). 67,308 parse with no repair. Each of the other 576 is not stable
+Measured over real code, 68,103 files: this workspace, Synkro, and
+the 2,002 crates of a cargo registry (rust-analyzer's parser tests among
+them). 67,524 parse with no repair. Each of the other 579 is not stable
 Rust 2021: code of the 2015 and 2018 editions (`try!`, bare trait
 objects), unstable syntax (`builtin #`, `box`, `gen`, `yield`, `try`
 blocks, `if let` guards, const traits, macros 2.0, trait aliases and the
-like), test fixtures rustc rejects on purpose, or one of the omissions
-below.
+like), test fixtures rustc rejects on purpose (`static _`, a variant
+named `_`), or one of the omissions below.
 
 What it leaves out:
 
@@ -73,8 +75,43 @@ What it leaves out:
 ## What it derives
 
 The outline: functions, types, traits, impls, modules, constants and
-macro definitions (`@outline`). It declares no binding (`@def`/`@ref`)
-yet.
+macro definitions (`@outline`).
+
+Names within a file (`@def`, `@ref`, `@scope`), bound as rustc resolves
+them where one file can tell:
+
+* items (functions, types, traits, modules, constants, statics, `use`
+  leaves, `extern crate`, `macro_rules!`) are visible throughout their
+  module or block, before their declaration too; generic parameters
+  throughout their item;
+* a pattern's names take effect after their `let` (`let line =
+  line.trim()` reads the earlier `line`), after a `for` loop's iterator,
+  after an `if let` or `while let` scrutinee; what a condition binds
+  reaches its block, the conditions after it, and not its `else`; a
+  match arm scopes its pattern over its guard and body; closures scope
+  their parameters;
+* fields, variants and the items of an `impl` or a trait are members:
+  reached by a path (`E::A`) or through a value, never by a plain name,
+  even inside the impl;
+* an inline module sees its own items and not its parent's (a module
+  is a barrier, as in Rust); its items are its members (`m::f`);
+* labels, lifetimes and macros stand in namespaces of their own;
+  an attribute's path and a `use` path stand in namespaces where nothing
+  is defined (`attribute`, `import`), and escape;
+* a name the file cannot place escapes: never a problem, never painted
+  unresolved. That is every name from another file, a dependency, a
+  prelude (`Some`, `Vec`, `'static`) or a glob import, every name under
+  `crate::`, `super::`, `self::`, `Self::` or a qualified self type, and
+  a member of a type the file defines that its `impl` blocks declare
+  (`Cell::new`): types, units and imports come later.
+
+Not yet told apart: a lone name in a pattern binds it, though rustc reads
+it as a path when it names a unit struct, a unit variant or a constant
+(`None =>`); telling which needs the names the preludes and other files
+declare. `use super::*` does not yet open a module to its parent's items,
+and `macro_rules!` defined outside an inline module is not seen inside
+it. `cargo test -p qana-lang --test rust_binding` pins the binding; over
+this workspace's largest files, no name is a problem.
 
 Folding (`@fold`), wherever one runs over lines: blocks and the bodies of
 modules, structs, enums, unions, traits, impls, `extern` blocks, `match`

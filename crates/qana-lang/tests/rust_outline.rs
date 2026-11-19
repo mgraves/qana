@@ -1,7 +1,8 @@
 //! The outline of Rust (`examples/rust/rust.qana`'s `@outline`s): what a
-//! construct is called and what kind it is, nested as written. The
-//! grammar declares no binding, so each construct is named by the text of
-//! its labelled symbol: a function by its `name`, an impl by its type.
+//! construct is called and what kind it is, nested as written. A
+//! construct's definition sits on the construct, not inside the symbol its
+//! `@outline` labels, so each is named by the text of that symbol: a
+//! function by its `name`, an impl by its type.
 
 use qana_lang::EmbeddedLang;
 

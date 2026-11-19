@@ -205,6 +205,7 @@ pub fn compose(
                 "{pfx_camel}Island{}",
                 if islands.len() > 1 { i.to_string() } else { String::new() }
             )),
+            keep_node: false,
         });
         island_ids.push((open_ids[i], close, prod));
     }
@@ -224,6 +225,7 @@ pub fn compose(
             rhs,
             prec: p.prec,
             name: Some(format!("{pfx_camel}{}", guest_syn.prod_name(i))),
+            keep_node: p.keep_node,
         });
     }
 

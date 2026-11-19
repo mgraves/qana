@@ -201,6 +201,11 @@ pub struct FactCard {
     pub def_site: Option<(String, (u32, u32))>,
     /// "cannot find …", "… is not exported", when unresolved.
     pub problem: Option<String>,
+    /// A reference that binds to nothing the engine sees, and is no
+    /// problem: what it names is defined outside what the engine can see
+    /// (another file, a library, a language's prelude). `def_site` is
+    /// then `None`, and so is `problem`.
+    pub escapes: bool,
     /// Display type, already rendered as the engine wants it shown.
     pub ty: Option<String>,
     /// Which of the language's namespaces this name lives in, when it

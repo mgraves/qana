@@ -39,6 +39,11 @@ pub struct Prod {
     /// CamelCase variant name for the typed AST (e.g. "LetStmt").
     /// Unnamed productions get positional names in generated code.
     pub name: Option<String>,
+    /// Its node means something of its own (its alternative carries
+    /// attributes): its rule is never stored as a balanced list, whose
+    /// runs are not its productions' nodes, so what the attributes say
+    /// of the node is said of a node the tree holds.
+    pub keep_node: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -111,17 +116,23 @@ impl SynGrammar {
     }
 
     pub fn prod(&mut self, lhs: NtId, rhs: Vec<Sym>) -> usize {
-        self.prods.push(Prod { lhs, rhs, prec: None, name: None });
+        self.prods.push(Prod { lhs, rhs, prec: None, name: None, keep_node: false });
         self.prods.len() - 1
     }
 
     pub fn prod_named(&mut self, lhs: NtId, name: &str, rhs: Vec<Sym>) -> usize {
-        self.prods.push(Prod { lhs, rhs, prec: None, name: Some(name.to_string()) });
+        self.prods.push(Prod {
+            lhs,
+            rhs,
+            prec: None,
+            name: Some(name.to_string()),
+            keep_node: false,
+        });
         self.prods.len() - 1
     }
 
     pub fn prod_prec(&mut self, lhs: NtId, rhs: Vec<Sym>, prec: (u8, Assoc)) -> usize {
-        self.prods.push(Prod { lhs, rhs, prec: Some(prec), name: None });
+        self.prods.push(Prod { lhs, rhs, prec: Some(prec), name: None, keep_node: false });
         self.prods.len() - 1
     }
 

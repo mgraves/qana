@@ -9,6 +9,8 @@ const RUST: &str = include_str!("../../../examples/rust/rust.qana");
 const C: &str = include_str!("../../../examples/c/c.qana");
 const STRUCTLANG: &str = include_str!("../../../examples/structs/structlang.qana");
 const CHARTLANG: &str = include_str!("../../../examples/mini/chartlang.qana");
+/// The grammar of grammars: `.qana` files are its.
+const QANA: &str = include_str!("../qana.qana");
 
 /// A grammar's declared extensions, read without certifying it.
 fn declared(src: &str) -> Vec<String> {
@@ -34,6 +36,7 @@ fn the_shipped_grammars_declare_their_extensions() {
     assert_eq!(declared(RUST), ["rs"]);
     assert_eq!(declared(C), ["c", "h"]);
     assert_eq!(declared(STRUCTLANG), ["sl"]);
+    assert_eq!(declared(QANA), ["qana"]);
     assert!(declared(CHARTLANG).is_empty(), "declaring none is allowed");
 }
 

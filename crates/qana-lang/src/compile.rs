@@ -2250,7 +2250,7 @@ pub fn dump_styles(s: &Styles, n_tokens: usize) -> String {
 }
 
 pub fn dump_binding(b: &BindingConfig) -> String {
-    format!("defs {:?} refs {:?} scopes {:?}", b.defs, b.refs, b.scopes)
+    format!("defs {:?} refs {:?} scopes {:?} unordered {}", b.defs, b.refs, b.scopes, b.unordered)
 }
 
 pub fn dump_outline(o: &OutlineConfig) -> String {

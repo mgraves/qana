@@ -12,6 +12,7 @@
 // `x*`, First/More for `x+`, None/Some for `x?`).
 
 language Qana
+extensions "qana"
 
 token WS = /\s+/ @trivia
 token LINE_COMMENT = /\/\/.*/ @trivia @style(comment)
@@ -43,7 +44,7 @@ pair LBRACE RBRACE
 
 start file
 
-rule file = File: decls
+rule file = File: decls @scope(unordered)
 
 rule decls = decl*
 

@@ -297,12 +297,16 @@ pub fn qana_fold_config(
 
 /// Binding for grammar files: token/rule/mode declarations define names,
 /// RHS symbol references read them — one flat, UNORDERED namespace
-/// (forward references are the normal case in grammars).
+/// (forward references are the normal case in grammars). The file is that
+/// scope: `qana.qana` says so with `@scope(unordered)` on its start rule,
+/// which compiles to the file's production as an unordered scope and the
+/// root lifted to it.
 pub fn qana_binding_config(sg: &SynGrammar) -> qana_sem::BindingConfig {
     let mut cfg = qana_sem::BindingConfig { unordered: true, ..Default::default() };
     for i in 0..sg.prods.len() {
         let (nt, prod) = (sg.prods[i].lhs, i as u16);
         match sg.prod_name(i).as_str() {
+            "File" => cfg.scopes.push((nt, prod, true, false)),
             "RuleDecl" | "RuleDeclBar" | "RuleStar" | "RulePlus" | "RuleOpt" | "TokenDef" => {
                 cfg.defs.push((nt, prod, 1))
             }

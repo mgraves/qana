@@ -1,0 +1,22 @@
+[package]
+name = "qana-index"
+version = "0.0.1"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "What a project index keeps about one file of a .qana-defined language: the declarations it offers, the names it needs, and where its declarations are"
+keywords = ["grammar", "index", "language", "editor"]
+categories = ["parsing", "development-tools"]
+
+[dependencies]
+qana-lang.workspace = true
+qana-sem.workspace = true
+qana-services.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# The encoding a host keeps summaries in; the tests round-trip them
+# through it. Without its default `heapless-cas` feature, which reaches
+# atomic-polyfill (RUSTSEC-2023-0089, refused by deny.toml).
+postcard = { version = "1", default-features = false, features = ["alloc"] }

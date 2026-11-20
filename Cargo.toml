@@ -9,6 +9,7 @@ members = [
     "crates/qana-lsp",
     "crates/qana-sem",
     "crates/qana-lang",
+    "crates/qana-index",
     "crates/qana",
     "crates/qana-cli",
 ]

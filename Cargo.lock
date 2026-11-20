@@ -99,6 +99,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "qana-index"
+version = "0.0.1"
+dependencies = [
+ "postcard",
+ "qana-lang",
+ "qana-sem",
+ "qana-services",
+ "serde",
+]
+
+[[package]]
 name = "qana-lang"
 version = "0.0.5"
 dependencies = [

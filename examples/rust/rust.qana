@@ -284,14 +284,14 @@ rule items_opt = item*
 
 rule item =
   | Item:      outer_attrs_opt item_kind
-  | PubItem:   outer_attrs_opt vis vis_item_kind
+  | PubItem:   outer_attrs_opt v:vis k:vis_item_kind @visibility(v, k)
   | ImplItem:  outer_attrs_opt impl_def
 
 // An item in a block. A macro invocation there is a statement (`m! { … }`,
 // `m!(…);`), as rustc reads it; a macro definition is an item.
 rule stmt_item =
   | StmtItem:        outer_attrs_opt vis_item_kind
-  | StmtPubItem:     outer_attrs_opt vis vis_item_kind
+  | StmtPubItem:     outer_attrs_opt v:vis k:vis_item_kind @visibility(v, k)
   | StmtImplItem:    outer_attrs_opt impl_def
   | StmtMacroDef:    outer_attrs_opt macro_def
 
@@ -408,10 +408,10 @@ rule tlast =
 
 // A segment that begins a path and ends no type: `self`, `super`, `crate`.
 rule kseg =
-  | KSelf:        s:"self" @style(inherit, s)
-  | KSuper:       "super"
-  | KCrate:       "crate"
-  | KDollarCrate: DOLLAR "crate"
+  | KSelf:        s:"self" @style(inherit, s) @root(self)
+  | KSuper:       "super" @root(super)
+  | KCrate:       "crate" @root(crate)
+  | KDollarCrate: DOLLAR "crate" @root(crate)
 
 // A plain path (no generic arguments) ending in a name or `Self`.
 rule name_path =
@@ -422,7 +422,7 @@ rule name_path =
 // token after `::` (a name, `<`, `(`) is read before anything is decided,
 // which is what lets `Item::<T> = U` be a binding in generic arguments.
 rule name_path_multi =
-  | PathGlobal:    path_sep t:tlast @style(inherit, t)
+  | PathGlobal:    path_sep t:tlast @style(inherit, t) @root(global, t)
   | PathMoreName:  h:name path_sep t:tlast @style(inherit, t) @ref(h, escaping) @qualify(h, t)
   | PathMoreSelf:  s:"Self" path_sep t:tlast @style(inherit, t) @qualify(s, t)
   | PathMore:      m:name_path_multi path_sep t:tlast @style(inherit, t) @qualify(m, t)
@@ -431,7 +431,7 @@ rule name_path_multi =
 // A plain path ending in `self`, `super` or `crate`.
 rule kw_path =
   | KwPath:      k:kseg @style(inherit, k)
-  | KwPathSuper: kw_path path_sep "super"
+  | KwPathSuper: kw_path path_sep "super" @root(super)
 
 // A plain path: `use`, visibility, attributes, and macro names.
 rule plain_path =
@@ -578,8 +578,8 @@ rule item_kind =
 
 rule vis_item_kind =
   | Use:          "use" use_tree ";"
-  | ModDecl:      mod_head n:name ";" @outline(n, module) @def(n, hoisted, open)
-  | ModDef:       mod_head n:name open:"{" inner_attrs_opt b:items_opt "}" @outline(n, module) @fold(block, open) @def(n, hoisted, open) @module(b) @scope(unordered, barrier)
+  | ModDecl:      mod_head n:name ";" @outline(n, module) @def(n, hoisted, open) @unit(n)
+  | ModDef:       mod_head n:name open:"{" inner_attrs_opt b:items_opt "}" @outline(n, module) @fold(block, open) @def(n, hoisted, open) @unit(n, b) @scope(unordered, barrier)
   | Fn:           fn_def
   | Struct:       struct_def
   | Enum:         "enum" n:name generics_opt where_opt open:"{" v:variants_opt "}" @outline(n, struct) @fold(block, open) @style(type, n) @def(n, hoisted, open) @module(v) @scope
@@ -589,8 +589,8 @@ rule vis_item_kind =
   | TypeAlias:    type_alias
   | Trait:        trait_head n:name generics_opt colon_bounds_opt where_opt open:"{" b:assoc_body "}" @outline(n, class) @fold(block, open) @style(type, n) @def(n, hoisted, open) @module(b) @scope
   | ExternBlock:  extern_head open:"{" inner_attrs_opt foreign_items_opt "}" @fold(block, open)
-  | ExternCrate:  "extern" "crate" n:crate_name ";" @outline(n, module) @def(n, hoisted, open)
-  | ExternCrateAs: "extern" "crate" n:crate_name "as" r:name ";" @outline(n, module) @def(r, hoisted, open)
+  | ExternCrate:  "extern" "crate" n:crate_name ";" @outline(n, module) @def(n, hoisted, open) @root(global, n) @import
+  | ExternCrateAs: "extern" "crate" n:crate_name "as" r:name ";" @outline(n, module) @def(r, hoisted, open) @root(global, n) @import
   | ExternCrateAsUnderscore: "extern" "crate" n:crate_name "as" "_" ";" @outline(n, module)
 
 rule mod_head =
@@ -605,31 +605,32 @@ rule crate_name =
 rule vis_opt = vis?
 
 rule vis =
-  | Pub:      "pub"
-  | PubCrate: "pub" "(" "crate" ")"
-  | PubSelf:  "pub" "(" "self" ")"
-  | PubSuper: "pub" "(" "super" ")"
-  | PubIn:    "pub" "(" "in" p:plain_path ")" @ns(import, p)
+  | Pub:      "pub" @vis(public)
+  | PubCrate: "pub" "(" "crate" ")" @vis(crate)
+  | PubSelf:  "pub" "(" "self" ")" @vis(private)
+  | PubSuper: "pub" "(" "super" ")" @vis(super)
+  | PubIn:    "pub" "(" "in" p:plain_path ")" @ns(import, p) @vis(in, p)
 
 // `use` trees. A leaf defines its name where the `use` stands, open: what
 // it imports has members the file cannot see. Its path names what is
-// imported, which only units resolve (across files: a later phase);
-// until then the path's references stand in the `import` namespace,
-// where nothing is defined, and escape.
+// imported (`@import`), from the prefixes of the groups it is in
+// (`@import_prefix`); a project index resolves it, through units, across
+// files. Within the file the path's references stand in the `import`
+// namespace, where nothing is defined, and escape.
 rule use_tree =
-  | UsePath:       p:plain_path @def(p, hoisted, open) @ns(import, p)
-  | UseRename:     p:plain_path "as" n:name @def(n, hoisted, open) @ns(import, p)
-  | UseRenameUnderscore: p:plain_path "as" "_" @ns(import, p)
-  | UseGlob:       name path_sep STAR
-  | UseMultiGlob:  m:name_path_multi path_sep STAR @ns(import, m)
-  | UseKwGlob:     kw_path path_sep STAR
-  | UseGroup:      name path_sep open:"{" use_trees_opt "}" @fold(list, open)
-  | UseMultiGroup: m:name_path_multi path_sep open:"{" use_trees_opt "}" @fold(list, open) @ns(import, m)
-  | UseKwGroup:    kw_path path_sep open:"{" use_trees_opt "}" @fold(list, open)
-  | UseRootGlob:   STAR
-  | UseGlobalGlob: path_sep STAR
+  | UsePath:       p:plain_path @def(p, hoisted, open) @ns(import, p) @import(p)
+  | UseRename:     p:plain_path "as" n:name @def(n, hoisted, open) @ns(import, p) @import(p)
+  | UseRenameUnderscore: p:plain_path "as" "_" @ns(import, p) @import(p)
+  | UseGlob:       n:name path_sep STAR @import_glob(n)
+  | UseMultiGlob:  m:name_path_multi path_sep STAR @ns(import, m) @import_glob(m)
+  | UseKwGlob:     k:kw_path path_sep STAR @import_glob(k)
+  | UseGroup:      n:name path_sep open:"{" t:use_trees_opt "}" @fold(list, open) @import_prefix(n, t)
+  | UseMultiGroup: m:name_path_multi path_sep open:"{" t:use_trees_opt "}" @fold(list, open) @ns(import, m) @import_prefix(m, t)
+  | UseKwGroup:    k:kw_path path_sep open:"{" t:use_trees_opt "}" @fold(list, open) @import_prefix(k, t)
+  | UseRootGlob:   STAR @import_glob
+  | UseGlobalGlob: path_sep STAR @root(global) @import_glob
   | UseRootGroup:  "{" use_trees_opt "}" @fold(list)
-  | UseGlobalGroup: path_sep open:"{" use_trees_opt "}" @fold(list, open)
+  | UseGlobalGroup: path_sep open:"{" t:use_trees_opt "}" @fold(list, open) @root(global) @import_prefix(t)
 
 rule use_trees_opt =
   | UseTreesNone:
@@ -723,7 +724,7 @@ rule fields_opt =
 
 rule field_list = field+ % ","
 
-rule field = Field: outer_attrs_opt vis_opt n:name COLON type @outline(n, field) @def(n, hoisted)
+rule field = Field: outer_attrs_opt v:vis_opt n:name COLON type @outline(n, field) @def(n, hoisted) @visibility(v, n)
 
 // A tuple field: after `pub (`, the next token tells a restricted
 // visibility (`crate`, `self`, `super`, `in`) from a tuple type, where
@@ -818,14 +819,14 @@ rule impl_rest =
   | ImplGenerics:  generics impl_target
 
 rule impl_target_plain =
-  | InherentTargetPlain: t:impl_type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open)
-  | TraitTargetPlain:    tr:unq_type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr)
-  | NegTargetPlain:      BANG tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr)
+  | InherentTargetPlain: t:impl_type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @impl(t)
+  | TraitTargetPlain:    tr:unq_type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr) @impl(t, tr)
+  | NegTargetPlain:      BANG tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr) @impl(t, tr)
 
 rule impl_target =
-  | InherentTarget: t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open)
-  | TraitTarget:    tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr)
-  | NegTarget:      BANG tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr)
+  | InherentTarget: t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @impl(t)
+  | TraitTarget:    tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr) @impl(t, tr)
+  | NegTarget:      BANG tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr) @impl(t, tr)
 
 rule impl_head =
   | ImplKw:        "impl"
@@ -841,7 +842,7 @@ rule assoc_items_opt = assoc_item*
 
 rule assoc_item =
   | AssocItem:    outer_attrs_opt assoc_vis_kind
-  | PubAssocItem: outer_attrs_opt vis assoc_vis_kind
+  | PubAssocItem: outer_attrs_opt v:vis k:assoc_vis_kind @visibility(v, k)
   | AssocMacro:   outer_attrs_opt item_macro
   | AssocMacroDef: outer_attrs_opt macro_def
 
@@ -859,7 +860,7 @@ rule foreign_items_opt = foreign_item*
 
 rule foreign_item =
   | ForeignItem:    outer_attrs_opt foreign_vis_kind
-  | PubForeignItem: outer_attrs_opt vis foreign_vis_kind
+  | PubForeignItem: outer_attrs_opt v:vis k:foreign_vis_kind @visibility(v, k)
   | ForeignMacro:   outer_attrs_opt item_macro
 
 rule foreign_vis_kind =

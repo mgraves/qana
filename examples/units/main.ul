@@ -1,0 +1,37 @@
+// main.ul — a crate root: two units declared here whose bodies are
+// other files, one whose body is here, imports of every kind, and a type
+// with its members in two impl blocks.
+
+mod shapes;
+pub(crate) mod util;
+
+pub mod geo {
+    pub struct Point {
+        pub x: Num;
+        y: Num;
+    }
+
+    fn origin() {
+        super::shapes::Circle;
+    }
+
+    pub(super) mod inner {
+        pub(in crate::geo) fn deep() {}
+    }
+}
+
+use crate::shapes::{self, Circle as Round, area::*};
+pub use geo::Point;
+use ::std::fmt::{Display};
+use self::util::helpers as _;
+
+impl geo::Point {
+    pub fn new() {
+        Round;
+        crate::util::clamp;
+    }
+}
+
+impl Display for geo::Point {
+    fn fmt() {}
+}

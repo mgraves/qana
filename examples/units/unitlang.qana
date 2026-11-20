@@ -1,0 +1,120 @@
+// Unitlang — units, paths, visibility and imports, as a project index
+// reads them.
+//
+// A file is a unit; `mod a { … }` is a unit whose body is here, and
+// `mod a;` one whose body is in another file, which a project model
+// finds (`@unit`). A path may begin at a root (`self`, `super`,
+// `crate`, `::`) instead of where it stands (`@root`). Visibility says
+// who may see a declaration or an import (`@vis`, `@visibility`). `use`
+// imports one declaration, every name of a unit, or a group sharing a
+// prefix (`@import`, `@import_glob`, `@import_prefix`). An `impl` block's
+// members belong to the type it names (`@impl`).
+//
+// It is the binding tier's test language for them, Rust's module system
+// in miniature, before `rust.qana` uses them. Binding within a file is
+// the module tier's ordinary binding: what a path names in another file
+// is the index's to find.
+
+language Unitlang
+extensions "ul"
+
+token WS           = /\s+/ @trivia
+token LINE_COMMENT = /\/\/.*/ @trivia @style(comment)
+token IDENT        = /[\a_][\w_]*/ @specialize @style(variable)
+token LPAREN = "(" @style(bracket)
+token RPAREN = ")" @style(bracket)
+token LBRACE = "{" @style(bracket)
+token RBRACE = "}" @style(bracket)
+token COLON  = ":" @style(punctuation)
+token COMMA  = "," @style(punctuation)
+token SEMI   = ";" @style(punctuation)
+token SEP    = "::" @style(punctuation)
+token STAR   = "*" @style(operator)
+
+keywords IDENT = pub crate super self in mod fn use as impl for struct "_"
+
+pair LPAREN RPAREN
+pair LBRACE RBRACE
+
+start file
+
+rule file = File: items @scope(unordered)
+
+rule items = item*
+
+rule item =
+  | Item:    item_kind
+  | PubItem: v:vis k:item_kind @visibility(v, k)
+
+rule vis =
+  | Pub:      "pub" @vis(public)
+  | PubCrate: "pub" "(" "crate" ")" @vis(crate)
+  | PubSuper: "pub" "(" "super" ")" @vis(super)
+  | PubSelf:  "pub" "(" "self" ")" @vis(private)
+  | PubIn:    "pub" "(" "in" p:path ")" @vis(in, p) @ns(import, p)
+
+rule item_kind =
+  | ModDecl: "mod" n:name ";" @def(n, hoisted, open) @unit(n) @outline(n, module)
+  | ModDef:  "mod" n:name open:"{" b:items "}" @def(n, hoisted, open) @unit(n, b) @scope(unordered, barrier) @outline(n, module) @fold(block, open)
+  | Fn:      "fn" n:name "(" ")" b:block @def(n, hoisted) @scope @outline(n, function)
+  | Struct:  "struct" n:name open:"{" f:fields "}" @def(n, hoisted, open) @scope @outline(n, struct) @fold(block, open)
+  | Use:     "use" use_tree ";"
+  | Impl:    "impl" t:path open:"{" impl_body "}" @impl(t) @scope @outline(t, class) @fold(block, open)
+  | ImplFor: "impl" tr:path "for" t:path open:"{" impl_body "}" @impl(t, tr) @scope @outline(t, class) @fold(block, open)
+
+// What an impl defines directly is a member: reached by `Type::name`.
+rule impl_body = ImplBody: items @scope(members)
+
+rule fields = FieldList: field* @scope(members)
+
+rule field = Field: v:vis_opt n:name ":" t:path ";" @def(n, hoisted) @visibility(v, n) @outline(n, field)
+
+rule vis_opt = vis?
+
+rule name = Name: t:IDENT @style(inherit, t)
+
+// Paths: a name looked up where the path stands, a path then `::` and a
+// name, or a root first.
+rule path =
+  | One:    n:name @ref(n, escaping) @style(inherit, n)
+  | More:   b:path "::" n:name @qualify(b, n) @style(inherit, n)
+  | Rooted: r:root "::" n:name @qualify(r, n) @style(inherit, n)
+  | Global: "::" n:name @root(global, n) @style(inherit, n)
+
+// `self`, `super`, `crate`, and `super` again after one of them.
+rule root =
+  | SelfRoot:   "self" @root(self)
+  | SuperRoot:  "super" @root(super)
+  | CrateRoot:  "crate" @root(crate)
+  | SuperAgain: root "::" "super" @root(super)
+
+// `use` trees. A leaf defines its name where the `use` stands; its path's
+// references stand in the `import` namespace, where nothing is defined,
+// so within the file they escape: what they name is the index's to find.
+rule use_tree =
+  | UsePath:        p:use_path @def(p, hoisted, open) @import(p) @ns(import, p)
+  | UseRename:      p:use_path "as" n:name @def(n, hoisted, open) @import(p) @ns(import, p)
+  | UseAnon:        p:use_path "as" "_" @import(p) @ns(import, p)
+  | UseGlob:        p:path "::" "*" @import_glob(p) @ns(import, p)
+  | UseRootGlob:    r:root "::" "*" @import_glob(r)
+  | UseGroup:       p:path "::" open:"{" t:use_trees "}" @import_prefix(p, t) @ns(import, p) @fold(list, open)
+  | UseRootGroup:   r:root "::" open:"{" t:use_trees "}" @import_prefix(r, t) @fold(list, open)
+  | UseGlobalGroup: "::" open:"{" t:use_trees "}" @root(global) @import_prefix(t) @fold(list, open)
+  | UseAllGlob:     "*" @import_glob
+
+// A leaf's path: a path whose last name it defines, or a bare `self`
+// (`use a::{self}`), which defines none: it names the group's prefix.
+rule use_path =
+  | UseName: p:path @style(inherit, p)
+  | UseSelf: root
+
+rule use_trees = use_tree* % ","
+
+// Bodies: what a function does names paths, and may declare.
+rule block = Block: "{" stmts "}" @scope
+
+rule stmts = stmt*
+
+rule stmt =
+  | ItemStmt: item
+  | PathStmt: p:path ";" @style(inherit, p)

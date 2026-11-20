@@ -390,14 +390,34 @@ fn cmd_check(args: &Args) {
         &{
             let imports =
                 def.binding.refs.iter().filter(|r| r.3 == qana_sem::RefKind::Import).count();
-            if def.binding.exports.is_empty() && imports == 0 {
-                format!("none declared  {}", dim("(@export/@import — open world)"))
+            if !def.binding.module_tier() {
+                format!("none declared  {}", dim("(@export/@import of a name — open world)"))
             } else {
                 format!(
                     "{} exporting production(s), {} import form(s)  {}",
                     def.binding.exports.len(),
                     imports,
                     dim("(strict)")
+                )
+            }
+        },
+    );
+    row(
+        "units",
+        &{
+            let b = &def.binding;
+            if b.units.is_empty() && b.imports.is_empty() && b.impls.is_empty() {
+                format!("none declared  {}", dim("(@unit/@import/@impl — each file its own unit)"))
+            } else {
+                format!(
+                    "{} unit, {} import, {} prefix, {} impl form(s); {} root(s), {} visibilit(ies)  {}",
+                    b.units.len(),
+                    b.imports.len(),
+                    b.prefixes.len(),
+                    b.impls.len(),
+                    b.roots.len(),
+                    b.vis_levels.len(),
+                    dim("(read by a project index)")
                 )
             }
         },

@@ -13,7 +13,7 @@ use qana_grammar::model::{BracketKind, LexGrammar, TokenDef, TokenId};
 use qana_grammar::pat::Pat;
 use qana_grammar::syn::{Assoc, Sym, SynGrammar};
 use qana_grammar::{build_lr, CompiledLexer, GreenChild, GreenNode, GreenToken, LrTables, Vocab};
-use qana_sem::{BindingConfig, RefKind, TyTerm, TypeConfig, TypeRule};
+use qana_sem::{BindingConfig, RefKind, Root, TyTerm, TypeConfig, TypeRule};
 use qana_services::{FoldConfig, OutlineConfig, OutlineEntry, Styles, LEGEND};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1158,6 +1158,13 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             let mut pending_module: Option<usize> = None;
             let mut pending_qualify: Option<usize> = None;
             let mut pending_defer: Option<usize> = None;
+            let mut pending_unit: Option<usize> = None;
+            let mut pending_glob: Option<usize> = None;
+            let mut pending_prefix: Option<usize> = None;
+            let mut pending_visibility: Option<usize> = None;
+            let mut seen_root = false;
+            let mut seen_vis = false;
+            let mut seen_impl = false;
 
             for (ai, a) in alt.attrs.iter().enumerate() {
                 let pos_of = |d: &mut Vec<QanaDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
@@ -1428,8 +1435,8 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                         }
                     }
                     "import" => {
-                        if a.args.len() != 1 {
-                            error(d, a.name_span, "@import takes one label argument".into());
+                        if a.args.len() > 1 {
+                            error(d, a.name_span, "@import takes at most the label of a path".into());
                         } else if pending_import.replace(ai).is_some() {
                             error(d, a.name_span, "duplicate @import".into());
                         }
@@ -1446,6 +1453,109 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             error(d, a.name_span, "@qualify takes base and name labels".into());
                         } else if pending_qualify.replace(ai).is_some() {
                             error(d, a.name_span, "duplicate @qualify".into());
+                        }
+                    }
+                    // ---- units: `@unit`, `@root`, `@vis`, `@visibility`,
+                    // `@import_glob`, `@import_prefix`, `@impl` ----
+                    "unit" => {
+                        // `@unit(name[, body])`: the def at `name` is a
+                        // unit, whose body is `body` or elsewhere.
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@unit takes its name's label and an optional body label".into());
+                        } else if pending_unit.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @unit".into());
+                        }
+                    }
+                    "root" => {
+                        // `@root(kind[, first])`: the node begins a path.
+                        let root = match a.args.first().map(|x| (x.0.as_str(), x.2)) {
+                            Some(("crate", false)) => Some(Root::Crate),
+                            Some(("super", false)) => Some(Root::Unit(1)),
+                            Some(("self", false)) => Some(Root::Unit(0)),
+                            Some(("global", false)) => Some(Root::Global),
+                            _ => None,
+                        };
+                        if std::mem::replace(&mut seen_root, true) {
+                            error(d, a.name_span, "duplicate @root".into());
+                        } else if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@root takes a root (`crate`, `super`, `self` or `global`) and an optional label of the first name".into());
+                        } else if let Some(root) = root {
+                            let first = match a.args.get(1) {
+                                None => Some(None),
+                                Some(arg) => pos_of(d, arg).map(|k| {
+                                    if matches!(sg.prods[prod as usize].rhs.get(k), Some(Sym::N(_))) {
+                                        bind_rules.push((prod, k, arg.0.clone(), arg.1));
+                                    }
+                                    Some(k)
+                                }),
+                            };
+                            if let Some(first) = first {
+                                binding.roots.push((nt, prod, root, first));
+                            }
+                        } else {
+                            error(d, a.args[0].1, format!("unknown root `{}` (`crate`, `super`, `self` or `global`)", a.args[0].0));
+                        }
+                    }
+                    "vis" => {
+                        // `@vis(level)`, `@vis(in, path)`: a visibility.
+                        let level = a.args.first().filter(|x| !x.2).map(|x| x.0.as_str());
+                        if std::mem::replace(&mut seen_vis, true) {
+                            error(d, a.name_span, "duplicate @vis".into());
+                        } else {
+                            match (level, a.args.len()) {
+                                (Some("public"), 1) => binding.vis_levels.push((nt, prod, None, None)),
+                                (Some("crate"), 1) => binding.vis_levels.push((nt, prod, Some(Root::Crate), None)),
+                                (Some("super"), 1) => binding.vis_levels.push((nt, prod, Some(Root::Unit(1)), None)),
+                                (Some("private"), 1) => binding.vis_levels.push((nt, prod, Some(Root::Unit(0)), None)),
+                                (Some("in"), 2) => {
+                                    if let Some(k) = pos_of(d, &a.args[1]) {
+                                        binding.vis_levels.push((nt, prod, None, Some(k)));
+                                    }
+                                }
+                                _ => error(d, a.name_span, "@vis takes `public`, `crate`, `super` or `private`, or `in` and the label of a path".into()),
+                            }
+                        }
+                    }
+                    "visibility" => {
+                        // `@visibility(v, item)`: what `item` declares has
+                        // the visibility at `v`.
+                        if a.args.len() != 2 {
+                            error(d, a.name_span, "@visibility takes the labels of a visibility and of what it is the visibility of".into());
+                        } else if pending_visibility.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @visibility".into());
+                        }
+                    }
+                    "import_glob" => {
+                        // `@import_glob([path])`: every name of a unit.
+                        if a.args.len() > 1 {
+                            error(d, a.name_span, "@import_glob takes at most the label of a path".into());
+                        } else if pending_glob.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @import_glob".into());
+                        }
+                    }
+                    "import_prefix" => {
+                        // `@import_prefix([path,] trees)`: the imports in
+                        // `trees` begin with the path.
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@import_prefix takes an optional path label and the label of the imports it begins".into());
+                        } else if pending_prefix.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @import_prefix".into());
+                        }
+                    }
+                    "impl" => {
+                        // `@impl(type[, trait])`: an implementation block.
+                        if std::mem::replace(&mut seen_impl, true) {
+                            error(d, a.name_span, "duplicate @impl".into());
+                        } else if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@impl takes the label of its type and an optional label of its trait".into());
+                        } else if let Some(ty) = pos_of(d, &a.args[0]) {
+                            let tr = match a.args.get(1) {
+                                None => Some(None),
+                                Some(arg) => pos_of(d, arg).map(Some),
+                            };
+                            if let Some(tr) = tr {
+                                binding.impls.push((nt, prod, ty, tr));
+                            }
                         }
                     }
                     "ns" => {
@@ -1571,33 +1681,135 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                     }
                 }
             }
-            if let Some(ai) = pending_import {
+            if let (Some(_), Some(_)) = (pending_import, pending_glob) {
+                error(d, alt.label_span, "an alternative imports one declaration (@import) or every name of a unit (@import_glob), not both".into());
+            } else if let Some(ai) = pending_import {
+                // `@import(path)`: a path, or a one-segment path (a
+                // token), which the module tier also resolves among the
+                // other files' exports; `@import`: the path the node
+                // itself spells.
                 let a = &alt.attrs[ai];
-                let arg = &a.args[0];
-                match positions.get(arg.0.as_str()) {
-                    None => error(
-                        d,
-                        arg.1,
-                        format!("no symbol labeled `{}` in this alternative", arg.0),
-                    ),
-                    Some(&k) => match sg.prods[prod as usize].rhs.get(k) {
-                        Some(Sym::T(_)) => {
-                            if binding.refs.iter().any(|r| r.0 == nt && r.1 == prod) {
-                                error(
-                                    d,
-                                    a.name_span,
-                                    "at most one reference per alternative (@ref or @import)".into(),
-                                );
-                            } else {
-                                binding.refs.push((nt, prod, k, RefKind::Import));
-                            }
-                        }
-                        _ => error(
+                match a.args.first() {
+                    None => binding.imports.push((nt, prod, None, false)),
+                    Some(arg) => match positions.get(arg.0.as_str()) {
+                        None => error(
                             d,
                             arg.1,
-                            format!("`{}` labels a rule — the imported name must be a token", arg.0),
+                            format!("no symbol labeled `{}` in this alternative", arg.0),
+                        ),
+                        Some(&k) => match sg.prods[prod as usize].rhs.get(k) {
+                            Some(Sym::T(_)) => {
+                                if binding.refs.iter().any(|r| r.0 == nt && r.1 == prod) {
+                                    error(
+                                        d,
+                                        a.name_span,
+                                        "at most one reference per alternative (@ref or @import)"
+                                            .into(),
+                                    );
+                                } else {
+                                    binding.refs.push((nt, prod, k, RefKind::Import));
+                                    binding.imports.push((nt, prod, Some(k), false));
+                                }
+                            }
+                            _ => binding.imports.push((nt, prod, Some(k), false)),
+                        },
+                    },
+                }
+            } else if let Some(ai) = pending_glob {
+                let a = &alt.attrs[ai];
+                match a.args.first() {
+                    None => binding.imports.push((nt, prod, None, true)),
+                    Some(arg) => match positions.get(arg.0.as_str()) {
+                        Some(&k) => binding.imports.push((nt, prod, Some(k), true)),
+                        None => error(
+                            d,
+                            arg.1,
+                            format!("no symbol labeled `{}` in this alternative", arg.0),
                         ),
                     },
+                }
+            }
+            if let Some(ai) = pending_prefix {
+                let a = &alt.attrs[ai];
+                let (path, trees) = match a.args.len() {
+                    1 => (None, &a.args[0]),
+                    _ => (Some(&a.args[0]), &a.args[1]),
+                };
+                let path = match path {
+                    None => Some(None),
+                    Some(arg) => match positions.get(arg.0.as_str()) {
+                        Some(&k) => Some(Some(k)),
+                        None => {
+                            error(
+                                d,
+                                arg.1,
+                                format!("no symbol labeled `{}` in this alternative", arg.0),
+                            );
+                            None
+                        }
+                    },
+                };
+                let trees = rule_pos_of(d, &positions, &sg, prod, trees);
+                if let (Some(path), Some(trees)) = (path, trees) {
+                    binding.prefixes.push((nt, prod, path, trees));
+                }
+            }
+            if let Some(ai) = pending_visibility {
+                let a = &alt.attrs[ai];
+                let v = rule_pos_of(d, &positions, &sg, prod, &a.args[0]);
+                let item = match positions.get(a.args[1].0.as_str()) {
+                    Some(&k) => Some(k),
+                    None => {
+                        error(
+                            d,
+                            a.args[1].1,
+                            format!("no symbol labeled `{}` in this alternative", a.args[1].0),
+                        );
+                        None
+                    }
+                };
+                if let (Some(v), Some(item)) = (v, item) {
+                    binding.vis_items.push((nt, prod, v, item));
+                }
+            }
+            if let Some(ai) = pending_unit {
+                // A unit is a definition: the one this alternative makes,
+                // at the label `@unit` names.
+                let a = &alt.attrs[ai];
+                let name = positions.get(a.args[0].0.as_str()).copied();
+                let defined = name.is_some_and(|k| {
+                    binding.defs.iter().any(|e| e.0 == nt && e.1 == prod && e.2 == k)
+                });
+                let body = match a.args.get(1) {
+                    None => Some(None),
+                    Some(arg) => rule_pos_of(d, &positions, &sg, prod, arg).map(Some),
+                };
+                match (name, defined, body) {
+                    (None, _, _) => error(
+                        d,
+                        a.args[0].1,
+                        format!("no symbol labeled `{}` in this alternative", a.args[0].0),
+                    ),
+                    (Some(_), false, _) => error(
+                        d,
+                        a.args[0].1,
+                        format!(
+                            "@unit names the definition this alternative makes: give `{}` @def",
+                            a.args[0].0
+                        ),
+                    ),
+                    (Some(_), true, None) => {}
+                    (Some(k), true, Some(body)) => {
+                        binding.units.push((nt, prod, k, body));
+                        if let Some(body) = body {
+                            // A unit with a body is a module of it.
+                            if pending_module.is_some() {
+                                error(d, a.name_span, "@unit with a body is already the module of its body: drop @module".into());
+                            } else {
+                                binding.modules.push((nt, prod, body));
+                            }
+                        }
+                    }
                 }
             }
 

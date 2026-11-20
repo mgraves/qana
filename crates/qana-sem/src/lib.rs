@@ -47,7 +47,9 @@ use std::sync::Arc;
 
 pub mod key;
 pub mod macros;
+pub mod paths;
 pub mod types;
+pub use paths::{path_at, Path, Root};
 pub use types::{compose_types, TypeConfig, TypeDiag, TypeId, TypeReport, TypeRule, TyTerm};
 
 // ---------------------------------------------------------------------------
@@ -157,6 +159,50 @@ pub struct BindingConfig {
     /// name, the one child it passes it to (the grammar's
     /// `@style(inherit, …)` chains, where they pass to one child).
     pub passes: Vec<(u16, u16, usize)>,
+    /// (nt, prod, name child, body child) — the definition this production
+    /// makes (its `@def`, at `name child`) is a UNIT (`@unit(name[,
+    /// body])`): a scope for imports and visibility, whose members are the
+    /// definitions made in it. With a body, the body is that child, and
+    /// the definition is a module of it too (`modules` holds it); without
+    /// one, the body is elsewhere (Rust's `mod foo;`), where a project
+    /// model says.
+    pub units: Vec<(u16, u16, usize, Option<usize>)>,
+    /// (nt, prod, root, first child) — the node begins a path at `root`
+    /// (`@root(kind[, first])`), then the name its `first child` holds;
+    /// `super` on a path whose head is `self` or `super` goes one unit
+    /// further up. See [`paths`].
+    pub roots: Vec<(u16, u16, Root, Option<usize>)>,
+    /// (nt, prod, within, path child) — a visibility (`@vis(level)`):
+    /// what is declared with it is seen everywhere (`public`: both
+    /// `None`), within the unit `within` places from its own (`crate`,
+    /// `super`, `private`), or within the unit the path at `path child`
+    /// names (`in`).
+    pub vis_levels: Vec<(u16, u16, Option<Root>, Option<usize>)>,
+    /// (nt, prod, visibility child, item child) — the definitions and
+    /// imports the `item child` makes where this node stands (not in a
+    /// scope it opens) have the visibility the `@vis` node at the
+    /// `visibility child` declares (`@visibility(v, item)`); with none
+    /// there, the default: within their own unit.
+    pub vis_items: Vec<(u16, u16, usize, usize)>,
+    /// (nt, prod, path child, glob) — the production imports what a path
+    /// names (`@import(path)`, `@import`, `@import_glob(path)`,
+    /// `@import_glob`): the path at `path child`, or, without one, the
+    /// path the node itself spells, after the prefix of the use group it
+    /// stands in. A glob
+    /// imports every name of the unit it names; any other import, one
+    /// declaration, under the name the alternative's `@def` gives it, or
+    /// under its path's last name when that `@def` reaches no name (`self`
+    /// in a group); without a `@def` it names nothing (`as _`).
+    pub imports: Vec<(u16, u16, Option<usize>, bool)>,
+    /// (nt, prod, path child, trees child) — the imports in the `trees
+    /// child` begin with a path (`@import_prefix([path,] trees)`): the one
+    /// at `path child`, or, without one, the one the node itself spells.
+    pub prefixes: Vec<(u16, u16, Option<usize>, usize)>,
+    /// (nt, prod, type child, trait child) — the production is an
+    /// implementation block (`@impl(type[, trait])`): of the type the path
+    /// at `type child` names, for the trait at `trait child`. Its members
+    /// are the definitions made directly in the members scope it opens.
+    pub impls: Vec<(u16, u16, usize, Option<usize>)>,
 }
 
 impl BindingConfig {
@@ -234,6 +280,28 @@ pub fn compose_binding(
     }
     for &(nt, prod, k) in &guest.passes {
         out.passes.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset, k));
+    }
+    let (nts, prods) = (map.guest_nt_offset, map.guest_prod_offset);
+    for &(nt, prod, name, body) in &guest.units {
+        out.units.push((nt + nts, prod + prods, name, body));
+    }
+    for &(nt, prod, root, first) in &guest.roots {
+        out.roots.push((nt + nts, prod + prods, root, first));
+    }
+    for &(nt, prod, within, path) in &guest.vis_levels {
+        out.vis_levels.push((nt + nts, prod + prods, within, path));
+    }
+    for &(nt, prod, v, item) in &guest.vis_items {
+        out.vis_items.push((nt + nts, prod + prods, v, item));
+    }
+    for &(nt, prod, path, glob) in &guest.imports {
+        out.imports.push((nt + nts, prod + prods, path, glob));
+    }
+    for &(nt, prod, path, trees) in &guest.prefixes {
+        out.prefixes.push((nt + nts, prod + prods, path, trees));
+    }
+    for &(nt, prod, ty, tr) in &guest.impls {
+        out.impls.push((nt + nts, prod + prods, ty, tr));
     }
     out.unordered = host.unordered;
     out
@@ -708,7 +776,7 @@ fn child_span(n: &GreenNode, base: u32, k: usize) -> Option<(u32, u32)> {
 /// The text and offset of the name the k-th SYMBOL child holds: the child
 /// itself when it is a token, and when it is a rule, the token its node
 /// passes a name to (`cfg.passes`), however deep.
-fn name_child(n: &GreenNode, k: usize, cfg: &BindingConfig) -> Option<(String, u32)> {
+pub fn name_child(n: &GreenNode, k: usize, cfg: &BindingConfig) -> Option<(String, u32)> {
     let mut off = 0u32;
     let mut idx = 0usize;
     for c in &n.children {
@@ -763,7 +831,7 @@ fn child_ns<'c>(n: &GreenNode, k: usize, cfg: &'c BindingConfig) -> Option<&'c s
 
 /// The symbol index of each child of `n` (`None` for trivia, a missing
 /// token, or an error node): the numbering labels use.
-fn symbol_indices(n: &GreenNode) -> impl Iterator<Item = Option<usize>> + '_ {
+pub fn symbol_indices(n: &GreenNode) -> impl Iterator<Item = Option<usize>> + '_ {
     let mut idx = 0usize;
     n.children.iter().map(move |c| {
         let is_symbol = match c {

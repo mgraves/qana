@@ -85,6 +85,15 @@ impl LiveDoc {
         }
     }
 
+    /// Where the name at byte `offset` stands and the path it spells, for a
+    /// project index to resolve: the names of the units with a body
+    /// around it, outermost first, and its path, after the prefixes of the
+    /// use groups it is in ([`qana_sem::path_at`]). `None` where no
+    /// reference's name is at `offset`.
+    pub fn path_at(&self, offset: u32) -> Option<(Vec<String>, qana_sem::Path)> {
+        qana_sem::path_at(self.session.tree()?, &self.lang.binding, offset)
+    }
+
     /// The outline and folds of the CURRENT revision: read once per
     /// revision, and then only what the edits since the last one rebuilt
     /// (see [`Structure`]). The SHAPE revision moves when the outline's

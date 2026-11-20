@@ -723,7 +723,7 @@ rule fields_opt =
 
 rule field_list = field+ % ","
 
-rule field = Field: outer_attrs_opt vis_opt n:name COLON type @def(n, hoisted)
+rule field = Field: outer_attrs_opt vis_opt n:name COLON type @outline(n, field) @def(n, hoisted)
 
 // A tuple field: after `pub (`, the next token tells a restricted
 // visibility (`crate`, `self`, `super`, `in`) from a tuple type, where

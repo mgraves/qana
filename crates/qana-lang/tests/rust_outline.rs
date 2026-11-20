@@ -70,9 +70,11 @@ fn main() {
     let want: Vec<(&str, &str, usize)> = vec![
         ("module", "geometry", 0),
         ("struct", "Point", 1),
+        ("field", "x", 2),
         ("struct", "Shape", 1),
         ("constant", "Dot", 2),
         ("constant", "Line", 2),
+        ("field", "a", 3),
         ("class", "Area", 1),
         ("function", "area", 2),
         ("class", "Point<T>", 1),

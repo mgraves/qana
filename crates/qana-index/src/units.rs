@@ -7,7 +7,7 @@
 //! impl blocks are not read (as its declarations are not offered), while
 //! its references are, in the unit the function is in.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use qana_grammar::green::{LIST_PROD, RUN_PROD};
 use qana_grammar::{GreenChild, GreenNode};
@@ -119,6 +119,9 @@ pub(crate) struct FileUnits {
     /// Each unit with a body here (by its index in `units`), and the
     /// body's span.
     pub bodies: Vec<(u32, (u32, u32))>,
+    /// The names imports define (a `use` leaf's, a rename's), by span:
+    /// a reference bound to one is bound to what it imports.
+    pub import_defs: HashSet<Span>,
 }
 
 impl FileUnits {
@@ -178,6 +181,7 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
             defs: HashMap::new(),
             refs: HashMap::new(),
             bodies: Vec::new(),
+            import_defs: HashSet::new(),
         },
     };
     let cx = Cx {
@@ -312,6 +316,9 @@ impl Walk<'_> {
             }
         }
 
+        if let (Some(_), Some((_, span))) = (roles.import, &def_name) {
+            self.out.import_defs.insert(*span);
+        }
         if let Some((path, glob)) = roles.import {
             let own = match path {
                 Some(k) => Path::of_child(n, k, self.cfg),

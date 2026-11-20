@@ -391,7 +391,9 @@ paths begin at roots, and whose files a build system arranges into a
 crate (Rust's) declares that structure with eight more annotations, which
 a project index (`qana-index`) reads into each file's summary, and whose
 `Resolver` resolves paths across files over a project model's unit graph
-(Rust's: `cargo metadata` and its rules for module files). Within a file,
+(Rust's: `cargo metadata` and its rules for module files). For finding a
+declaration's usages, `qana_index::references` reads a file's references
+to names: each one's path, and what it binds to within the file. Within a file,
 binding is unchanged: what a path names in another file is the index's to
 find.
 [examples/units](../examples/units/unitlang.qana) is their language:

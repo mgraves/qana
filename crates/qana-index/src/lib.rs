@@ -50,9 +50,11 @@ use serde::{Deserialize, Serialize};
 
 pub use graph::{CrateInfo, UnitGraph};
 pub use qana_sem::{Path, Root};
+pub use references::{references, Reference};
 pub use resolve::{Resolution, Resolver};
 
 mod graph;
+mod references;
 mod resolve;
 mod units;
 
@@ -443,20 +445,13 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
         item: (u32, u32),
     }
     let mut found: Vec<Found> = Vec::new();
-    // The constructs the walk is inside: their end, their name, whether
-    // they are a function's (a body's).
-    let mut inside: Vec<(u32, String, bool)> = Vec::new();
-    for symbol in qana_services::outline(&tree, &lang.outline) {
-        while inside.last().is_some_and(|&(end, _, _)| end <= symbol.span.0) {
-            inside.pop();
-        }
-        let in_body = inside.iter().any(|(_, _, function)| *function);
+    for (symbol, container) in outside_bodies(&tree, &lang.outline) {
         let defines = namespaces.get(&symbol.selection);
         let place = read.defs.get(&symbol.selection);
-        if let (false, Some(namespace), Some(place)) = (in_body, defines, place) {
+        if let (Some(namespace), Some(place)) = (defines, place) {
             found.push(Found {
                 declaration: Declaration {
-                    container: inside.iter().map(|(_, name, _)| name.clone()).collect(),
+                    container,
                     name: symbol.name.clone(),
                     kind: symbol.kind.to_string(),
                     namespace: namespace.to_string(),
@@ -470,7 +465,6 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
                 item: symbol.span,
             });
         }
-        inside.push((symbol.span.1, symbol.name, symbol.kind == FUNCTION));
     }
 
     // Ordinals among namesakes, in document order.
@@ -603,6 +597,32 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     }
 }
 
+/// The outline's symbols that no function holds (a function's body's are
+/// left out), in document order, each with the names of the constructs it
+/// is inside, outermost first. Those whose name is a definition are the
+/// file's declarations.
+fn outside_bodies(
+    tree: &qana_grammar::GreenNode,
+    outline: &qana_services::OutlineConfig,
+) -> Vec<(qana_services::Symbol, Vec<String>)> {
+    let mut out = Vec::new();
+    // The constructs the walk is inside: their end, their name, whether
+    // they are a function's (a body's).
+    let mut inside: Vec<(u32, String, bool)> = Vec::new();
+    for symbol in qana_services::outline(tree, outline) {
+        while inside.last().is_some_and(|&(end, _, _)| end <= symbol.span.0) {
+            inside.pop();
+        }
+        let in_body = inside.iter().any(|(_, _, function)| *function);
+        let entered = (symbol.span.1, symbol.name.clone(), symbol.kind == FUNCTION);
+        if !in_body {
+            out.push((symbol, inside.iter().map(|(_, name, _)| name.clone()).collect()));
+        }
+        inside.push(entered);
+    }
+    out
+}
+
 /// A declaration's head (see [`Declaration::signature`]): `item` is the
 /// construct's span and `name` its name's.
 fn signature(text: &str, item: (u32, u32), name: (u32, u32)) -> String {
@@ -633,6 +653,15 @@ struct LineStarts(Vec<usize>);
 impl LineStarts {
     fn of(text: &str) -> Self {
         LineStarts(std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect())
+    }
+
+    /// The text of line `line` of `text`, without its line break.
+    fn text<'t>(&self, text: &'t str, line: u32) -> &'t str {
+        let start = self.0.get(line as usize).map_or(text.len(), |&start| start.min(text.len()));
+        // The next line starts after this one's `\n`.
+        let end = self.0.get(line as usize + 1).map_or(text.len(), |&next| next - 1).max(start);
+        let line = &text[start..end];
+        line.strip_suffix('\r').unwrap_or(line)
     }
 
     /// The line and character column of byte `at` of `text`.

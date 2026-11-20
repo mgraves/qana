@@ -19,10 +19,10 @@ use std::rc::Rc;
 
 use qana_grammar::green::{LIST_PROD, RUN_PROD};
 use qana_grammar::{GreenChild, GreenNode};
-use qana_sem::{name_child, symbol_indices, BindingConfig, Path, RefKind, Root};
+use qana_sem::{name_child, symbol_indices, BindingConfig, Path, RefKind, Root, TypeForm};
 use qana_services::OutlineConfig;
 
-use crate::{Attribute, Impl, Import, Unit, Visibility, FUNCTION};
+use crate::{Attribute, Impl, Import, TypeRef, Unit, Visibility, FUNCTION};
 
 /// What the binding says of one production, gathered from the config's
 /// tables once, so the walk asks each node once.
@@ -53,6 +53,20 @@ struct Roles {
     attribute_list: Option<(usize, Option<usize>)>,
     /// `@expands`: an invocation whose expansion may declare names.
     expands: bool,
+    /// `@type_ref(form, …)`: a type as written.
+    type_ref: Option<TypeForm>,
+    /// `@typed(name, type)`: the name child and the type child.
+    typed: Option<(usize, usize)>,
+    /// `@returns(type)`: the type child.
+    returns: Option<usize>,
+    /// `@derives(path)`: the path child.
+    derives: Option<usize>,
+    /// `@generic`: what it defines is a generic parameter.
+    generic: bool,
+    /// `@bounds(b)`: the bounds child.
+    bounds: Option<usize>,
+    /// `@positional(f)`: the fields child.
+    positional: Option<usize>,
     /// `@import_prefix`: the path child, and the trees child.
     prefix: Option<(Option<usize>, usize)>,
     /// `@impl(type[, trait])`.
@@ -102,6 +116,27 @@ fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Ro
     for &(nt, prod) in &cfg.expands {
         map.entry((nt, prod)).or_default().expands = true;
     }
+    for &(nt, prod, form) in &cfg.type_refs {
+        map.entry((nt, prod)).or_default().type_ref = Some(form);
+    }
+    for &(nt, prod, name, ty) in &cfg.typed {
+        map.entry((nt, prod)).or_default().typed = Some((name, ty));
+    }
+    for &(nt, prod, ty) in &cfg.returns {
+        map.entry((nt, prod)).or_default().returns = Some(ty);
+    }
+    for &(nt, prod, path) in &cfg.derives {
+        map.entry((nt, prod)).or_default().derives = Some(path);
+    }
+    for &(nt, prod) in &cfg.generics {
+        map.entry((nt, prod)).or_default().generic = true;
+    }
+    for &(nt, prod, b) in &cfg.bounds {
+        map.entry((nt, prod)).or_default().bounds = Some(b);
+    }
+    for &(nt, prod, f) in &cfg.positional {
+        map.entry((nt, prod)).or_default().positional = Some(f);
+    }
     for &(nt, prod, ty, tr) in &cfg.impls {
         map.entry((nt, prod)).or_default().implementation = Some((ty, tr));
     }
@@ -118,6 +153,19 @@ pub(crate) struct DefPlace {
     pub visibility: Visibility,
     /// The impl block (in walk order) it is a member of.
     pub impl_block: Option<u32>,
+    /// Its type as written (`@typed`), if one is.
+    pub ty: Option<TypeRef>,
+    /// The type a call of it gives, as written (`@returns`).
+    pub returns: Option<TypeRef>,
+    /// What it derives (`@derives`, among the attributes said of it).
+    pub derives: Vec<Path>,
+    /// Its generic parameters' names, in order (`@generic`, in the scope
+    /// it opens).
+    pub generics: Vec<String>,
+    /// The traits it is bounded by, as written (`@bounds`).
+    pub bounds: Vec<TypeRef>,
+    /// Its positional fields' types, in order (`@positional`).
+    pub positional: Vec<TypeRef>,
 }
 
 /// Where a reference stands, and the path it spells.
@@ -197,8 +245,10 @@ struct Cx {
     /// `@visibility` gave one and no scope opened since.
     visibility: Option<Visibility>,
     /// The attributes what is declared here takes, when an enclosing
-    /// `@attributes` gave them and no scope opened since.
+    /// `@attributes` gave them and no scope opened since, and what they
+    /// derive.
     attributes: Option<Rc<Vec<Attribute>>>,
+    derives: Option<Rc<Vec<Path>>>,
     /// The scopes around it below its unit's, outermost first: empty among
     /// a unit's items.
     scopes: Rc<Vec<u32>>,
@@ -235,12 +285,15 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
             import_defs: HashSet::new(),
         },
         scopes: 0,
+        typed_defs: HashMap::new(),
+        generics: HashMap::new(),
     };
     let cx = Cx {
         unit: None,
         in_body: false,
         visibility: None,
         attributes: None,
+        derives: None,
         scopes: Rc::default(),
         root: true,
         impl_pending: None,
@@ -265,6 +318,13 @@ struct Walk<'a> {
     out: FileUnits,
     /// How many scopes below a unit's the walk has opened.
     scopes: u32,
+    /// The types `@typed` gives definitions made below the node that says
+    /// so (a pattern's one binding), by the name's span.
+    typed_defs: HashMap<(u32, u32), TypeRef>,
+    /// The generic parameters (`@generic`) declared in each scope below a
+    /// unit's, by the scope's walk index, in order: what opened the scope
+    /// (a definition, or the impl block in it) takes them.
+    generics: HashMap<u32, Vec<String>>,
 }
 
 impl Walk<'_> {
@@ -290,24 +350,55 @@ impl Walk<'_> {
         // in the item child takes them, after those an enclosing node gave;
         // without an item child, the unit the node stands in.
         let attributes_given = match (roles.attribute_list, roles.attribute) {
-            (Some((attrs, item)), None) => Some((self.attributes_at(n, attrs), item)),
+            (Some((attrs, item)), None) => {
+                let (attributes, derives) = self.attributes_at(n, attrs);
+                Some((attributes, derives, item))
+            }
             _ => None,
+        };
+        let in_item = |name: (u32, u32)| match &attributes_given {
+            Some((_, _, Some(item))) => {
+                span_of(*item).is_some_and(|item| item.0 <= name.0 && name.1 <= item.1)
+            }
+            _ => false,
         };
         let attributes_here = |name: (u32, u32)| -> Vec<Attribute> {
             let mut attributes: Vec<Attribute> =
                 cx.attributes.as_deref().cloned().unwrap_or_default();
-            if let Some((given, Some(item))) = &attributes_given {
-                if span_of(*item).is_some_and(|item| item.0 <= name.0 && name.1 <= item.1) {
-                    attributes.extend(given.iter().cloned());
-                }
+            if let (Some((given, _, _)), true) = (&attributes_given, in_item(name)) {
+                attributes.extend(given.iter().cloned());
             }
             attributes
         };
-        if let (Some((given, None)), false) = (&attributes_given, cx.in_body) {
+        let derives_here = |name: (u32, u32)| -> Vec<Path> {
+            let mut derives: Vec<Path> = cx.derives.as_deref().cloned().unwrap_or_default();
+            if let (Some((_, given, _)), true) = (&attributes_given, in_item(name)) {
+                derives.extend(given.iter().cloned());
+            }
+            derives
+        };
+        if let (Some((given, _, None)), false) = (&attributes_given, cx.in_body) {
             match cx.unit {
                 None => self.out.attributes.extend(given.iter().cloned()),
                 Some(unit) => {
                     self.out.units[unit as usize].0.attributes.extend(given.iter().cloned())
+                }
+            }
+        }
+
+        // The type `@typed` writes for what its name child defines: this
+        // node's own definition, or the one definition below it.
+        let mut typed_here: Option<TypeRef> = None;
+        if let Some((name_k, type_k)) = roles.typed {
+            if let Some(ty) = self.type_in(n, type_k) {
+                if roles.def == Some(name_k) {
+                    typed_here = Some(ty);
+                } else if let (Some(child), Some(at)) = (symbol_child(n, name_k), span_of(name_k)) {
+                    let mut defs = Vec::new();
+                    self.defs_in(child, at.0, &mut defs);
+                    if let [only] = defs[..] {
+                        self.typed_defs.insert(only, ty);
+                    }
                 }
             }
         }
@@ -317,12 +408,27 @@ impl Walk<'_> {
         if let Some(k) = roles.def {
             if let Some((name, off)) = name_child(n, k, self.cfg) {
                 let span = (base + off, base + off + name.len() as u32);
+                let ty = typed_here.take().or_else(|| self.typed_defs.remove(&span));
+                let returns = roles.returns.and_then(|r| self.type_in(n, r));
+                let bounds = roles.bounds.map(|b| self.traits_in(n, b)).unwrap_or_default();
+                let positional =
+                    roles.positional.map(|f| self.positional_in(n, f)).unwrap_or_default();
+                if let (true, Some(&scope)) = (roles.generic, cx.scopes.last()) {
+                    self.generics.entry(scope).or_default().push(name.clone());
+                }
                 self.out.defs.insert(
                     span,
                     DefPlace {
                         unit: cx.unit,
                         visibility: visibility_here(span),
                         impl_block: cx.members_of,
+                        ty,
+                        returns,
+                        derives: derives_here(span),
+                        // Its own scope's, once its children are read.
+                        generics: Vec::new(),
+                        bounds,
+                        positional,
                     },
                 );
                 def_name = Some((name, span));
@@ -363,16 +469,19 @@ impl Walk<'_> {
         // What its children stand in.
         let mut inner = cx.clone();
         inner.root = false;
+        let mut own_scope: Option<u32> = None;
         if roles.scope.is_some() && !cx.root && roles.unit.is_none() {
             // A scope below its unit's: a function, a type, a block.
             let mut scopes = cx.scopes.as_ref().clone();
             scopes.push(self.scopes);
+            own_scope = Some(self.scopes);
             self.scopes += 1;
             inner.scopes = Rc::new(scopes);
         }
         if let Some(members) = roles.scope {
             inner.visibility = None;
             inner.attributes = None;
+            inner.derives = None;
             inner.members_of = if members { cx.impl_pending } else { None };
             inner.impl_pending = None;
         }
@@ -381,11 +490,24 @@ impl Walk<'_> {
         }
         if let (Some((ty, tr)), false) = (roles.implementation, cx.in_body) {
             let index = self.out.impls.len() as u32;
+            // Its generic parameters were declared before it, in the scope
+            // the impl block opens.
+            let generics =
+                cx.scopes.last().and_then(|scope| self.generics.remove(scope)).unwrap_or_default();
             self.out.impls.push((
                 Impl {
                     unit: cx.unit,
-                    self_type: Path::of_child(n, ty, self.cfg),
+                    self_type: self.type_in(n, ty).or_else(|| {
+                        // A grammar that writes no type forms there: the
+                        // path the type spells.
+                        Path::of_child(n, ty, self.cfg).map(|path| TypeRef::Path {
+                            path,
+                            args: Vec::new(),
+                            bindings: Vec::new(),
+                        })
+                    }),
                     trait_path: tr.and_then(|tr| Path::of_child(n, tr, self.cfg)),
+                    generics,
                 },
                 whole,
             ));
@@ -505,10 +627,12 @@ impl Walk<'_> {
                 }
             }
         }
-        if let Some((given, Some(item))) = attributes_given {
+        if let Some((given, derives, Some(item))) = attributes_given {
             // Nor its attributes.
             if roles.scope.is_none() {
-                cx_of(&mut child_cx, item, &inner).attributes = Some(Rc::new(given));
+                let item_cx = cx_of(&mut child_cx, item, &inner);
+                item_cx.attributes = Some(Rc::new(given));
+                item_cx.derives = Some(Rc::new(derives));
             }
         }
 
@@ -531,21 +655,41 @@ impl Walk<'_> {
             }
             off += c.width();
         }
+
+        // The generic parameters declared in the scope this definition
+        // opens are its own.
+        if let (Some(scope), Some((_, span))) = (own_scope, &def_name) {
+            if let (Some(generics), Some(place)) =
+                (self.generics.remove(&scope), self.out.defs.get_mut(span))
+            {
+                place.generics = generics;
+            }
+        }
     }
 
     /// The attributes in the subtree of child `k` of `n`, in the file's
     /// order: each attribute's, and those an attribute holds, under its
-    /// condition.
-    fn attributes_at(&self, n: &GreenNode, k: usize) -> Vec<Attribute> {
-        let mut found = Vec::new();
+    /// condition; and what they derive (`@derives`).
+    fn attributes_at(&self, n: &GreenNode, k: usize) -> (Vec<Attribute>, Vec<Path>) {
+        let (mut found, mut derives) = (Vec::new(), Vec::new());
         if let Some(child) = symbol_child(n, k) {
-            self.attributes_in(child, false, &mut found);
+            self.attributes_in(child, false, &mut found, &mut derives);
         }
-        found
+        (found, derives)
     }
 
-    fn attributes_in(&self, node: &GreenNode, conditional: bool, found: &mut Vec<Attribute>) {
+    fn attributes_in(
+        &self,
+        node: &GreenNode,
+        conditional: bool,
+        found: &mut Vec<Attribute>,
+        derives: &mut Vec<Path>,
+    ) {
         let roles = self.roles.get(&(node.nt, node.prod));
+        if let Some(k) = roles.and_then(|r| r.derives) {
+            derives.extend(Path::of_child(node, k, self.cfg));
+            return;
+        }
         if let Some(k) = roles.and_then(|r| r.attribute) {
             if let Some(path) = Path::of_child(node, k, self.cfg) {
                 found.push(Attribute { path, conditional });
@@ -553,13 +697,193 @@ impl Walk<'_> {
             let held =
                 roles.and_then(|r| r.attribute_list).and_then(|(a, _)| symbol_child(node, a));
             if let Some(held) = held {
-                self.attributes_in(held, true, found);
+                self.attributes_in(held, true, found, derives);
+            } else {
+                // What an attribute derives is in its arguments.
+                for c in &node.children {
+                    if let GreenChild::Node(m) = c {
+                        self.derives_in(m, derives);
+                    }
+                }
             }
             return;
         }
         for c in &node.children {
             if let GreenChild::Node(m) = c {
-                self.attributes_in(m, conditional, found);
+                self.attributes_in(m, conditional, found, derives);
+            }
+        }
+    }
+
+    /// What the `@derives` nodes in `node`'s subtree name.
+    fn derives_in(&self, node: &GreenNode, derives: &mut Vec<Path>) {
+        if let Some(k) = self.roles.get(&(node.nt, node.prod)).and_then(|r| r.derives) {
+            derives.extend(Path::of_child(node, k, self.cfg));
+            return;
+        }
+        for c in &node.children {
+            if let GreenChild::Node(m) = c {
+                self.derives_in(m, derives);
+            }
+        }
+    }
+
+    /// The name spans of the definitions in `node`'s subtree, which starts
+    /// at `base`.
+    fn defs_in(&self, node: &GreenNode, base: u32, defs: &mut Vec<(u32, u32)>) {
+        if let Some(k) = self.roles.get(&(node.nt, node.prod)).and_then(|r| r.def) {
+            if let Some((name, off)) = name_child(node, k, self.cfg) {
+                defs.push((base + off, base + off + name.len() as u32));
+            }
+        }
+        let mut off = base;
+        for c in &node.children {
+            if let GreenChild::Node(m) = c {
+                self.defs_in(m, off, defs);
+            }
+            off += c.width();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Types as written
+    // ------------------------------------------------------------------
+
+    /// The type written at child `k` of `n`.
+    fn type_in(&self, n: &GreenNode, k: usize) -> Option<TypeRef> {
+        self.type_of(symbol_child(n, k)?)
+    }
+
+    /// The type `node` writes: its own, where it is one (`@type_ref`), or
+    /// the first its children write. A generic argument is the path's it
+    /// stands in, never the type around it.
+    fn type_of(&self, node: &GreenNode) -> Option<TypeRef> {
+        match self.type_form(node) {
+            Some(TypeForm::Arg(_) | TypeForm::Binding(..) | TypeForm::Const) => None,
+            None => node.children.iter().find_map(|c| match c {
+                GreenChild::Node(m) => self.type_of(m),
+                GreenChild::Token(_) => None,
+            }),
+            Some(form) => Some(self.type_as(node, form)),
+        }
+    }
+
+    fn type_form(&self, node: &GreenNode) -> Option<TypeForm> {
+        self.roles.get(&(node.nt, node.prod)).and_then(|r| r.type_ref)
+    }
+
+    /// The type `node`, whose form is `form`, writes.
+    fn type_as(&self, node: &GreenNode, form: TypeForm) -> TypeRef {
+        let inner = |k: usize| Box::new(self.type_in(node, k).unwrap_or(TypeRef::Other));
+        match form {
+            TypeForm::Path(k) => match Path::of_child(node, k, self.cfg) {
+                Some(path) => {
+                    let (mut args, mut bindings) = (Vec::new(), Vec::new());
+                    if let Some(child) = symbol_child(node, k) {
+                        self.args_in(child, &mut args, &mut bindings);
+                    }
+                    TypeRef::Path { path, args, bindings }
+                }
+                None => TypeRef::Other,
+            },
+            TypeForm::Ref(k) => TypeRef::Ref(inner(k)),
+            TypeForm::Slice(k) => TypeRef::Slice(inner(k)),
+            TypeForm::Array(k) => TypeRef::Array(inner(k)),
+            TypeForm::Tuple => TypeRef::Tuple(self.types_held(node)),
+            TypeForm::Dyn => TypeRef::Dyn(self.traits_held(node)),
+            TypeForm::Impl => TypeRef::Impl(self.traits_held(node)),
+            TypeForm::Arg(_) | TypeForm::Binding(..) | TypeForm::Const | TypeForm::Other => {
+                TypeRef::Other
+            }
+        }
+    }
+
+    /// The types of the positional fields listed at child `k` of `n`: one
+    /// for each element of the first list there, the type it writes, in
+    /// order. No list (none written) is no fields.
+    fn positional_in(&self, n: &GreenNode, k: usize) -> Vec<TypeRef> {
+        let Some(mut node) = symbol_child(n, k) else { return Vec::new() };
+        while node.prod != LIST_PROD && node.prod != RUN_PROD {
+            let first = node.children.iter().find_map(|c| match c {
+                GreenChild::Node(m) => Some(m),
+                GreenChild::Token(_) => None,
+            });
+            match first {
+                Some(m) => node = m,
+                None => return Vec::new(),
+            }
+        }
+        node.children
+            .iter()
+            .filter_map(|c| match c {
+                GreenChild::Node(m) => Some(self.type_of(m).unwrap_or(TypeRef::Other)),
+                GreenChild::Token(_) => None,
+            })
+            .collect()
+    }
+
+    /// The traits written at child `k` of `n` (bounds): each the
+    /// outermost type there, but those that are no trait the type has
+    /// (Rust's `?Sized`, `use<…>`).
+    fn traits_in(&self, n: &GreenNode, k: usize) -> Vec<TypeRef> {
+        symbol_child(n, k).map(|child| self.traits_held(child)).unwrap_or_default()
+    }
+
+    /// The traits `node`'s children write: [`Self::types_held`], but those
+    /// a bound written there does not say the type has.
+    fn traits_held(&self, node: &GreenNode) -> Vec<TypeRef> {
+        let mut held = self.types_held(node);
+        held.retain(|t| *t != TypeRef::Other);
+        held
+    }
+
+    /// The types `node`'s children write, each the outermost one; a
+    /// generic argument's is the path's it stands in.
+    fn types_held(&self, node: &GreenNode) -> Vec<TypeRef> {
+        let mut held = Vec::new();
+        for c in &node.children {
+            if let GreenChild::Node(m) = c {
+                match self.type_form(m) {
+                    Some(TypeForm::Arg(_) | TypeForm::Binding(..) | TypeForm::Const) => {}
+                    None => held.extend(self.types_held(m)),
+                    Some(form) => held.push(self.type_as(m, form)),
+                }
+            }
+        }
+        held
+    }
+
+    /// The type arguments and associated-type bindings written in `node`,
+    /// a path's, outside any type of their own.
+    fn args_in(
+        &self,
+        node: &GreenNode,
+        args: &mut Vec<TypeRef>,
+        bindings: &mut Vec<(String, TypeRef)>,
+    ) {
+        match self.type_form(node) {
+            Some(TypeForm::Arg(t)) => {
+                args.push(self.type_in(node, t).unwrap_or(TypeRef::Other));
+                return;
+            }
+            Some(TypeForm::Binding(n, t)) => {
+                if let Some((name, _)) = name_child(node, n, self.cfg) {
+                    bindings.push((name, self.type_in(node, t).unwrap_or(TypeRef::Other)));
+                }
+                return;
+            }
+            Some(TypeForm::Const) => {
+                // A constant keeps its place, so that arguments line up
+                // with the parameters they are given for.
+                args.push(TypeRef::Other);
+                return;
+            }
+            Some(_) => return,
+            None => {}
+        }
+        for c in &node.children {
+            if let GreenChild::Node(m) = c {
+                self.args_in(m, args, bindings);
             }
         }
     }

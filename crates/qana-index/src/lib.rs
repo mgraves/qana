@@ -177,6 +177,63 @@ pub struct Declaration {
     pub visibility: Visibility,
     /// The impl block it is a member of: an index into [`Offers::impls`].
     pub impl_block: Option<u32>,
+    /// Its type as written, where it writes one (a field's, a const's, a
+    /// static's, an alias's target).
+    pub ty: Option<TypeRef>,
+    /// The type a call of it gives, as written (a function's return
+    /// type); `None` where none is written.
+    pub returns: Option<TypeRef>,
+    /// What it derives (Rust's `#[derive(…)]`), by the paths written.
+    pub derives: Vec<Path>,
+    /// Its generic parameters' names, in order: types' and constants',
+    /// not lifetimes' (`struct Grid<'a, T, const N: usize>`: `T`, `N`), as
+    /// [`TypeRef::Path`]'s arguments are.
+    pub generics: Vec<String>,
+    /// The traits it is bounded by, as written: a trait's supertraits
+    /// (`trait Shape: Clone`), an associated type's bounds (`type Item:
+    /// Display;`). A relaxed bound (`?Sized`) is none.
+    pub bounds: Vec<TypeRef>,
+    /// Its positional fields' types, in order: a tuple struct's (`.0`,
+    /// `.1`), a tuple variant's (`Some(T)`'s `T`).
+    pub positional: Vec<TypeRef>,
+}
+
+/// A type as a declaration writes it: read, never inferred, its paths
+/// as written (resolved where it is used).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum TypeRef {
+    /// A type a path names (`Vec<Cell>`, `Self`, `T`), with the generic
+    /// arguments and associated-type bindings written on it (`Iterator<Item
+    /// = u8>`). Lifetimes are left out; a constant (`Buf<u8, 4>`'s `4`)
+    /// is [`TypeRef::Other`] in its place, so that the arguments line up
+    /// with [`Declaration::generics`].
+    Path { path: Path, args: Vec<TypeRef>, bindings: Vec<(String, TypeRef)> },
+    /// A reference or a pointer to a type (`&T`, `&mut T`, `*const T`).
+    Ref(Box<TypeRef>),
+    /// A slice of a type (`[T]`).
+    Slice(Box<TypeRef>),
+    /// An array of a type (`[T; 4]`).
+    Array(Box<TypeRef>),
+    /// A tuple of types; `()` is the empty one.
+    Tuple(Vec<TypeRef>),
+    /// A trait object (`dyn Display + Send`), by its traits.
+    Dyn(Vec<TypeRef>),
+    /// A type known by its traits only (`impl Iterator<Item = u8>`).
+    Impl(Vec<TypeRef>),
+    /// A type a project index does not follow: a function pointer, `!`,
+    /// `_`, what a macro expands to, a qualified path; or a generic
+    /// argument that is a constant.
+    Other,
+}
+
+impl TypeRef {
+    /// The path that names it, where one does: a [`TypeRef::Path`]'s.
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            TypeRef::Path { path, .. } => Some(path),
+            _ => None,
+        }
+    }
 }
 
 /// Who may see a declaration or an import.
@@ -250,16 +307,24 @@ pub struct Import {
     pub loads: bool,
 }
 
-/// An impl block: what it is of, and of which trait.
+/// An impl block: what it is of, and of which trait. Its items, and the
+/// associated types it binds (`type Item = &'a T;`), are declarations whose
+/// [`Declaration::impl_block`] is it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Impl {
     /// The unit it is in: an index into [`Offers::units`], or `None` for
     /// the file's own.
     pub unit: Option<u32>,
-    /// The type it is of; `None` for a type no path names (`&T`, `[T]`).
-    pub self_type: Option<Path>,
+    /// The type it is of, as written (`Iter<'a, T>`, `[T]`): as the
+    /// grammar's `@type_ref` forms read it, or, where the grammar writes
+    /// none there, as the path it spells. `None` where neither reads one.
+    pub self_type: Option<TypeRef>,
     /// The trait it implements, if it implements one.
     pub trait_path: Option<Path>,
+    /// Its generic parameters' names, in order, as
+    /// [`Declaration::generics`] (`impl<'a, T> Iterator for Iter<'a, T>`:
+    /// `T`).
+    pub generics: Vec<String>,
 }
 
 /// What only a file depends on: what it imports for itself, and the names
@@ -509,6 +574,12 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
                     unit: unit_index(place.unit),
                     visibility: place.visibility.clone(),
                     impl_block: place.impl_block.map(|i| impl_place[i as usize]),
+                    ty: place.ty.clone(),
+                    returns: place.returns.clone(),
+                    derives: place.derives.clone(),
+                    generics: place.generics.clone(),
+                    bounds: place.bounds.clone(),
+                    positional: place.positional.clone(),
                 },
                 name: symbol.selection,
                 item: symbol.span,
@@ -591,13 +662,23 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
             hash.unit(d.unit);
             hash.visibility(&d.visibility);
             hash.unit(d.impl_block);
+            hash.type_opt(d.ty.as_ref());
+            hash.type_opt(d.returns.as_ref());
+            hash.u64(d.derives.len() as u64);
+            for path in &d.derives {
+                hash.path(path);
+            }
+            hash.strs(&d.generics);
+            hash.types(&d.bounds);
+            hash.types(&d.positional);
         }
         hash.imports(&reexports);
         hash.u64(impls.len() as u64);
         for i in &impls {
             hash.unit(i.unit);
-            hash.path_opt(i.self_type.as_ref());
+            hash.type_opt(i.self_type.as_ref());
             hash.path_opt(i.trait_path.as_ref());
+            hash.strs(&i.generics);
         }
         hash.finish()
     };
@@ -828,6 +909,70 @@ impl Fnv {
             self.visibility(&i.visibility);
             self.attributes(&i.attributes);
             self.u64(u64::from(i.loads));
+        }
+    }
+
+    fn type_opt(&mut self, ty: Option<&TypeRef>) {
+        match ty {
+            None => self.u64(0),
+            Some(ty) => {
+                self.u64(1);
+                self.type_ref(ty);
+            }
+        }
+    }
+
+    fn type_ref(&mut self, ty: &TypeRef) {
+        match ty {
+            TypeRef::Path { path, args, bindings } => {
+                self.u64(1);
+                self.path(path);
+                self.types(args);
+                self.u64(bindings.len() as u64);
+                for (name, ty) in bindings {
+                    self.str(name);
+                    self.type_ref(ty);
+                }
+            }
+            TypeRef::Ref(ty) => {
+                self.u64(2);
+                self.type_ref(ty);
+            }
+            TypeRef::Slice(ty) => {
+                self.u64(3);
+                self.type_ref(ty);
+            }
+            TypeRef::Array(ty) => {
+                self.u64(4);
+                self.type_ref(ty);
+            }
+            TypeRef::Tuple(types) => {
+                self.u64(5);
+                self.types(types);
+            }
+            TypeRef::Dyn(types) => {
+                self.u64(6);
+                self.types(types);
+            }
+            TypeRef::Impl(types) => {
+                self.u64(7);
+                self.types(types);
+            }
+            TypeRef::Other => self.u64(8),
+        }
+    }
+
+    fn types(&mut self, types: &[TypeRef]) {
+        self.u64(types.len() as u64);
+        for ty in types {
+            self.type_ref(ty);
+        }
+    }
+
+    fn strs(&mut self, strs: &[String]) {
+        self.u64(strs.len() as u64);
+        for s in strs {
+            self.str(s);
         }
     }
 

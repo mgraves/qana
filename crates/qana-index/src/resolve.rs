@@ -72,7 +72,7 @@ use std::collections::HashMap;
 use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
 
-use crate::{Attribute, Declaration, Import, Path, Root, Summary, UnitGraph, Visibility};
+use crate::{Attribute, Declaration, Import, Path, Root, Summary, TypeRef, UnitGraph, Visibility};
 
 /// What a path names. See the [module docs](self).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1151,7 +1151,7 @@ impl Resolver {
         };
         let outer_reached = self.reached.replace(usize::MAX);
         let mut types: Vec<(u32, u32)> = Vec::new();
-        if let Some(self_type) = &of.self_type {
+        if let Some(self_type) = of.self_type.as_ref().and_then(TypeRef::path) {
             for (krate, _) in self.graph.places(&self.files[block_file as usize]) {
                 let at = Module { krate, file: block_file, unit: of.unit };
                 let Ok(targets) = self.walk(at, self_type) else { continue };
@@ -1184,7 +1184,8 @@ impl Resolver {
         let mut names = ImplNames::default();
         for (file, summary) in self.summaries.iter().enumerate() {
             for (i, block) in summary.offers().impls().iter().enumerate() {
-                if let Some(last) = block.self_type.as_ref().and_then(|t| t.segments.last()) {
+                let named = block.self_type.as_ref().and_then(TypeRef::path);
+                if let Some(last) = named.and_then(|t| t.segments.last()) {
                     names.by_name.entry(last.clone()).or_default().push((file as u32, i as u32));
                 }
             }

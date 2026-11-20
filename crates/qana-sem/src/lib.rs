@@ -199,9 +199,12 @@ pub struct BindingConfig {
     /// at `path child`, or, without one, the one the node itself spells.
     pub prefixes: Vec<(u16, u16, Option<usize>, usize)>,
     /// (nt, prod, type child, trait child) — the production is an
-    /// implementation block (`@impl(type[, trait])`): of the type the path
-    /// at `type child` names, for the trait at `trait child`. Its members
-    /// are the definitions made directly in the members scope it opens.
+    /// implementation block (`@impl(type[, trait])`): of the type written
+    /// at `type child` (as its `@type_ref` forms say, or else the path
+    /// there), for the trait at `trait child`. Its members are the
+    /// definitions made directly in the members scope it opens; its
+    /// generic parameters (`@generic`), those declared in the scope it
+    /// stands in.
     pub impls: Vec<(u16, u16, usize, Option<usize>)>,
     /// (nt, prod, path child) — the node is an attribute (`@attribute(path)`)
     /// the path at `path child` names, said of what the attributes it
@@ -224,6 +227,69 @@ pub struct BindingConfig {
     /// invocations), which no summary sees: a unit with one among its
     /// items is open, and so is a block with one in it.
     pub expands: Vec<(u16, u16)>,
+    /// (nt, prod, form) — the production is a type as written
+    /// (`@type_ref(form, …)`), for a project index reading declared types;
+    /// nothing checks it.
+    pub type_refs: Vec<(u16, u16, TypeForm)>,
+    /// (nt, prod, name child, type child) — what the `name child` defines
+    /// (the alternative's own `@def`, or the one definition inside it) has
+    /// the type written at the `type child` (`@typed(name, type)`).
+    pub typed: Vec<(u16, u16, usize, usize)>,
+    /// (nt, prod, type child) — a call of what this production defines
+    /// gives the type written at the `type child` (`@returns(type)`).
+    pub returns: Vec<(u16, u16, usize)>,
+    /// (nt, prod, path child) — the production names what the item its
+    /// attributes are said of derives: the path at the `path child`
+    /// (`@derives(path)`).
+    pub derives: Vec<(u16, u16, usize)>,
+    /// (nt, prod) — what the production defines (its `@def`) is a generic
+    /// parameter of what declares the scope it stands in (`@generic`): a
+    /// type's, a function's, a trait's, an impl block's.
+    pub generics: Vec<(u16, u16)>,
+    /// (nt, prod, bounds child) — what the production defines is bounded
+    /// by the traits written at the `bounds child` (`@bounds(b)`): a
+    /// trait's supertraits, an associated type's bounds.
+    pub bounds: Vec<(u16, u16, usize)>,
+    /// (nt, prod, fields child) — what the production defines has
+    /// positional fields (`@positional(f)`): the elements of the list at
+    /// the `fields child`, in order, each of the type it writes (a tuple
+    /// struct's, a tuple variant's).
+    pub positional: Vec<(u16, u16, usize)>,
+}
+
+/// What a type's syntax is (`@type_ref(form, …)`), each child by its
+/// symbol index. See [`BindingConfig::type_refs`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeForm {
+    /// `@type_ref(path, p)`: a type the path at `p` names. Its arguments
+    /// are the `arg` and `binding` forms inside `p`, outside any type of
+    /// their own.
+    Path(usize),
+    /// `@type_ref(arg, t)`: the type at `t` is a type argument of the path
+    /// type it stands in.
+    Arg(usize),
+    /// `@type_ref(binding, n, t)`: the associated type the name at `n`
+    /// names is the type at `t`, in the path type it stands in.
+    Binding(usize, usize),
+    /// `@type_ref(ref, t)`: a reference or a pointer to the type at `t`.
+    Ref(usize),
+    /// `@type_ref(slice, t)`: a slice of the type at `t`.
+    Slice(usize),
+    /// `@type_ref(array, t)`: an array of the type at `t`.
+    Array(usize),
+    /// `@type_ref(tuple)`: a tuple of the types the node holds.
+    Tuple,
+    /// `@type_ref(dyn)`: a trait object of the traits the node holds.
+    Dyn,
+    /// `@type_ref(impl)`: a type known by the traits the node holds.
+    Impl,
+    /// `@type_ref(const)`: a generic argument that is a constant, not a
+    /// type (`3`, `{ N + 1 }`); it keeps its place among the arguments.
+    Const,
+    /// `@type_ref(other)`: a type a project index does not follow (a
+    /// function pointer, `!`, `_`, a macro), or a bound that is no trait
+    /// the type has (Rust's `?Sized`).
+    Other,
 }
 
 impl BindingConfig {
@@ -335,6 +401,27 @@ pub fn compose_binding(
     }
     for &(nt, prod) in &guest.expands {
         out.expands.push((nt + nts, prod + prods));
+    }
+    for &(nt, prod, form) in &guest.type_refs {
+        out.type_refs.push((nt + nts, prod + prods, form));
+    }
+    for &(nt, prod, name, ty) in &guest.typed {
+        out.typed.push((nt + nts, prod + prods, name, ty));
+    }
+    for &(nt, prod, ty) in &guest.returns {
+        out.returns.push((nt + nts, prod + prods, ty));
+    }
+    for &(nt, prod, path) in &guest.derives {
+        out.derives.push((nt + nts, prod + prods, path));
+    }
+    for &(nt, prod) in &guest.generics {
+        out.generics.push((nt + nts, prod + prods));
+    }
+    for &(nt, prod, b) in &guest.bounds {
+        out.bounds.push((nt + nts, prod + prods, b));
+    }
+    for &(nt, prod, f) in &guest.positional {
+        out.positional.push((nt + nts, prod + prods, f));
     }
     out.unordered = host.unordered;
     out

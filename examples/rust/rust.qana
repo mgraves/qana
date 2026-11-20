@@ -341,8 +341,8 @@ rule derive_list = derive_item+ % ","
 // A derive macro's path, or a macro_rules derive's (`Nothing!`, which a
 // `derive` attribute macro of a library's, shadowing the built-in, takes).
 rule derive_item =
-  | DerivePath: attr_path
-  | DeriveBang: attr_path BANG
+  | DerivePath: p:attr_path @derives(p)
+  | DeriveBang: p:attr_path BANG @derives(p)
 
 rule cfg_attrs_opt =
   | CfgAttrsNone:
@@ -484,7 +484,7 @@ rule path_sep = PathSep: COLON_COLON COLON
 // arguments.
 rule tlast =
   | LastName:     n:name @precedence("return") @style(inherit, n)
-  | LastSelfType: "Self" @precedence("return")
+  | LastSelfType: s:"Self" @precedence("return") @style(inherit, s)
 
 // A segment that begins a path and ends no type: `self`, `super`, `crate`.
 rule kseg =
@@ -633,14 +633,14 @@ rule generic_args =
 rule generic_arg_list = generic_arg+ % ","
 
 rule generic_arg =
-  | TypeArg:        type
+  | TypeArg:        t:type @type_ref(arg, t)
   | LifetimeArg:    lifetime_ref
-  | ConstBlockArg:  block
-  | ConstLitArg:    literal
-  | ConstNegArg:    MINUS literal
-  | BindingArg:     n:name EQ type @style(type, n)
-  | BindingArgsArg: n:name generic_args EQ type @style(type, n)
-  | BindingTurbofishArg: n:name path_sep generic_args EQ type @style(type, n)
+  | ConstBlockArg:  block @type_ref(const)
+  | ConstLitArg:    literal @type_ref(const)
+  | ConstNegArg:    MINUS literal @type_ref(const)
+  | BindingArg:     n:name EQ t:type @style(type, n) @type_ref(binding, n, t)
+  | BindingArgsArg: n:name generic_args EQ t:type @style(type, n) @type_ref(binding, n, t)
+  | BindingTurbofishArg: n:name path_sep generic_args EQ t:type @style(type, n) @type_ref(binding, n, t)
   | BoundArg:       n:name COLON bounds @style(type, n)
   | BoundArgsArg:   n:name generic_args COLON bounds @style(type, n)
   | BoundTurbofishArg: n:name path_sep generic_args COLON bounds @style(type, n)
@@ -667,7 +667,7 @@ rule vis_item_kind =
   | Const:        const_def
   | Static:       static_def
   | TypeAlias:    type_alias
-  | Trait:        trait_head n:name generics_opt colon_bounds_opt where_opt open:"{" b:assoc_body "}" @outline(n, class) @fold(block, open) @style(type, n) @def(n, hoisted, open) @module(b) @scope
+  | Trait:        trait_head n:name generics_opt s:colon_bounds_opt where_opt open:"{" b:assoc_body "}" @outline(n, class) @fold(block, open) @style(type, n) @def(n, hoisted, open) @module(b) @scope @bounds(s)
   | ExternBlock:  extern_head open:"{" inner_attrs_opt foreign_items_opt "}" @fold(block, open)
   | ExternCrate:  "extern" "crate" n:name ";" @outline(n, module) @def(n, hoisted, open) @root(global, n) @import @loads
   | ExternCrateAs: "extern" "crate" n:name "as" r:name ";" @outline(n, module) @def(r, hoisted, open) @root(global, n) @import @loads
@@ -721,7 +721,7 @@ rule use_tree_list = use_tree+ % ","
 // prefix would ask the parser to decide it is absent before it sees what
 // the `unsafe` or `const` it is reading begins (an `unsafe impl`, a
 // `const` item), which one token cannot tell.
-rule fn_def = FnDef: fn_head n:name generics_opt open:"(" params_opt close:")" fn_ret_opt where_opt fn_body @outline(n, function) @fold(list, open, close) @style(function, n) @def(n, hoisted) @scope
+rule fn_def = FnDef: fn_head n:name generics_opt open:"(" params_opt close:")" r:fn_ret_opt where_opt fn_body @outline(n, function) @fold(list, open, close) @style(function, n) @def(n, hoisted) @scope @returns(r)
 
 rule fn_body =
   | FnBlock: block_body
@@ -767,7 +767,7 @@ rule param_list = param+ % ","
 
 rule param =
   | SelfParam:     outer_attrs_opt self_param
-  | Param:         outer_attrs_opt pat_no_alt COLON type
+  | Param:         outer_attrs_opt p:pat_no_alt COLON t:type @typed(p, t)
   | VariadicParam: outer_attrs_opt DOT_DOT DOT_DOT DOT
   | NamedVariadic: outer_attrs_opt pat_no_alt COLON DOT_DOT DOT_DOT DOT
 
@@ -778,8 +778,8 @@ rule self_param =
   | SelfRefMut:     amp "mut" s:"self" @def(s)
   | SelfRefLt:      amp lifetime_ref s:"self" @def(s)
   | SelfRefLtMut:   amp lifetime_ref "mut" s:"self" @def(s)
-  | SelfTyped:      s:"self" COLON type @def(s)
-  | SelfMutTyped:   "mut" s:"self" COLON type @def(s)
+  | SelfTyped:      s:"self" COLON t:type @def(s) @typed(s, t)
+  | SelfMutTyped:   "mut" s:"self" COLON t:type @def(s) @typed(s, t)
 
 rule fn_ret_opt = fn_ret?
 
@@ -790,7 +790,7 @@ rule fn_ret_nb = FnRetNb: MINUS_ARROW GT type_nb
 // Structs.
 rule struct_def =
   | NamedStruct: "struct" n:name generics_opt where_opt open:"{" fields_opt "}" @outline(n, struct) @fold(block, open) @style(type, n) @def(n, hoisted, open) @scope
-  | TupleStruct: "struct" n:name generics_opt open:"(" tuple_fields_opt close:")" where_opt ";" @outline(n, struct) @fold(list, open, close) @style(type, n) @def(n, hoisted, open) @scope
+  | TupleStruct: "struct" n:name generics_opt open:"(" f:tuple_fields_opt close:")" where_opt ";" @outline(n, struct) @fold(list, open, close) @style(type, n) @def(n, hoisted, open) @scope @positional(f)
   | UnitStruct:  "struct" n:name generics_opt where_opt ";" @outline(n, struct) @style(type, n) @def(n, hoisted, open) @scope
 
 // Fields are members: reached through a value (`p.x`) or a literal or
@@ -802,7 +802,7 @@ rule fields_opt =
 
 rule field_list = field+ % ","
 
-rule field = Field: outer_attrs_opt v:vis_opt n:name COLON type @outline(n, field) @def(n, hoisted) @visibility(v, n)
+rule field = Field: outer_attrs_opt v:vis_opt n:name COLON t:type @outline(n, field) @def(n, hoisted) @visibility(v, n) @typed(n, t)
 
 // A tuple field: after `pub (`, the next token tells a restricted
 // visibility (`crate`, `self`, `super`, `in`) from a tuple type, where
@@ -834,7 +834,7 @@ rule variant_list = variant+ % ","
 
 rule variant =
   | Variant:       outer_attrs_opt vis_opt n:name discriminant_opt @outline(n, constant) @def(n, hoisted)
-  | TupleVariant:  outer_attrs_opt vis_opt n:name open:"(" tuple_fields_opt close:")" discriminant_opt @outline(n, constant) @fold(list, open, close) @def(n, hoisted)
+  | TupleVariant:  outer_attrs_opt vis_opt n:name open:"(" f:tuple_fields_opt close:")" discriminant_opt @outline(n, constant) @fold(list, open, close) @def(n, hoisted) @positional(f)
   | StructVariant: outer_attrs_opt vis_opt n:name open:"{" fields_opt close:"}" discriminant_opt @outline(n, constant) @fold(block, open, close) @def(n, hoisted)
 
 rule discriminant_opt = discriminant?
@@ -843,9 +843,9 @@ rule discriminant = Discriminant: EQ expr
 
 // Constants and statics.
 rule const_def =
-  | ConstItem:      "const" n:const_name COLON type EQ expr ";" @outline(n, constant) @def(n, hoisted)
-  | ConstNoValue:   "const" n:const_name COLON type ";" @outline(n, constant) @def(n, hoisted)
-  | DefaultConst:   KW_DEFAULT "const" n:const_name COLON type EQ expr ";" @outline(n, constant) @def(n, hoisted)
+  | ConstItem:      "const" n:const_name COLON t:type EQ expr ";" @outline(n, constant) @def(n, hoisted) @typed(n, t)
+  | ConstNoValue:   "const" n:const_name COLON t:type ";" @outline(n, constant) @def(n, hoisted) @typed(n, t)
+  | DefaultConst:   KW_DEFAULT "const" n:const_name COLON t:type EQ expr ";" @outline(n, constant) @def(n, hoisted) @typed(n, t)
 
 // `const _` names nothing.
 rule const_name =
@@ -853,8 +853,8 @@ rule const_name =
   | ConstUnderscore: "_"
 
 rule static_def =
-  | StaticItem:     static_head n:name COLON type EQ expr ";" @outline(n, constant) @def(n, hoisted)
-  | StaticNoValue:  static_head n:name COLON type ";" @outline(n, constant) @def(n, hoisted)
+  | StaticItem:     static_head n:name COLON t:type EQ expr ";" @outline(n, constant) @def(n, hoisted) @typed(n, t)
+  | StaticNoValue:  static_head n:name COLON t:type ";" @outline(n, constant) @def(n, hoisted) @typed(n, t)
 
 rule static_head =
   | StaticPlain:     "static"
@@ -865,8 +865,8 @@ rule static_head =
   | StaticUnsafeMut: "unsafe" "static" "mut"
 
 rule type_alias =
-  | TypeAliasDef:     type_head n:name generics_opt colon_bounds_opt where_opt EQ type where_opt ";" @outline(n, struct) @style(type, n) @def(n, hoisted, open) @scope
-  | TypeAliasNoValue: type_head n:name generics_opt colon_bounds_opt where_opt ";" @outline(n, struct) @style(type, n) @def(n, hoisted, open) @scope
+  | TypeAliasDef:     type_head n:name generics_opt s:colon_bounds_opt where_opt EQ t:type where_opt ";" @outline(n, struct) @style(type, n) @def(n, hoisted, open) @scope @typed(n, t) @bounds(s)
+  | TypeAliasNoValue: type_head n:name generics_opt s:colon_bounds_opt where_opt ";" @outline(n, struct) @style(type, n) @def(n, hoisted, open) @scope @bounds(s)
 
 rule type_head =
   | TypeKw:        "type"
@@ -974,8 +974,8 @@ rule generic_param_list = generic_param+ % ","
 
 rule generic_param =
   | LifetimeParam: outer_attrs_opt l:lifetime lifetime_bounds_opt @def(l, hoisted) @ns(lifetime)
-  | TypeParam:     outer_attrs_opt n:name colon_bounds_opt type_default_opt @style(type, n) @def(n, hoisted, open)
-  | ConstParam:    outer_attrs_opt "const" n:name COLON type const_default_opt @def(n, hoisted)
+  | TypeParam:     outer_attrs_opt n:name colon_bounds_opt type_default_opt @style(type, n) @def(n, hoisted, open) @generic
+  | ConstParam:    outer_attrs_opt "const" n:name COLON type const_default_opt @def(n, hoisted) @generic
 
 rule lifetime_bounds_opt = lifetime_bounds?
 
@@ -1024,14 +1024,14 @@ rule bound =
   | TraitBound:       trait_bound
   | ParenTraitBound:  "(" trait_bound ")"
   | LifetimeBound:    lifetime_ref
-  | UseBound:         "use" generic_args
+  | UseBound:         "use" generic_args @type_ref(other)
 
 rule trait_bound =
-  | Bound:          tr:type_path @style(type, tr)
-  | MaybeBound:     QMARK tr:type_path @style(type, tr)
-  | ForBound:       for_lifetimes tr:type_path @style(type, tr) @scope
-  | MaybeForBound:  QMARK for_lifetimes tr:type_path @style(type, tr) @scope
-  | AsyncBound:     "async" tr:type_path @style(type, tr)
+  | Bound:          tr:type_path @style(type, tr) @type_ref(path, tr)
+  | MaybeBound:     QMARK tr:type_path @style(type, tr) @type_ref(other)
+  | ForBound:       for_lifetimes tr:type_path @style(type, tr) @scope @type_ref(path, tr)
+  | MaybeForBound:  QMARK for_lifetimes tr:type_path @style(type, tr) @scope @type_ref(other)
+  | AsyncBound:     "async" tr:type_path @style(type, tr) @type_ref(path, tr)
 
 // ---- types ----
 
@@ -1039,8 +1039,8 @@ rule trait_bound =
 // allows one, and `type_nb` (one bound) where it does not.
 rule type =
   | TypeNb:      type_nb
-  | ImplBounds:  "impl" bound PLUS bounds
-  | DynBounds:   "dyn" bound PLUS bounds
+  | ImplBounds:  "impl" bound PLUS bounds @type_ref(impl)
+  | DynBounds:   "dyn" bound PLUS bounds @type_ref(dyn)
 
 rule type_nb =
   | TypeNp:      type_np
@@ -1049,34 +1049,34 @@ rule type_nb =
 // A type not beginning with `(`.
 rule type_np =
   | CoreType:     type_np_core
-  | QualType:     p:qual_type_path @style(type, p)
-  | ForFnPtrType: for_lifetimes fn_ptr @scope
+  | QualType:     p:qual_type_path @style(type, p) @type_ref(path, p)
+  | ForFnPtrType: for_lifetimes fn_ptr @scope @type_ref(other)
 
 // The types that begin with neither `(`, `<` nor `for`.
 rule type_np_core =
-  | PathType:    p:unq_type_path @style(type, p)
-  | RefType:     amp type_nb
-  | RefMutType:  amp "mut" type_nb
-  | RefLtType:   amp lifetime_ref type_nb
-  | RefLtMutType: amp lifetime_ref "mut" type_nb
-  | ConstPtr:    STAR "const" type_nb
-  | MutPtr:      STAR "mut" type_nb
-  | SliceType:   "[" type "]"
-  | ArrayType:   "[" type ";" expr "]"
-  | NeverType:   BANG
-  | ImplType:    "impl" bound
-  | DynType:     "dyn" bound
-  | FnPtrType:   fn_ptr
-  | MacroType:   p:plain_path b:BANG delim_tt @style(macro, p, b) @ns(macro, p)
-  | InferType:   "_"
+  | PathType:    p:unq_type_path @style(type, p) @type_ref(path, p)
+  | RefType:     amp t:type_nb @type_ref(ref, t)
+  | RefMutType:  amp "mut" t:type_nb @type_ref(ref, t)
+  | RefLtType:   amp lifetime_ref t:type_nb @type_ref(ref, t)
+  | RefLtMutType: amp lifetime_ref "mut" t:type_nb @type_ref(ref, t)
+  | ConstPtr:    STAR "const" t:type_nb @type_ref(ref, t)
+  | MutPtr:      STAR "mut" t:type_nb @type_ref(ref, t)
+  | SliceType:   "[" t:type "]" @type_ref(slice, t)
+  | ArrayType:   "[" t:type ";" expr "]" @type_ref(array, t)
+  | NeverType:   BANG @type_ref(other)
+  | ImplType:    "impl" bound @type_ref(impl)
+  | DynType:     "dyn" bound @type_ref(dyn)
+  | FnPtrType:   fn_ptr @type_ref(other)
+  | MacroType:   p:plain_path b:BANG delim_tt @style(macro, p, b) @ns(macro, p) @type_ref(other)
+  | InferType:   "_" @type_ref(other)
 
 // The type an `impl` without generics is for: not a qualified path, since
 // `impl <` begins generics (see `impl_def`).
 rule impl_type =
   | ImplCoreType:  type_np_core
-  | ImplForFnPtr:  for_lifetimes fn_ptr @scope
+  | ImplForFnPtr:  for_lifetimes fn_ptr @scope @type_ref(other)
   | ImplParenType: "(" paren_type_rest
-  | ImplDynBounds: "dyn" bound PLUS bounds
+  | ImplDynBounds: "dyn" bound PLUS bounds @type_ref(dyn)
 
 // What a `where` predicate bounds: not a function pointer type with a
 // `for<…>` of its own, since `where for<'a> …` binds the predicate.
@@ -1087,11 +1087,11 @@ rule pred_type =
 
 // After `(`: `()`, `(T)`, `(T,)`, `(T, U, …)`.
 rule paren_type_rest =
-  | UnitType:       ")"
+  | UnitType:       ")" @type_ref(tuple)
   | ParenTypeOne:   type ")"
-  | TupleTypeOne:   type "," ")"
-  | TupleType:      type "," type_list ")"
-  | TupleTypeTrail: type "," type_list "," ")"
+  | TupleTypeOne:   type "," ")" @type_ref(tuple)
+  | TupleType:      type "," type_list ")" @type_ref(tuple)
+  | TupleTypeTrail: type "," type_list "," ")" @type_ref(tuple)
 
 rule type_list = type+ % ","
 
@@ -1272,7 +1272,7 @@ rule tail = Tail: outer_attrs_opt stmt_expr
 rule stmt =
   | EmptyStmt:  ";"
   | ItemStmt:   stmt_item
-  | LetStmt:    outer_attrs_opt "let" p:pat_no_alt type_ann_opt let_init_opt ";" @defer(p)
+  | LetStmt:    outer_attrs_opt "let" p:pat_no_alt a:type_ann_opt let_init_opt ";" @defer(p) @typed(p, a)
   | ExprStmt:   outer_attrs_opt stmt_expr ";"
   | BlockStmt:  outer_attrs_opt block_like
 
@@ -1403,7 +1403,7 @@ rule closure_param_list = closure_param+ % ","
 
 rule closure_param =
   | ClosureParam:      outer_attrs_opt pat_no_alt
-  | ClosureParamTyped: outer_attrs_opt pat_no_alt COLON type
+  | ClosureParamTyped: outer_attrs_opt p:pat_no_alt COLON t:type @typed(p, t)
 
 rule closure_head =
   | ClosureHead:      closure_params

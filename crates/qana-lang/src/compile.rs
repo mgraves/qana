@@ -1166,6 +1166,13 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             let mut pending_attributes: Option<usize> = None;
             let mut pending_loads: Option<(u32, u32)> = None;
             let mut seen_expands = false;
+            let mut seen_type_ref = false;
+            let mut seen_typed = false;
+            let mut seen_returns = false;
+            let mut seen_derives = false;
+            let mut pending_generic: Option<(u32, u32)> = None;
+            let mut seen_bounds = false;
+            let mut seen_positional = false;
             let mut seen_root = false;
             let mut seen_vis = false;
             let mut seen_impl = false;
@@ -1557,6 +1564,127 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             error(d, a.name_span, "duplicate @loads".into());
                         }
                     }
+                    "type_ref" => {
+                        // `@type_ref(form, …)`: a type as written, for a
+                        // project index; nothing checks it.
+                        let label = |d: &mut Vec<QanaDiag>, i: usize| -> Option<usize> {
+                            let arg = a.args.get(i)?;
+                            match positions.get(arg.0.as_str()) {
+                                Some(&k) => Some(k),
+                                None => {
+                                    error(d, arg.1, format!("no symbol labeled `{}` in this alternative", arg.0));
+                                    None
+                                }
+                            }
+                        };
+                        let form = a.args.first().filter(|x| !x.2).map(|x| x.0.as_str());
+                        let arity = |n: usize| a.args.len() == n;
+                        let made = match form {
+                            Some("path") if arity(2) => label(d, 1).map(qana_sem::TypeForm::Path),
+                            Some("arg") if arity(2) => label(d, 1).map(qana_sem::TypeForm::Arg),
+                            Some("binding") if arity(3) => match (label(d, 1), label(d, 2)) {
+                                (Some(n), Some(t)) => Some(qana_sem::TypeForm::Binding(n, t)),
+                                _ => None,
+                            },
+                            Some("ref") if arity(2) => label(d, 1).map(qana_sem::TypeForm::Ref),
+                            Some("slice") if arity(2) => label(d, 1).map(qana_sem::TypeForm::Slice),
+                            Some("array") if arity(2) => label(d, 1).map(qana_sem::TypeForm::Array),
+                            Some("tuple") if arity(1) => Some(qana_sem::TypeForm::Tuple),
+                            Some("dyn") if arity(1) => Some(qana_sem::TypeForm::Dyn),
+                            Some("impl") if arity(1) => Some(qana_sem::TypeForm::Impl),
+                            Some("const") if arity(1) => Some(qana_sem::TypeForm::Const),
+                            Some("other") if arity(1) => Some(qana_sem::TypeForm::Other),
+                            _ => {
+                                error(d, a.name_span, "@type_ref takes `path`, `arg`, `ref`, `slice` or `array` and a label; `binding` and two labels; or `tuple`, `dyn`, `impl`, `const` or `other` alone".into());
+                                None
+                            }
+                        };
+                        if std::mem::replace(&mut seen_type_ref, true) {
+                            error(d, a.name_span, "duplicate @type_ref".into());
+                        } else if let Some(form) = made {
+                            binding.type_refs.push((nt, prod, form));
+                        }
+                    }
+                    "typed" => {
+                        // `@typed(name, type)`: what `name` defines has the
+                        // type written at `type`.
+                        if a.args.len() != 2 {
+                            error(d, a.name_span, "@typed takes the labels of what is defined and of its type".into());
+                        } else if std::mem::replace(&mut seen_typed, true) {
+                            error(d, a.name_span, "duplicate @typed".into());
+                        } else {
+                            let name = positions.get(a.args[0].0.as_str()).copied();
+                            let ty = rule_pos_of(d, &positions, &sg, prod, &a.args[1]);
+                            match (name, ty) {
+                                (Some(name), Some(ty)) => binding.typed.push((nt, prod, name, ty)),
+                                (None, _) => error(d, a.args[0].1, format!("no symbol labeled `{}` in this alternative", a.args[0].0)),
+                                _ => {}
+                            }
+                        }
+                    }
+                    "returns" => {
+                        // `@returns(type)`: a call of what this defines
+                        // gives the type written at `type`.
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@returns takes the label of the type written".into());
+                        } else if std::mem::replace(&mut seen_returns, true) {
+                            error(d, a.name_span, "duplicate @returns".into());
+                        } else if let Some(ty) = rule_pos_of(d, &positions, &sg, prod, &a.args[0]) {
+                            binding.returns.push((nt, prod, ty));
+                        }
+                    }
+                    "derives" => {
+                        // `@derives(path)`: the item derives what the path
+                        // names.
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@derives takes the label of the path of what is derived".into());
+                        } else if std::mem::replace(&mut seen_derives, true) {
+                            error(d, a.name_span, "duplicate @derives".into());
+                        } else {
+                            match positions.get(a.args[0].0.as_str()) {
+                                Some(&k) => binding.derives.push((nt, prod, k)),
+                                None => error(d, a.args[0].1, format!("no symbol labeled `{}` in this alternative", a.args[0].0)),
+                            }
+                        }
+                    }
+                    "generic" => {
+                        // `@generic`: what this alternative defines is a
+                        // generic parameter of what declares its scope.
+                        if !a.args.is_empty() {
+                            error(d, a.name_span, "@generic takes no arguments: it says what the alternative's @def defines".into());
+                        } else if pending_generic.replace(a.name_span).is_some() {
+                            error(d, a.name_span, "duplicate @generic".into());
+                        }
+                    }
+                    "bounds" => {
+                        // `@bounds(b)`: what this alternative defines is
+                        // bounded by the traits written at `b`.
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@bounds takes the label of the bounds written".into());
+                        } else if std::mem::replace(&mut seen_bounds, true) {
+                            error(d, a.name_span, "duplicate @bounds".into());
+                        } else {
+                            match positions.get(a.args[0].0.as_str()) {
+                                Some(&k) => binding.bounds.push((nt, prod, k)),
+                                None => error(d, a.args[0].1, format!("no symbol labeled `{}` in this alternative", a.args[0].0)),
+                            }
+                        }
+                    }
+                    "positional" => {
+                        // `@positional(f)`: what this alternative defines
+                        // has positional fields, the elements of the list
+                        // at `f`.
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@positional takes the label of the fields' list".into());
+                        } else if std::mem::replace(&mut seen_positional, true) {
+                            error(d, a.name_span, "duplicate @positional".into());
+                        } else {
+                            match positions.get(a.args[0].0.as_str()) {
+                                Some(&k) => binding.positional.push((nt, prod, k)),
+                                None => error(d, a.args[0].1, format!("no symbol labeled `{}` in this alternative", a.args[0].0)),
+                            }
+                        }
+                    }
                     "expands" => {
                         // `@expands`: an invocation whose expansion may
                         // declare names where it stands.
@@ -1770,6 +1898,18 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             format!("no symbol labeled `{}` in this alternative", arg.0),
                         ),
                     },
+                }
+            }
+            if let Some(span) = pending_generic {
+                // A generic parameter is what the alternative defines.
+                if binding.defs.iter().any(|e| e.0 == nt && e.1 == prod) {
+                    binding.generics.push((nt, prod));
+                } else {
+                    error(
+                        d,
+                        span,
+                        "@generic says what the alternative defines is a generic parameter: give it @def".into(),
+                    );
                 }
             }
             if let Some(span) = pending_loads {

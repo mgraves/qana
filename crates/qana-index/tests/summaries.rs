@@ -6,8 +6,8 @@ use std::sync::OnceLock;
 use qana_grammar::green::ERROR_NT;
 use qana_grammar::{GreenChild, GreenNode};
 use qana_index::{
-    summarize, summary_key, Attribute, EscapingName, Impl, Import, Path, Root, Summary, Unit,
-    Visibility,
+    summarize, summary_key, Attribute, EscapingName, Impl, Import, Path, Root, Summary, TypeRef,
+    Unit, Visibility,
 };
 use qana_lang::EmbeddedLang;
 
@@ -311,22 +311,34 @@ fn a_rust_files_summary_holds_its_units_imports_reexports_visibilities_and_impls
     );
 
     let point = path(None, &["geo", "Point"]);
+    let written =
+        |path: Path, args: Vec<TypeRef>| TypeRef::Path { path, args, bindings: Vec::new() };
     assert_eq!(
         offers.impls(),
         [
             Impl {
                 unit: None,
-                self_type: Some(path(None, &["Wrapper"])),
+                self_type: Some(written(
+                    path(None, &["Wrapper"]),
+                    vec![written(path(None, &["T"]), Vec::new())],
+                )),
                 trait_path: Some(path(None, &["Display"])),
+                generics: vec!["T".to_string()],
             },
-            Impl { unit: None, self_type: Some(point.clone()), trait_path: None },
             Impl {
                 unit: None,
-                self_type: Some(point.clone()),
+                self_type: Some(written(point.clone(), Vec::new())),
+                trait_path: None,
+                generics: Vec::new(),
+            },
+            Impl {
+                unit: None,
+                self_type: Some(written(point.clone(), Vec::new())),
                 trait_path: Some(path(None, &["fmt", "Debug"])),
+                generics: Vec::new(),
             },
         ],
-        "generic arguments are not the path"
+        "an impl block's type is as written, its generic parameters beside it"
     );
 
     let import = |path: Path, name: Option<&str>, glob: bool| Import {
@@ -622,4 +634,271 @@ fn k() {
     let summary = summarize(rust(), broken);
     assert!(summary.offers().open(), "a text that does not parse may hold what it misses");
     assert!(summary.offers().units().iter().all(|u| u.open));
+}
+
+const TYPES: &str = "use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = \"serde\", derive(serde::Serialize))]
+pub struct Grid<T> {
+    cells: Vec<T>,
+    size: (usize, usize),
+    by_name: HashMap<String, &'static str>,
+    parent: Option<Box<Grid<T>>>,
+    render: fn(&T) -> String,
+    items: [u8; 4],
+    view: &'static [T],
+    shown: Box<dyn Fn(u8) -> bool + Send>,
+}
+
+impl<T> Grid<T> {
+    pub fn new(size: usize) -> Self {
+        let made: Grid<T> = todo!();
+        made
+    }
+
+    pub fn cells(&self) -> impl Iterator<Item = &T> {
+        self.cells.iter()
+    }
+
+    fn nothing(&mut self) {}
+}
+
+pub const SIZE: usize = 8;
+pub static NAME: &str = \"grid\";
+pub type Cells = Vec<Cell>;
+
+pub trait Shape: Clone {
+    fn area(&self) -> f32;
+}
+
+pub struct Buf<'a, T, const N: usize> {
+    data: &'a [T; N],
+    next: Option<Box<Buf<'a, u8, 4>>>,
+}
+
+pub struct Walk<'a, T> {
+    rest: &'a [T],
+}
+
+impl<'a, T> Iterator for Walk<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
+}
+
+pub trait Measure {
+    type Unit: Display + ?Sized;
+
+    fn len(&self) -> usize;
+}
+
+impl Measure for [u8] {
+    type Unit = str;
+
+    fn len(&self) -> usize {
+        0
+    }
+}
+
+impl<T, const N: usize> Measure for [T; N] {
+    type Unit = str;
+
+    fn len(&self) -> usize {
+        N
+    }
+}
+
+pub fn first<T: Clone, U>(items: &[T]) -> impl Iterator<Item = T> + use<T, U> {
+    items.iter().cloned()
+}
+
+pub struct Px(pub f32, #[doc = \"rows\"] u8);
+
+pub struct Wrap(pub(crate) Vec<u8>, pub (u8, u16));
+
+pub struct Unit();
+
+pub enum Mark {
+    Dot(Px),
+    Pair(Px, &'static str,),
+    Blank,
+    Named { at: Px },
+}
+";
+
+fn named(segments: &[&str], args: Vec<TypeRef>) -> TypeRef {
+    TypeRef::Path { path: path(None, segments), args, bindings: Vec::new() }
+}
+
+fn plain(name: &str) -> TypeRef {
+    named(&[name], Vec::new())
+}
+
+#[test]
+fn a_declaration_holds_its_type_its_return_type_and_its_derives_as_written() {
+    let summary = summarize(rust(), TYPES);
+    let declared = |container: &[&str], name: &str| {
+        summary
+            .offers()
+            .declarations()
+            .iter()
+            .find(|d| d.name == name && d.container == container)
+            .unwrap_or_else(|| panic!("{name} in {container:?}"))
+            .clone()
+    };
+    let field = |name: &str| declared(&["Grid"], name).ty;
+    assert_eq!(field("cells"), Some(named(&["Vec"], vec![plain("T")])));
+    assert_eq!(field("size"), Some(TypeRef::Tuple(vec![plain("usize"), plain("usize")])));
+    assert_eq!(
+        field("by_name"),
+        Some(named(&["HashMap"], vec![plain("String"), TypeRef::Ref(Box::new(plain("str")))])),
+        "a lifetime is left out"
+    );
+    assert_eq!(
+        field("parent"),
+        Some(named(&["Option"], vec![named(&["Box"], vec![named(&["Grid"], vec![plain("T")])])]))
+    );
+    assert_eq!(field("render"), Some(TypeRef::Other), "a function pointer is not followed");
+    assert_eq!(field("items"), Some(TypeRef::Array(Box::new(plain("u8")))));
+    assert_eq!(field("view"), Some(TypeRef::Ref(Box::new(TypeRef::Slice(Box::new(plain("T")))))));
+    assert_eq!(
+        field("shown"),
+        Some(named(&["Box"], vec![TypeRef::Dyn(vec![plain("Fn"), plain("Send")])]))
+    );
+
+    let new = declared(&["Grid<T>"], "new");
+    assert_eq!(new.returns, Some(plain("Self")));
+    assert_eq!(
+        declared(&["Grid<T>"], "cells").returns,
+        Some(TypeRef::Impl(vec![TypeRef::Path {
+            path: path(None, &["Iterator"]),
+            args: Vec::new(),
+            bindings: vec![("Item".to_string(), TypeRef::Ref(Box::new(plain("T"))))],
+        }]))
+    );
+    assert_eq!(declared(&["Grid<T>"], "nothing").returns, None, "none written");
+    assert_eq!(declared(&["Shape"], "area").returns, Some(plain("f32")));
+    assert_eq!(declared(&[], "SIZE").ty, Some(plain("usize")));
+    assert_eq!(declared(&[], "NAME").ty, Some(TypeRef::Ref(Box::new(plain("str")))));
+    assert_eq!(declared(&[], "Cells").ty, Some(named(&["Vec"], vec![plain("Cell")])));
+    assert_eq!(
+        declared(&[], "Grid").derives,
+        [path(None, &["Debug"]), path(None, &["Clone"]), path(None, &["serde", "Serialize"])],
+        "a conditional derive is an answer too"
+    );
+    assert!(declared(&[], "SIZE").derives.is_empty());
+}
+
+#[test]
+fn generics_bounds_and_impl_blocks_are_held_as_written() {
+    let summary = summarize(rust(), TYPES);
+    let declarations = summary.offers().declarations();
+    let declared = |container: &[&str], name: &str| {
+        declarations
+            .iter()
+            .find(|d| d.name == name && d.container == container)
+            .unwrap_or_else(|| panic!("{name} in {container:?}"))
+    };
+    let in_impl = |block: u32, name: &str| {
+        declarations
+            .iter()
+            .find(|d| d.name == name && d.impl_block == Some(block))
+            .unwrap_or_else(|| panic!("{name} in impl block {block}"))
+    };
+    let names = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    let slice = |t: TypeRef| TypeRef::Slice(Box::new(t));
+    let array = |t: TypeRef| TypeRef::Array(Box::new(t));
+    let reference = |t: TypeRef| TypeRef::Ref(Box::new(t));
+
+    // Generic parameters: types' and constants', not lifetimes'.
+    assert_eq!(declared(&[], "Grid").generics, names(&["T"]));
+    assert_eq!(declared(&[], "Buf").generics, names(&["T", "N"]));
+    assert_eq!(declared(&[], "Walk").generics, names(&["T"]));
+    assert_eq!(declared(&[], "first").generics, names(&["T", "U"]));
+    assert!(declared(&[], "SIZE").generics.is_empty());
+    assert!(declared(&["Buf"], "data").generics.is_empty(), "a field declares none");
+
+    // A constant argument keeps its place among the arguments.
+    assert_eq!(declared(&["Buf"], "data").ty, Some(reference(array(plain("T")))));
+    assert_eq!(
+        declared(&["Buf"], "next").ty,
+        Some(named(
+            &["Option"],
+            vec![named(&["Box"], vec![named(&["Buf"], vec![plain("u8"), TypeRef::Other])])]
+        ))
+    );
+
+    // Bounds: a trait's supertraits, an associated type's; `?Sized` and
+    // `use<…>` are no traits the type has.
+    assert_eq!(declared(&[], "Shape").bounds, [plain("Clone")]);
+    assert!(declared(&[], "Measure").bounds.is_empty());
+    assert_eq!(declared(&["Measure"], "Unit").bounds, [plain("Display")]);
+    assert_eq!(
+        declared(&[], "first").returns,
+        Some(TypeRef::Impl(vec![TypeRef::Path {
+            path: path(None, &["Iterator"]),
+            args: Vec::new(),
+            bindings: vec![("Item".to_string(), plain("T"))],
+        }]))
+    );
+
+    // Impl blocks: their types as written, and their generic parameters.
+    let impls = summary.offers().impls();
+    let summarized = |i: &Impl| (i.self_type.clone(), i.trait_path.clone(), i.generics.clone());
+    assert_eq!(
+        impls.iter().map(summarized).collect::<Vec<_>>(),
+        [
+            (Some(named(&["Grid"], vec![plain("T")])), None, names(&["T"])),
+            (
+                Some(named(&["Walk"], vec![plain("T")])),
+                Some(path(None, &["Iterator"])),
+                names(&["T"]),
+            ),
+            (Some(slice(plain("u8"))), Some(path(None, &["Measure"])), Vec::new()),
+            (Some(array(plain("T"))), Some(path(None, &["Measure"])), names(&["T", "N"])),
+        ]
+    );
+    assert!(in_impl(3, "len").generics.is_empty(), "the impl block's are its own");
+
+    // The associated types an impl block binds are its declarations.
+    assert_eq!(in_impl(1, "Item").ty, Some(reference(plain("T"))));
+    assert_eq!(
+        in_impl(1, "next").returns,
+        Some(named(&["Option"], vec![named(&["Self", "Item"], Vec::new())]))
+    );
+    assert_eq!(in_impl(2, "Unit").ty, Some(plain("str")));
+    assert_eq!(in_impl(3, "Unit").ty, Some(plain("str")));
+}
+
+#[test]
+fn positional_fields_are_held_in_order() {
+    let summary = summarize(rust(), TYPES);
+    let declarations = summary.offers().declarations();
+    let positional = |container: &[&str], name: &str| {
+        declarations
+            .iter()
+            .find(|d| d.name == name && d.container == container)
+            .unwrap_or_else(|| panic!("{name} in {container:?}"))
+            .positional
+            .clone()
+    };
+    assert_eq!(positional(&[], "Px"), [plain("f32"), plain("u8")], "an attribute is not a type");
+    assert_eq!(
+        positional(&[], "Wrap"),
+        [named(&["Vec"], vec![plain("u8")]), TypeRef::Tuple(vec![plain("u8"), plain("u16")])],
+        "a visibility is not a type, nor are parentheses a tuple of one"
+    );
+    assert!(positional(&[], "Unit").is_empty(), "none written");
+    assert!(positional(&[], "Grid").is_empty(), "named fields are declarations");
+    assert_eq!(positional(&["Mark"], "Dot"), [plain("Px")]);
+    assert_eq!(
+        positional(&["Mark"], "Pair"),
+        [plain("Px"), TypeRef::Ref(Box::new(plain("str")))],
+        "a trailing comma ends the list"
+    );
+    assert!(positional(&["Mark"], "Blank").is_empty());
+    assert!(positional(&["Mark"], "Named").is_empty());
 }

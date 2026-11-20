@@ -5,7 +5,9 @@
 
 use std::sync::OnceLock;
 
-use qana_index::{summarize, EscapingName, Impl, Import, Path, Root, Summary, Unit, Visibility};
+use qana_index::{
+    summarize, EscapingName, Impl, Import, Path, Root, Summary, TypeRef, Unit, Visibility,
+};
 use qana_lang::EmbeddedLang;
 
 const UNITLANG: &str = include_str!("../../../examples/units/unitlang.qana");
@@ -94,6 +96,11 @@ fn each_declaration_has_its_unit_its_visibility_and_its_impl_block() {
     );
 }
 
+/// A type a grammar with no type forms writes: the path it spells.
+fn spelled(path: Path) -> TypeRef {
+    TypeRef::Path { path, args: Vec::new(), bindings: Vec::new() }
+}
+
 #[test]
 fn impl_blocks_say_what_they_are_of_and_which_trait() {
     let summary = summarize(unitlang(), MAIN);
@@ -101,8 +108,18 @@ fn impl_blocks_say_what_they_are_of_and_which_trait() {
     assert_eq!(
         summary.offers().impls(),
         [
-            Impl { unit: None, self_type: Some(point.clone()), trait_path: None },
-            Impl { unit: None, self_type: Some(point), trait_path: Some(path(None, &["Display"])) },
+            Impl {
+                unit: None,
+                self_type: Some(spelled(point.clone())),
+                trait_path: None,
+                generics: Vec::new()
+            },
+            Impl {
+                unit: None,
+                self_type: Some(spelled(point)),
+                trait_path: Some(path(None, &["Display"])),
+                generics: Vec::new(),
+            },
         ]
     );
 }

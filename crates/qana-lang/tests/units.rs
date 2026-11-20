@@ -166,6 +166,29 @@ fn attributes_are_said_of_a_path_and_listed_in_a_rule() {
 }
 
 #[test]
+fn a_type_as_written_is_one_of_its_forms() {
+    refused("rule file = T: p:IDENT @type_ref(path)", "@type_ref takes");
+    refused("rule file = T: p:IDENT @type_ref(pointer, p)", "@type_ref takes");
+    refused("rule file = T: p:IDENT @type_ref(path, q)", "no symbol labeled `q`");
+    refused("rule file = T: \"(\" \")\" @type_ref(tuple) @type_ref(tuple)", "duplicate @type_ref");
+    refused("rule file = T: n:IDENT t:IDENT @def(n) @typed(n)", "@typed takes the labels");
+    refused("rule file = T: n:IDENT t:IDENT @def(n) @typed(n, t)", "a body must be a rule symbol");
+    refused("rule file = T: n:IDENT r:IDENT @def(n) @returns(r)", "a body must be a rule symbol");
+    refused("rule file = T: p:IDENT @derives", "@derives takes the label");
+    refused("rule file = T: p:IDENT @type_ref(const, p)", "@type_ref takes");
+    refused("rule file = T: n:IDENT @generic", "give it @def");
+    refused("rule file = T: n:IDENT @def(n) @generic(n)", "@generic takes no arguments");
+    refused("rule file = T: n:IDENT @def(n) @generic @generic", "duplicate @generic");
+    refused("rule file = T: n:IDENT b:IDENT @def(n) @bounds", "@bounds takes the label");
+    refused("rule file = T: n:IDENT @def(n) @bounds(b)", "no symbol labeled `b`");
+    refused("rule file = T: n:IDENT @def(n) @positional", "@positional takes the label");
+    refused(
+        "rule file = T: n:IDENT f:IDENT @def(n) @positional(f) @positional(f)",
+        "duplicate @positional",
+    );
+}
+
+#[test]
 fn an_impl_block_names_its_type() {
     refused("rule file = File: \"impl\" t:IDENT @impl", "@impl takes");
     refused("rule file = File: \"impl\" t:IDENT @impl(x)", "no symbol labeled `x`");

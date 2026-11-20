@@ -255,6 +255,60 @@ pub struct BindingConfig {
     /// the `fields child`, in order, each of the type it writes (a tuple
     /// struct's, a tuple variant's).
     pub positional: Vec<(u16, u16, usize)>,
+    /// (nt, prod, form) — the production is an expression whose value a
+    /// project index may type from what is written (`@value(form, …)`),
+    /// for reaching a value's members; nothing checks it.
+    pub values: Vec<(u16, u16, ValueForm)>,
+    /// (nt, prod, form) — what a member access names (`@member(form, …)`):
+    /// a field, a method called, or positional fields.
+    pub member_names: Vec<(u16, u16, MemberForm)>,
+    /// (nt, prod, name child, value child) — what the `name child` defines
+    /// (the one definition inside it) holds the value at the `value
+    /// child` (`@inits(name, value)`): a `let`'s binding, its initializer.
+    pub inits: Vec<(u16, u16, usize, usize)>,
+    /// (nt, prod) — what the production defines is the value a method is
+    /// called on (`@self_value`): of the type of the impl block the method
+    /// is in, or of a type with the trait it is in.
+    pub self_values: Vec<(u16, u16)>,
+}
+
+/// What an expression's syntax is (`@value(form, …)`), each child by its
+/// symbol index. See [`BindingConfig::values`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValueForm {
+    /// `@value(path, p)`: what the path at `p` names, as a value (a
+    /// binding, a constant, a function, a unit struct).
+    Path(usize),
+    /// `@value(call, c)`: what calling the value at `c` gives.
+    Call(usize),
+    /// `@value(member, b, m)`, or `@value(member, b, i, m)`: the member
+    /// the `@member` at `m` names, of the value at `b`; or of its
+    /// positional field the token at `i` names (`x.0.len()`, where `0.` is
+    /// one token), where one is given.
+    Member { base: usize, position: Option<usize>, member: usize },
+    /// `@value(same, e)`: the value at `e`, a reference to it, or what it
+    /// refers to (`(e)`, `&e`, `*e`), alike to a member access, which
+    /// reaches through references.
+    Same(usize),
+    /// `@value(typed, t)`: a value of the type written at `t` (a cast's).
+    Typed(usize),
+    /// `@value(struct, p)`: a value of the type the path at `p` names (a
+    /// struct literal's).
+    Struct(usize),
+}
+
+/// What a member access names (`@member(form, …)`). See
+/// [`BindingConfig::member_names`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemberForm {
+    /// `@member(field, n)`: the field the name at `n` names.
+    Field(usize),
+    /// `@member(method, n)`: a call of the method the name at `n` names.
+    Method(usize),
+    /// `@member(position, i)`: the positional fields the token at `i`
+    /// names, one inside the other (`0`; `0.1`, which a lexer reads as one
+    /// number).
+    Position(usize),
 }
 
 /// What a type's syntax is (`@type_ref(form, …)`), each child by its
@@ -422,6 +476,18 @@ pub fn compose_binding(
     }
     for &(nt, prod, f) in &guest.positional {
         out.positional.push((nt + nts, prod + prods, f));
+    }
+    for &(nt, prod, form) in &guest.values {
+        out.values.push((nt + nts, prod + prods, form));
+    }
+    for &(nt, prod, form) in &guest.member_names {
+        out.member_names.push((nt + nts, prod + prods, form));
+    }
+    for &(nt, prod, name, value) in &guest.inits {
+        out.inits.push((nt + nts, prod + prods, name, value));
+    }
+    for &(nt, prod) in &guest.self_values {
+        out.self_values.push((nt + nts, prod + prods));
     }
     out.unordered = host.unordered;
     out

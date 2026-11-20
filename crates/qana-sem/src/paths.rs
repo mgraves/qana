@@ -34,6 +34,10 @@ pub enum Root {
     Crate,
     /// The crates themselves (`::name`): the first segment names one.
     Global,
+    /// The type of the impl block or trait the path stands in (Rust's
+    /// `Self`): what it names depends on where it stands, which a path
+    /// alone does not say.
+    SelfType,
 }
 
 impl Root {
@@ -173,7 +177,13 @@ fn reference_at(
                 path.segments.push(name);
                 path
             }
-            _ => Path { root: None, segments: vec![name] },
+            // A root alone (`Self`, `self`) is that root's path.
+            _ => match &n.children.iter().zip(symbol_indices(n)).find(|(_, i)| *i == Some(k)) {
+                Some((GreenChild::Node(_), _)) => Path::of_child(n, k, cfg)
+                    .filter(|p| p.root.is_some() && p.segments.is_empty())
+                    .unwrap_or(Path { root: None, segments: vec![name] }),
+                _ => Path { root: None, segments: vec![name] },
+            },
         };
         let path = match prefix {
             Prefix::None => own,

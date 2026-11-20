@@ -737,6 +737,11 @@ fn plain(name: &str) -> TypeRef {
     named(&[name], Vec::new())
 }
 
+/// `Self`: the type of the impl block or trait where it is written.
+fn self_type() -> TypeRef {
+    TypeRef::Path { path: path(Some(Root::SelfType), &[]), args: Vec::new(), bindings: Vec::new() }
+}
+
 #[test]
 fn a_declaration_holds_its_type_its_return_type_and_its_derives_as_written() {
     let summary = summarize(rust(), TYPES);
@@ -770,7 +775,7 @@ fn a_declaration_holds_its_type_its_return_type_and_its_derives_as_written() {
     );
 
     let new = declared(&["Grid<T>"], "new");
-    assert_eq!(new.returns, Some(plain("Self")));
+    assert_eq!(new.returns, Some(self_type()));
     assert_eq!(
         declared(&["Grid<T>"], "cells").returns,
         Some(TypeRef::Impl(vec![TypeRef::Path {
@@ -867,7 +872,14 @@ fn generics_bounds_and_impl_blocks_are_held_as_written() {
     assert_eq!(in_impl(1, "Item").ty, Some(reference(plain("T"))));
     assert_eq!(
         in_impl(1, "next").returns,
-        Some(named(&["Option"], vec![named(&["Self", "Item"], Vec::new())]))
+        Some(named(
+            &["Option"],
+            vec![TypeRef::Path {
+                path: path(Some(Root::SelfType), &["Item"]),
+                args: Vec::new(),
+                bindings: Vec::new(),
+            }]
+        ))
     );
     assert_eq!(in_impl(2, "Unit").ty, Some(plain("str")));
     assert_eq!(in_impl(3, "Unit").ty, Some(plain("str")));
@@ -901,4 +913,16 @@ fn positional_fields_are_held_in_order() {
     );
     assert!(positional(&["Mark"], "Blank").is_empty());
     assert!(positional(&["Mark"], "Named").is_empty());
+}
+
+#[test]
+fn const_impl_blocks_and_const_derives_are_held_like_others() {
+    let summary = summarize(rust(), "#[derive_const(PartialEq, Default)]\npub struct S;\n\nimpl const Clone for S {\n    fn clone(&self) -> Self { S }\n}\n\nconst impl S {\n    pub fn new() -> Self { S }\n}\n");
+    let s = summary.offers().declarations().iter().find(|d| d.name == "S").unwrap();
+    assert_eq!(s.derives, [path(None, &["PartialEq"]), path(None, &["Default"])]);
+    let blocks: Vec<Option<Path>> =
+        summary.offers().impls().iter().map(|i| i.trait_path.clone()).collect();
+    assert_eq!(blocks, [None, Some(path(None, &["Clone"]))], "in their fixed order");
+    let new = summary.offers().declarations().iter().find(|d| d.name == "new").unwrap();
+    assert_eq!(new.impl_block, Some(0), "the inherent block's");
 }

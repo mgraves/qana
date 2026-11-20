@@ -17,6 +17,7 @@ use qana_lang::EmbeddedLang;
 use qana_sem::{SemDb, Target};
 use serde::{Deserialize, Serialize};
 
+use crate::members::SelfPaths;
 use crate::{outside_bodies, units, LineStarts, Path, URI};
 
 /// A reference to one of the names looked for. See the [module
@@ -49,7 +50,9 @@ pub struct Reference {
 }
 
 /// The references in `text`, a file of `lang`'s language, to any of
-/// `names`, in the text's order.
+/// `names`, in the text's order. A member access's name is none: what it
+/// names is what its value's type has. A path that begins with `Self` is
+/// said from the type there (`Self::new` in `impl Grid` is `Grid::new`).
 pub fn references(lang: &EmbeddedLang, text: &str, names: &[String]) -> Vec<Reference> {
     let session = lang.session(text);
     let tree = session.tree().expect("parsing is total").clone();
@@ -69,10 +72,18 @@ pub fn references(lang: &EmbeddedLang, text: &str, names: &[String]) -> Vec<Refe
         .filter(|span| defined.contains_key(span))
         .collect();
     let lines = LineStarts::of(text);
+    // Made when a path that begins with `Self` is met: it says the path
+    // from the type there.
+    let mut self_paths: Option<SelfPaths> = None;
 
     let mut found: Vec<Reference> = Vec::new();
     for (r, target) in symbols.refs.iter().zip(resolutions.iter()) {
         if !wanted.contains(r.name.as_str()) {
+            continue;
+        }
+        // A member access's name: what it names, its value's type says
+        // ([`members`](crate::members)).
+        if read.refs.get(&r.span).is_some_and(|place| place.member) {
             continue;
         }
         let binds = match target {
@@ -82,6 +93,11 @@ pub fn references(lang: &EmbeddedLang, text: &str, names: &[String]) -> Vec<Refe
         let local = binds
             .is_some_and(|span| !declared.contains(&span) && !read.import_defs.contains(&span));
         let (units, path) = match qana_sem::path_at(&tree, &lang.binding, r.span.0) {
+            Some((units, path, _)) if path.root == Some(qana_sem::Root::SelfType) => {
+                let reading = self_paths
+                    .get_or_insert_with(|| SelfPaths::new(lang, &tree, &symbols, &resolutions));
+                (units, reading.path(&tree, r.span.0, &path))
+            }
             Some((units, path, _)) => (units, Some(path)),
             None => (Vec::new(), None),
         };
@@ -105,7 +121,8 @@ pub fn references(lang: &EmbeddedLang, text: &str, names: &[String]) -> Vec<Refe
 
 /// The references in `text`, a file of `lang`'s language, that escape it
 /// (none of its definitions binds them), in the text's order: each one a
-/// project index may resolve, and find names nothing. Left out are those
+/// project index may resolve, and find names nothing. A member access's
+/// name is none (a member is never said to name nothing). Left out are those
 /// an expansion made (what the file's own macros expand to), and those in
 /// a scope where an invocation whose expansion may declare names stands
 /// (`@expands`: a block holding a macro invocation), or in a scope inside
@@ -132,7 +149,15 @@ pub fn escaping(lang: &EmbeddedLang, text: &str) -> Vec<Reference> {
         let Some(place) = read.refs.get(&r.span) else {
             continue;
         };
-        if place.scopes.iter().any(|scope| read.expanding.contains(scope)) {
+        // A member access's name, and a path from `Self`, name what where
+        // they stand says; one in a scope an expansion may declare in may
+        // name what it declares.
+        let from_self =
+            place.path.as_ref().is_some_and(|p| p.root == Some(qana_sem::Root::SelfType));
+        if place.member
+            || from_self
+            || place.scopes.iter().any(|scope| read.expanding.contains(scope))
+        {
             continue;
         }
         let (units, path) = match qana_sem::path_at(&tree, &lang.binding, r.span.0) {

@@ -16,10 +16,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use qana_grammar::green::{LIST_PROD, RUN_PROD};
 use qana_grammar::{GreenChild, GreenNode};
-use qana_sem::{name_child, symbol_indices, BindingConfig, Path, RefKind, Root, TypeForm};
+use qana_sem::{
+    name_child, symbol_indices, BindingConfig, MemberForm, Path, RefKind, Root, TypeForm, ValueForm,
+};
 use qana_services::OutlineConfig;
 
 use crate::{Attribute, Impl, Import, TypeRef, Unit, Visibility, FUNCTION};
@@ -27,52 +30,60 @@ use crate::{Attribute, Impl, Import, TypeRef, Unit, Visibility, FUNCTION};
 /// What the binding says of one production, gathered from the config's
 /// tables once, so the walk asks each node once.
 #[derive(Default)]
-struct Roles {
+pub(crate) struct Roles {
     /// It opens a scope; `true` when the scope holds members.
-    scope: Option<bool>,
+    pub(crate) scope: Option<bool>,
     /// The symbol child its `@def` names.
-    def: Option<usize>,
+    pub(crate) def: Option<usize>,
     /// Its references: the symbol child each names, and its kind.
-    refs: Vec<(usize, RefKind)>,
+    pub(crate) refs: Vec<(usize, RefKind)>,
     /// `@qualify(base, name)`: the base child and the name child.
-    qualify: Option<(usize, usize)>,
+    pub(crate) qualify: Option<(usize, usize)>,
     /// `@unit(name[, body])`: the body child.
-    unit: Option<Option<usize>>,
+    pub(crate) unit: Option<Option<usize>>,
     /// `@vis`: within, and the path child of `in`.
-    vis: Option<(Option<Root>, Option<usize>)>,
+    pub(crate) vis: Option<(Option<Root>, Option<usize>)>,
     /// `@visibility(v, item)`.
-    visibility: Option<(usize, usize)>,
+    pub(crate) visibility: Option<(usize, usize)>,
     /// `@import`/`@import_glob`: the path child, and whether a glob.
-    import: Option<(Option<usize>, bool)>,
+    pub(crate) import: Option<(Option<usize>, bool)>,
     /// `@loads`: the import loads the library its path names.
-    loads: bool,
+    pub(crate) loads: bool,
     /// `@attribute(path)`: the path child.
-    attribute: Option<usize>,
+    pub(crate) attribute: Option<usize>,
     /// `@attributes(attrs[, item])`: the attributes child, and the item
     /// child.
-    attribute_list: Option<(usize, Option<usize>)>,
+    pub(crate) attribute_list: Option<(usize, Option<usize>)>,
     /// `@expands`: an invocation whose expansion may declare names.
-    expands: bool,
+    pub(crate) expands: bool,
     /// `@type_ref(form, …)`: a type as written.
-    type_ref: Option<TypeForm>,
+    pub(crate) type_ref: Option<TypeForm>,
     /// `@typed(name, type)`: the name child and the type child.
-    typed: Option<(usize, usize)>,
+    pub(crate) typed: Option<(usize, usize)>,
     /// `@returns(type)`: the type child.
-    returns: Option<usize>,
+    pub(crate) returns: Option<usize>,
     /// `@derives(path)`: the path child.
-    derives: Option<usize>,
+    pub(crate) derives: Option<usize>,
     /// `@generic`: what it defines is a generic parameter.
-    generic: bool,
+    pub(crate) generic: bool,
     /// `@bounds(b)`: the bounds child.
-    bounds: Option<usize>,
+    pub(crate) bounds: Option<usize>,
     /// `@positional(f)`: the fields child.
-    positional: Option<usize>,
+    pub(crate) positional: Option<usize>,
     /// `@import_prefix`: the path child, and the trees child.
-    prefix: Option<(Option<usize>, usize)>,
+    pub(crate) prefix: Option<(Option<usize>, usize)>,
     /// `@impl(type[, trait])`.
-    implementation: Option<(usize, Option<usize>)>,
+    pub(crate) implementation: Option<(usize, Option<usize>)>,
     /// A construct its outline calls a function: what it holds is a body's.
-    function: bool,
+    pub(crate) function: bool,
+    /// `@value(form, …)`: an expression's value, as written.
+    pub(crate) value: Option<ValueForm>,
+    /// `@member(form, …)`: what a member access names.
+    pub(crate) member_name: Option<MemberForm>,
+    /// `@inits(name, value)`: the name child and the value child.
+    pub(crate) inits: Option<(usize, usize)>,
+    /// `@self_value`: what it defines is the value a method is called on.
+    pub(crate) self_value: bool,
 }
 
 fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Roles> {
@@ -137,6 +148,18 @@ fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Ro
     for &(nt, prod, f) in &cfg.positional {
         map.entry((nt, prod)).or_default().positional = Some(f);
     }
+    for &(nt, prod, form) in &cfg.values {
+        map.entry((nt, prod)).or_default().value = Some(form);
+    }
+    for &(nt, prod, form) in &cfg.member_names {
+        map.entry((nt, prod)).or_default().member_name = Some(form);
+    }
+    for &(nt, prod, name, value) in &cfg.inits {
+        map.entry((nt, prod)).or_default().inits = Some((name, value));
+    }
+    for &(nt, prod) in &cfg.self_values {
+        map.entry((nt, prod)).or_default().self_value = true;
+    }
     for &(nt, prod, ty, tr) in &cfg.impls {
         map.entry((nt, prod)).or_default().implementation = Some((ty, tr));
     }
@@ -166,6 +189,11 @@ pub(crate) struct DefPlace {
     pub bounds: Vec<TypeRef>,
     /// Its positional fields' types, in order (`@positional`).
     pub positional: Vec<TypeRef>,
+    /// The value it holds, as written (`@inits`): the node, and where it
+    /// starts.
+    pub init: Option<(Arc<GreenNode>, u32)>,
+    /// Whether it is the value a method is called on (`@self_value`).
+    pub self_value: bool,
 }
 
 /// Where a reference stands, and the path it spells.
@@ -181,6 +209,9 @@ pub(crate) struct RefPlace {
     /// The scopes around it below its unit's, outermost first, by their
     /// walk index.
     pub scopes: Rc<Vec<u32>>,
+    /// Whether it is a member access's name (`@member`): what it names a
+    /// value's type says, not a path.
+    pub member: bool,
 }
 
 /// A byte span of the file.
@@ -207,6 +238,9 @@ pub(crate) struct FileUnits {
     /// Each unit with a body here (by its index in `units`), and the
     /// body's span.
     pub bodies: Vec<(u32, (u32, u32))>,
+    /// Each impl block's generic parameters, a body's too, by the span of
+    /// the node that says it is one.
+    pub impl_generics: HashMap<Span, Vec<String>>,
     /// The names imports define (a `use` leaf's, a rename's), by span:
     /// a reference bound to one is bound to what it imports.
     pub import_defs: HashSet<Span>,
@@ -270,8 +304,7 @@ struct Cx {
 /// Read `tree`'s units, imports, visibilities and impl blocks.
 pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfig) -> FileUnits {
     let mut walk = Walk {
-        cfg,
-        roles: roles(cfg, outline),
+        g: Grammar::new(cfg, outline),
         out: FileUnits {
             attributes: Vec::new(),
             open: false,
@@ -282,11 +315,13 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
             defs: HashMap::new(),
             refs: HashMap::new(),
             bodies: Vec::new(),
+            impl_generics: HashMap::new(),
             import_defs: HashSet::new(),
         },
         scopes: 0,
         typed_defs: HashMap::new(),
         generics: HashMap::new(),
+        init_defs: HashMap::new(),
     };
     let cx = Cx {
         unit: None,
@@ -312,445 +347,25 @@ pub(crate) fn private() -> Visibility {
     Visibility::Within(Path { root: Some(Root::Unit(0)), segments: Vec::new() })
 }
 
-struct Walk<'a> {
-    cfg: &'a BindingConfig,
+/// What a grammar's binding says of each production ([`Roles`]), and the
+/// readers of what is written that need nothing else: types as written.
+pub(crate) struct Grammar<'a> {
+    pub cfg: &'a BindingConfig,
     roles: HashMap<(u16, u16), Roles>,
-    out: FileUnits,
-    /// How many scopes below a unit's the walk has opened.
-    scopes: u32,
-    /// The types `@typed` gives definitions made below the node that says
-    /// so (a pattern's one binding), by the name's span.
-    typed_defs: HashMap<(u32, u32), TypeRef>,
-    /// The generic parameters (`@generic`) declared in each scope below a
-    /// unit's, by the scope's walk index, in order: what opened the scope
-    /// (a definition, or the impl block in it) takes them.
-    generics: HashMap<u32, Vec<String>>,
 }
 
-impl Walk<'_> {
-    fn node(&mut self, n: &GreenNode, base: u32, cx: &Cx) {
-        let empty = Roles::default();
-        let roles = self.roles.get(&(n.nt, n.prod)).unwrap_or(&empty);
-        let spans: Vec<Option<(u32, u32)>> = child_spans(n, base);
-        let span_of = |k: usize| spans.get(k).copied().flatten();
-        let whole = (base, base + n.width);
-
-        // The visibility `@visibility` gives the item child, and what is
-        // defined here takes, when its name is in that child.
-        let given = roles.visibility.map(|(v, item)| (self.visibility_at(n, v), span_of(item)));
-        let visibility_here = |name: (u32, u32)| -> Visibility {
-            match &given {
-                Some((v, Some(item))) if item.0 <= name.0 && name.1 <= item.1 => v.clone(),
-                _ => cx.visibility.clone().unwrap_or_else(private),
-            }
-        };
-
-        // The attributes `@attributes` gives (an attribute's own it holds
-        // under its condition, and says nothing of here): what is declared
-        // in the item child takes them, after those an enclosing node gave;
-        // without an item child, the unit the node stands in.
-        let attributes_given = match (roles.attribute_list, roles.attribute) {
-            (Some((attrs, item)), None) => {
-                let (attributes, derives) = self.attributes_at(n, attrs);
-                Some((attributes, derives, item))
-            }
-            _ => None,
-        };
-        let in_item = |name: (u32, u32)| match &attributes_given {
-            Some((_, _, Some(item))) => {
-                span_of(*item).is_some_and(|item| item.0 <= name.0 && name.1 <= item.1)
-            }
-            _ => false,
-        };
-        let attributes_here = |name: (u32, u32)| -> Vec<Attribute> {
-            let mut attributes: Vec<Attribute> =
-                cx.attributes.as_deref().cloned().unwrap_or_default();
-            if let (Some((given, _, _)), true) = (&attributes_given, in_item(name)) {
-                attributes.extend(given.iter().cloned());
-            }
-            attributes
-        };
-        let derives_here = |name: (u32, u32)| -> Vec<Path> {
-            let mut derives: Vec<Path> = cx.derives.as_deref().cloned().unwrap_or_default();
-            if let (Some((_, given, _)), true) = (&attributes_given, in_item(name)) {
-                derives.extend(given.iter().cloned());
-            }
-            derives
-        };
-        if let (Some((given, _, None)), false) = (&attributes_given, cx.in_body) {
-            match cx.unit {
-                None => self.out.attributes.extend(given.iter().cloned()),
-                Some(unit) => {
-                    self.out.units[unit as usize].0.attributes.extend(given.iter().cloned())
-                }
-            }
-        }
-
-        // The type `@typed` writes for what its name child defines: this
-        // node's own definition, or the one definition below it.
-        let mut typed_here: Option<TypeRef> = None;
-        if let Some((name_k, type_k)) = roles.typed {
-            if let Some(ty) = self.type_in(n, type_k) {
-                if roles.def == Some(name_k) {
-                    typed_here = Some(ty);
-                } else if let (Some(child), Some(at)) = (symbol_child(n, name_k), span_of(name_k)) {
-                    let mut defs = Vec::new();
-                    self.defs_in(child, at.0, &mut defs);
-                    if let [only] = defs[..] {
-                        self.typed_defs.insert(only, ty);
-                    }
-                }
-            }
-        }
-
-        // This node's definition, in the scope it stands in.
-        let mut def_name: Option<(String, (u32, u32))> = None;
-        if let Some(k) = roles.def {
-            if let Some((name, off)) = name_child(n, k, self.cfg) {
-                let span = (base + off, base + off + name.len() as u32);
-                let ty = typed_here.take().or_else(|| self.typed_defs.remove(&span));
-                let returns = roles.returns.and_then(|r| self.type_in(n, r));
-                let bounds = roles.bounds.map(|b| self.traits_in(n, b)).unwrap_or_default();
-                let positional =
-                    roles.positional.map(|f| self.positional_in(n, f)).unwrap_or_default();
-                if let (true, Some(&scope)) = (roles.generic, cx.scopes.last()) {
-                    self.generics.entry(scope).or_default().push(name.clone());
-                }
-                self.out.defs.insert(
-                    span,
-                    DefPlace {
-                        unit: cx.unit,
-                        visibility: visibility_here(span),
-                        impl_block: cx.members_of,
-                        ty,
-                        returns,
-                        derives: derives_here(span),
-                        // Its own scope's, once its children are read.
-                        generics: Vec::new(),
-                        bounds,
-                        positional,
-                    },
-                );
-                def_name = Some((name, span));
-            }
-        }
-
-        // Its references, each with its path.
-        for &(k, kind) in &roles.refs {
-            let Some((name, off)) = name_child(n, k, self.cfg) else { continue };
-            let span = (base + off, base + off + name.len() as u32);
-            let path = match (kind, roles.qualify) {
-                (RefKind::Qualified, Some((qbase, qname))) if qname == k => {
-                    Path::of_child(n, qbase, self.cfg).map(|mut path| {
-                        path.segments.push(name.clone());
-                        path
-                    })
-                }
-                _ => Some(Path { root: None, segments: vec![name.clone()] }),
-            };
-            self.out.refs.insert(
-                span,
-                RefPlace { unit: cx.unit, path, imported: cx.imported, scopes: cx.scopes.clone() },
-            );
-        }
-
-        // An invocation that may declare names opens the unit it stands
-        // among the items of, or else the innermost scope around it.
-        if roles.expands {
-            match (cx.scopes.last(), cx.unit) {
-                (Some(&scope), _) => {
-                    self.out.expanding.insert(scope);
-                }
-                (None, None) => self.out.open = true,
-                (None, Some(unit)) => self.out.units[unit as usize].0.open = true,
-            }
-        }
-
-        // What its children stand in.
-        let mut inner = cx.clone();
-        inner.root = false;
-        let mut own_scope: Option<u32> = None;
-        if roles.scope.is_some() && !cx.root && roles.unit.is_none() {
-            // A scope below its unit's: a function, a type, a block.
-            let mut scopes = cx.scopes.as_ref().clone();
-            scopes.push(self.scopes);
-            own_scope = Some(self.scopes);
-            self.scopes += 1;
-            inner.scopes = Rc::new(scopes);
-        }
-        if let Some(members) = roles.scope {
-            inner.visibility = None;
-            inner.attributes = None;
-            inner.derives = None;
-            inner.members_of = if members { cx.impl_pending } else { None };
-            inner.impl_pending = None;
-        }
-        if roles.function {
-            inner.in_body = true;
-        }
-        if let (Some((ty, tr)), false) = (roles.implementation, cx.in_body) {
-            let index = self.out.impls.len() as u32;
-            // Its generic parameters were declared before it, in the scope
-            // the impl block opens.
-            let generics =
-                cx.scopes.last().and_then(|scope| self.generics.remove(scope)).unwrap_or_default();
-            self.out.impls.push((
-                Impl {
-                    unit: cx.unit,
-                    self_type: self.type_in(n, ty).or_else(|| {
-                        // A grammar that writes no type forms there: the
-                        // path the type spells.
-                        Path::of_child(n, ty, self.cfg).map(|path| TypeRef::Path {
-                            path,
-                            args: Vec::new(),
-                            bindings: Vec::new(),
-                        })
-                    }),
-                    trait_path: tr.and_then(|tr| Path::of_child(n, tr, self.cfg)),
-                    generics,
-                },
-                whole,
-            ));
-            inner.impl_pending = Some(index);
-        }
-
-        // Children whose context differs from `inner`, by symbol index.
-        let mut child_cx: Vec<(usize, Cx)> = Vec::new();
-
-        // `pub(in path)`: the path is the visibility's, said in full.
-        if let Some((_, Some(k))) = roles.vis {
-            let mut path_cx = inner.clone();
-            path_cx.imported = true;
-            child_cx.push((k, path_cx));
-        }
-
-        if let (Some(body), Some((name, span)), false) = (roles.unit, &def_name, cx.in_body) {
-            let index = self.out.units.len() as u32;
-            self.out.units.push((
-                Unit {
-                    name: name.clone(),
-                    parent: cx.unit,
-                    inline: body.is_some(),
-                    visibility: visibility_here(*span),
-                    attributes: attributes_here(*span),
-                    open: false,
-                },
-                *span,
-                cx.item.unwrap_or(whole),
-            ));
-            if let Some(body) = body {
-                if let Some(span) = span_of(body) {
-                    self.out.bodies.push((index, span));
-                }
-                let mut body_cx = inner.clone();
-                body_cx.unit = Some(index);
-                body_cx.scopes = Rc::default();
-                child_cx.push((body, body_cx));
-            }
-        }
-
-        if let (Some(_), Some((_, span))) = (roles.import, &def_name) {
-            self.out.import_defs.insert(*span);
-        }
-        if let (Some(_), Some(&scope)) = (roles.import, cx.scopes.last()) {
-            // An import in a block: what it brings, no summary holds.
-            self.out.expanding.insert(scope);
-        }
-        if let Some((path, glob)) = roles.import {
-            let own = match path {
-                Some(k) => Path::of_child(n, k, self.cfg),
-                None => Path::of_node(n, self.cfg),
-            };
-            let full = match (&cx.prefix, own) {
-                (Prefix::None, own) => own,
-                (Prefix::Path(prefix), None) => Some(prefix.clone()),
-                (Prefix::Path(prefix), Some(own)) => own.after(prefix),
-                (Prefix::Broken, _) => None,
-            };
-            if let (Some(full), false) = (full, cx.in_body) {
-                let name = match (glob, roles.def) {
-                    (true, _) | (false, None) => None,
-                    (false, Some(_)) => match &def_name {
-                        Some((name, _)) => Some(name.clone()),
-                        None => full.segments.last().cloned(),
-                    },
-                };
-                let (visibility, attributes) = match &def_name {
-                    Some((_, span)) => (visibility_here(*span), attributes_here(*span)),
-                    None => (
-                        cx.visibility.clone().unwrap_or_else(private),
-                        cx.attributes.as_deref().cloned().unwrap_or_default(),
-                    ),
-                };
-                let loads = roles.loads;
-                self.out.imports.push((
-                    Import { unit: cx.unit, path: full, name, glob, visibility, attributes, loads },
-                    whole,
-                ));
-            }
-            if let Some(k) = path {
-                let mut path_cx = inner.clone();
-                path_cx.imported = true;
-                child_cx.push((k, path_cx));
-            }
-        }
-
-        if let Some((path, trees)) = roles.prefix {
-            let own = match path {
-                Some(k) => Path::of_child(n, k, self.cfg),
-                None => Path::of_node(n, self.cfg),
-            };
-            let prefix = match (&cx.prefix, own) {
-                (Prefix::Broken, _) | (_, None) => Prefix::Broken,
-                (Prefix::None, Some(own)) => Prefix::Path(own),
-                (Prefix::Path(outer), Some(own)) => match own.after(outer) {
-                    Some(joined) => Prefix::Path(joined),
-                    None => Prefix::Broken,
-                },
-            };
-            let mut trees_cx = inner.clone();
-            trees_cx.prefix = prefix;
-            child_cx.push((trees, trees_cx));
-            if let Some(k) = path {
-                let mut path_cx = inner.clone();
-                path_cx.imported = true;
-                child_cx.push((k, path_cx));
-            }
-        }
-
-        if let Some((_, item)) = roles.visibility {
-            if let Some((v, _)) = &given {
-                // Not in a scope this node opens: there, the item's
-                // visibility is not what its contents have.
-                if roles.scope.is_none() {
-                    cx_of(&mut child_cx, item, &inner).visibility = Some(v.clone());
-                }
-            }
-        }
-        if let Some((given, derives, Some(item))) = attributes_given {
-            // Nor its attributes.
-            if roles.scope.is_none() {
-                let item_cx = cx_of(&mut child_cx, item, &inner);
-                item_cx.attributes = Some(Rc::new(given));
-                item_cx.derives = Some(Rc::new(derives));
-            }
-        }
-
-        let is_list = |prod: u16| prod == LIST_PROD || prod == RUN_PROD;
-        let mut off = base;
-        for (c, index) in n.children.iter().zip(symbol_indices(n)) {
-            if let GreenChild::Node(m) = c {
-                let cx = index
-                    .and_then(|k| child_cx.iter().find(|(c, _)| *c == k))
-                    .map_or(&inner, |(_, cx)| cx);
-                if is_list(n.prod) && !is_list(m.prod) {
-                    // An element of a list: an item, from its first token
-                    // (the trivia before it is the space between items).
-                    let mut element = cx.clone();
-                    element.item = Some((off + leading_trivia(m), off + m.width));
-                    self.node(m, off, &element);
-                } else {
-                    self.node(m, off, cx);
-                }
-            }
-            off += c.width();
-        }
-
-        // The generic parameters declared in the scope this definition
-        // opens are its own.
-        if let (Some(scope), Some((_, span))) = (own_scope, &def_name) {
-            if let (Some(generics), Some(place)) =
-                (self.generics.remove(&scope), self.out.defs.get_mut(span))
-            {
-                place.generics = generics;
-            }
-        }
+impl<'a> Grammar<'a> {
+    pub fn new(cfg: &'a BindingConfig, outline: &OutlineConfig) -> Self {
+        Self { cfg, roles: roles(cfg, outline) }
     }
 
-    /// The attributes in the subtree of child `k` of `n`, in the file's
-    /// order: each attribute's, and those an attribute holds, under its
-    /// condition; and what they derive (`@derives`).
-    fn attributes_at(&self, n: &GreenNode, k: usize) -> (Vec<Attribute>, Vec<Path>) {
-        let (mut found, mut derives) = (Vec::new(), Vec::new());
-        if let Some(child) = symbol_child(n, k) {
-            self.attributes_in(child, false, &mut found, &mut derives);
-        }
-        (found, derives)
+    /// What the binding says of `node`'s production.
+    pub fn roles_of(&self, node: &GreenNode) -> Option<&Roles> {
+        self.roles.get(&(node.nt, node.prod))
     }
-
-    fn attributes_in(
-        &self,
-        node: &GreenNode,
-        conditional: bool,
-        found: &mut Vec<Attribute>,
-        derives: &mut Vec<Path>,
-    ) {
-        let roles = self.roles.get(&(node.nt, node.prod));
-        if let Some(k) = roles.and_then(|r| r.derives) {
-            derives.extend(Path::of_child(node, k, self.cfg));
-            return;
-        }
-        if let Some(k) = roles.and_then(|r| r.attribute) {
-            if let Some(path) = Path::of_child(node, k, self.cfg) {
-                found.push(Attribute { path, conditional });
-            }
-            let held =
-                roles.and_then(|r| r.attribute_list).and_then(|(a, _)| symbol_child(node, a));
-            if let Some(held) = held {
-                self.attributes_in(held, true, found, derives);
-            } else {
-                // What an attribute derives is in its arguments.
-                for c in &node.children {
-                    if let GreenChild::Node(m) = c {
-                        self.derives_in(m, derives);
-                    }
-                }
-            }
-            return;
-        }
-        for c in &node.children {
-            if let GreenChild::Node(m) = c {
-                self.attributes_in(m, conditional, found, derives);
-            }
-        }
-    }
-
-    /// What the `@derives` nodes in `node`'s subtree name.
-    fn derives_in(&self, node: &GreenNode, derives: &mut Vec<Path>) {
-        if let Some(k) = self.roles.get(&(node.nt, node.prod)).and_then(|r| r.derives) {
-            derives.extend(Path::of_child(node, k, self.cfg));
-            return;
-        }
-        for c in &node.children {
-            if let GreenChild::Node(m) = c {
-                self.derives_in(m, derives);
-            }
-        }
-    }
-
-    /// The name spans of the definitions in `node`'s subtree, which starts
-    /// at `base`.
-    fn defs_in(&self, node: &GreenNode, base: u32, defs: &mut Vec<(u32, u32)>) {
-        if let Some(k) = self.roles.get(&(node.nt, node.prod)).and_then(|r| r.def) {
-            if let Some((name, off)) = name_child(node, k, self.cfg) {
-                defs.push((base + off, base + off + name.len() as u32));
-            }
-        }
-        let mut off = base;
-        for c in &node.children {
-            if let GreenChild::Node(m) = c {
-                self.defs_in(m, off, defs);
-            }
-            off += c.width();
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Types as written
-    // ------------------------------------------------------------------
 
     /// The type written at child `k` of `n`.
-    fn type_in(&self, n: &GreenNode, k: usize) -> Option<TypeRef> {
+    pub(crate) fn type_in(&self, n: &GreenNode, k: usize) -> Option<TypeRef> {
         self.type_of(symbol_child(n, k)?)
     }
 
@@ -887,6 +502,475 @@ impl Walk<'_> {
             }
         }
     }
+}
+
+struct Walk<'a> {
+    g: Grammar<'a>,
+    out: FileUnits,
+    /// How many scopes below a unit's the walk has opened.
+    scopes: u32,
+    /// The types `@typed` gives definitions made below the node that says
+    /// so (a pattern's one binding), by the name's span.
+    typed_defs: HashMap<(u32, u32), TypeRef>,
+    /// The generic parameters (`@generic`) declared in each scope below a
+    /// unit's, by the scope's walk index, in order: what opened the scope
+    /// (a definition, or the impl block in it) takes them.
+    generics: HashMap<u32, Vec<String>>,
+    /// The values `@inits` gives definitions made below the node that says
+    /// so (a pattern's one binding), by the name's span.
+    init_defs: HashMap<(u32, u32), (Arc<GreenNode>, u32)>,
+}
+
+impl Walk<'_> {
+    fn node(&mut self, n: &GreenNode, base: u32, cx: &Cx) {
+        let empty = Roles::default();
+        let roles = self.g.roles.get(&(n.nt, n.prod)).unwrap_or(&empty);
+        let spans: Vec<Option<(u32, u32)>> = child_spans(n, base);
+        let span_of = |k: usize| spans.get(k).copied().flatten();
+        let whole = (base, base + n.width);
+
+        // The visibility `@visibility` gives the item child, and what is
+        // defined here takes, when its name is in that child.
+        let given = roles.visibility.map(|(v, item)| (self.visibility_at(n, v), span_of(item)));
+        let visibility_here = |name: (u32, u32)| -> Visibility {
+            match &given {
+                Some((v, Some(item))) if item.0 <= name.0 && name.1 <= item.1 => v.clone(),
+                _ => cx.visibility.clone().unwrap_or_else(private),
+            }
+        };
+
+        // The attributes `@attributes` gives (an attribute's own it holds
+        // under its condition, and says nothing of here): what is declared
+        // in the item child takes them, after those an enclosing node gave;
+        // without an item child, the unit the node stands in.
+        let attributes_given = match (roles.attribute_list, roles.attribute) {
+            (Some((attrs, item)), None) => {
+                let (attributes, derives) = self.attributes_at(n, attrs);
+                Some((attributes, derives, item))
+            }
+            _ => None,
+        };
+        let in_item = |name: (u32, u32)| match &attributes_given {
+            Some((_, _, Some(item))) => {
+                span_of(*item).is_some_and(|item| item.0 <= name.0 && name.1 <= item.1)
+            }
+            _ => false,
+        };
+        let attributes_here = |name: (u32, u32)| -> Vec<Attribute> {
+            let mut attributes: Vec<Attribute> =
+                cx.attributes.as_deref().cloned().unwrap_or_default();
+            if let (Some((given, _, _)), true) = (&attributes_given, in_item(name)) {
+                attributes.extend(given.iter().cloned());
+            }
+            attributes
+        };
+        let derives_here = |name: (u32, u32)| -> Vec<Path> {
+            let mut derives: Vec<Path> = cx.derives.as_deref().cloned().unwrap_or_default();
+            if let (Some((_, given, _)), true) = (&attributes_given, in_item(name)) {
+                derives.extend(given.iter().cloned());
+            }
+            derives
+        };
+        if let (Some((given, _, None)), false) = (&attributes_given, cx.in_body) {
+            match cx.unit {
+                None => self.out.attributes.extend(given.iter().cloned()),
+                Some(unit) => {
+                    self.out.units[unit as usize].0.attributes.extend(given.iter().cloned())
+                }
+            }
+        }
+
+        // The type `@typed` writes for what its name child defines: this
+        // node's own definition, or the binding its name child is (a
+        // pattern that destructures binds parts of the value, not it).
+        let mut typed_here: Option<TypeRef> = None;
+        if let Some((name_k, type_k)) = roles.typed {
+            if let Some(ty) = self.g.type_in(n, type_k) {
+                if roles.def == Some(name_k) {
+                    typed_here = Some(ty);
+                } else if let (Some(child), Some(at)) = (symbol_child(n, name_k), span_of(name_k)) {
+                    if let Some(def) = self.binding_def(child, at.0) {
+                        self.typed_defs.insert(def, ty);
+                    }
+                }
+            }
+        }
+
+        // The value `@inits` gives the binding its name child is.
+        if let Some((name_k, value_k)) = roles.inits {
+            let value = symbol_child_at(n, value_k, base).filter(|(node, _)| node.width > 0);
+            if let (Some((node, at)), Some(child), Some(span)) =
+                (value, symbol_child(n, name_k), span_of(name_k))
+            {
+                if let Some(def) = self.binding_def(child, span.0) {
+                    self.init_defs.insert(def, (node.clone(), at));
+                }
+            }
+        }
+
+        // This node's definition, in the scope it stands in.
+        let mut def_name: Option<(String, (u32, u32))> = None;
+        if let Some(k) = roles.def {
+            if let Some((name, off)) = name_child(n, k, self.g.cfg) {
+                let span = (base + off, base + off + name.len() as u32);
+                let ty = typed_here.take().or_else(|| self.typed_defs.remove(&span));
+                let init = self.init_defs.remove(&span);
+                let returns = roles.returns.and_then(|r| self.g.type_in(n, r));
+                let bounds = roles.bounds.map(|b| self.g.traits_in(n, b)).unwrap_or_default();
+                let positional =
+                    roles.positional.map(|f| self.g.positional_in(n, f)).unwrap_or_default();
+                if let (true, Some(&scope)) = (roles.generic, cx.scopes.last()) {
+                    self.generics.entry(scope).or_default().push(name.clone());
+                }
+                self.out.defs.insert(
+                    span,
+                    DefPlace {
+                        unit: cx.unit,
+                        visibility: visibility_here(span),
+                        impl_block: cx.members_of,
+                        ty,
+                        returns,
+                        derives: derives_here(span),
+                        // Its own scope's, once its children are read.
+                        generics: Vec::new(),
+                        bounds,
+                        positional,
+                        init,
+                        self_value: roles.self_value,
+                    },
+                );
+                def_name = Some((name, span));
+            }
+        }
+
+        // Its references, each with its path.
+        for &(k, kind) in &roles.refs {
+            let Some((name, off)) = name_child(n, k, self.g.cfg) else { continue };
+            let span = (base + off, base + off + name.len() as u32);
+            let path = match (kind, roles.qualify) {
+                (RefKind::Qualified, Some((qbase, qname))) if qname == k => {
+                    Path::of_child(n, qbase, self.g.cfg).map(|mut path| {
+                        path.segments.push(name.clone());
+                        path
+                    })
+                }
+                // A root alone (`Self`, `self`) is that root's path.
+                _ => Some(
+                    rooted(n, k, self.g.cfg)
+                        .unwrap_or_else(|| Path { root: None, segments: vec![name.clone()] }),
+                ),
+            };
+            self.out.refs.insert(
+                span,
+                RefPlace {
+                    unit: cx.unit,
+                    path,
+                    imported: cx.imported,
+                    scopes: cx.scopes.clone(),
+                    member: matches!(
+                        roles.member_name,
+                        Some(MemberForm::Field(m) | MemberForm::Method(m)) if m == k
+                    ),
+                },
+            );
+        }
+
+        // An invocation that may declare names opens the unit it stands
+        // among the items of, or else the innermost scope around it.
+        if roles.expands {
+            match (cx.scopes.last(), cx.unit) {
+                (Some(&scope), _) => {
+                    self.out.expanding.insert(scope);
+                }
+                (None, None) => self.out.open = true,
+                (None, Some(unit)) => self.out.units[unit as usize].0.open = true,
+            }
+        }
+
+        // What its children stand in.
+        let mut inner = cx.clone();
+        inner.root = false;
+        let mut own_scope: Option<u32> = None;
+        if roles.scope.is_some() && !cx.root && roles.unit.is_none() {
+            // A scope below its unit's: a function, a type, a block.
+            let mut scopes = cx.scopes.as_ref().clone();
+            scopes.push(self.scopes);
+            own_scope = Some(self.scopes);
+            self.scopes += 1;
+            inner.scopes = Rc::new(scopes);
+        }
+        if let Some(members) = roles.scope {
+            inner.visibility = None;
+            inner.attributes = None;
+            inner.derives = None;
+            inner.members_of = if members { cx.impl_pending } else { None };
+            inner.impl_pending = None;
+        }
+        if roles.function {
+            inner.in_body = true;
+        }
+        if let Some((_, true)) = roles.implementation.map(|i| (i, cx.in_body)) {
+            // A body's impl block, which no summary holds: its generic
+            // parameters, for reading what is written in it.
+            let generics =
+                cx.scopes.last().and_then(|scope| self.generics.remove(scope)).unwrap_or_default();
+            self.out.impl_generics.insert(whole, generics);
+        }
+        if let (Some((ty, tr)), false) = (roles.implementation, cx.in_body) {
+            let index = self.out.impls.len() as u32;
+            // Its generic parameters were declared before it, in the scope
+            // the impl block opens.
+            let generics =
+                cx.scopes.last().and_then(|scope| self.generics.remove(scope)).unwrap_or_default();
+            self.out.impl_generics.insert(whole, generics.clone());
+            self.out.impls.push((
+                Impl {
+                    unit: cx.unit,
+                    self_type: self.g.type_in(n, ty).or_else(|| {
+                        // A grammar that writes no type forms there: the
+                        // path the type spells.
+                        Path::of_child(n, ty, self.g.cfg).map(|path| TypeRef::Path {
+                            path,
+                            args: Vec::new(),
+                            bindings: Vec::new(),
+                        })
+                    }),
+                    trait_path: tr.and_then(|tr| Path::of_child(n, tr, self.g.cfg)),
+                    generics,
+                },
+                whole,
+            ));
+            inner.impl_pending = Some(index);
+        }
+
+        // Children whose context differs from `inner`, by symbol index.
+        let mut child_cx: Vec<(usize, Cx)> = Vec::new();
+
+        // `pub(in path)`: the path is the visibility's, said in full.
+        if let Some((_, Some(k))) = roles.vis {
+            let mut path_cx = inner.clone();
+            path_cx.imported = true;
+            child_cx.push((k, path_cx));
+        }
+
+        if let (Some(body), Some((name, span)), false) = (roles.unit, &def_name, cx.in_body) {
+            let index = self.out.units.len() as u32;
+            self.out.units.push((
+                Unit {
+                    name: name.clone(),
+                    parent: cx.unit,
+                    inline: body.is_some(),
+                    visibility: visibility_here(*span),
+                    attributes: attributes_here(*span),
+                    open: false,
+                },
+                *span,
+                cx.item.unwrap_or(whole),
+            ));
+            if let Some(body) = body {
+                if let Some(span) = span_of(body) {
+                    self.out.bodies.push((index, span));
+                }
+                let mut body_cx = inner.clone();
+                body_cx.unit = Some(index);
+                body_cx.scopes = Rc::default();
+                child_cx.push((body, body_cx));
+            }
+        }
+
+        if let (Some(_), Some((_, span))) = (roles.import, &def_name) {
+            self.out.import_defs.insert(*span);
+        }
+        if let (Some(_), Some(&scope)) = (roles.import, cx.scopes.last()) {
+            // An import in a block: what it brings, no summary holds.
+            self.out.expanding.insert(scope);
+        }
+        if let Some((path, glob)) = roles.import {
+            let own = match path {
+                Some(k) => Path::of_child(n, k, self.g.cfg),
+                None => Path::of_node(n, self.g.cfg),
+            };
+            let full = match (&cx.prefix, own) {
+                (Prefix::None, own) => own,
+                (Prefix::Path(prefix), None) => Some(prefix.clone()),
+                (Prefix::Path(prefix), Some(own)) => own.after(prefix),
+                (Prefix::Broken, _) => None,
+            };
+            if let (Some(full), false) = (full, cx.in_body) {
+                let name = match (glob, roles.def) {
+                    (true, _) | (false, None) => None,
+                    (false, Some(_)) => match &def_name {
+                        Some((name, _)) => Some(name.clone()),
+                        None => full.segments.last().cloned(),
+                    },
+                };
+                let (visibility, attributes) = match &def_name {
+                    Some((_, span)) => (visibility_here(*span), attributes_here(*span)),
+                    None => (
+                        cx.visibility.clone().unwrap_or_else(private),
+                        cx.attributes.as_deref().cloned().unwrap_or_default(),
+                    ),
+                };
+                let loads = roles.loads;
+                self.out.imports.push((
+                    Import { unit: cx.unit, path: full, name, glob, visibility, attributes, loads },
+                    whole,
+                ));
+            }
+            if let Some(k) = path {
+                let mut path_cx = inner.clone();
+                path_cx.imported = true;
+                child_cx.push((k, path_cx));
+            }
+        }
+
+        if let Some((path, trees)) = roles.prefix {
+            let own = match path {
+                Some(k) => Path::of_child(n, k, self.g.cfg),
+                None => Path::of_node(n, self.g.cfg),
+            };
+            let prefix = match (&cx.prefix, own) {
+                (Prefix::Broken, _) | (_, None) => Prefix::Broken,
+                (Prefix::None, Some(own)) => Prefix::Path(own),
+                (Prefix::Path(outer), Some(own)) => match own.after(outer) {
+                    Some(joined) => Prefix::Path(joined),
+                    None => Prefix::Broken,
+                },
+            };
+            let mut trees_cx = inner.clone();
+            trees_cx.prefix = prefix;
+            child_cx.push((trees, trees_cx));
+            if let Some(k) = path {
+                let mut path_cx = inner.clone();
+                path_cx.imported = true;
+                child_cx.push((k, path_cx));
+            }
+        }
+
+        if let Some((_, item)) = roles.visibility {
+            if let Some((v, _)) = &given {
+                // Not in a scope this node opens: there, the item's
+                // visibility is not what its contents have.
+                if roles.scope.is_none() {
+                    cx_of(&mut child_cx, item, &inner).visibility = Some(v.clone());
+                }
+            }
+        }
+        if let Some((given, derives, Some(item))) = attributes_given {
+            // Nor its attributes.
+            if roles.scope.is_none() {
+                let item_cx = cx_of(&mut child_cx, item, &inner);
+                item_cx.attributes = Some(Rc::new(given));
+                item_cx.derives = Some(Rc::new(derives));
+            }
+        }
+
+        let is_list = |prod: u16| prod == LIST_PROD || prod == RUN_PROD;
+        let mut off = base;
+        for (c, index) in n.children.iter().zip(symbol_indices(n)) {
+            if let GreenChild::Node(m) = c {
+                let cx = index
+                    .and_then(|k| child_cx.iter().find(|(c, _)| *c == k))
+                    .map_or(&inner, |(_, cx)| cx);
+                if is_list(n.prod) && !is_list(m.prod) {
+                    // An element of a list: an item, from its first token
+                    // (the trivia before it is the space between items).
+                    let mut element = cx.clone();
+                    element.item = Some((off + leading_trivia(m), off + m.width));
+                    self.node(m, off, &element);
+                } else {
+                    self.node(m, off, cx);
+                }
+            }
+            off += c.width();
+        }
+
+        // The generic parameters declared in the scope this definition
+        // opens are its own.
+        if let (Some(scope), Some((_, span))) = (own_scope, &def_name) {
+            if let (Some(generics), Some(place)) =
+                (self.generics.remove(&scope), self.out.defs.get_mut(span))
+            {
+                place.generics = generics;
+            }
+        }
+    }
+
+    /// The attributes in the subtree of child `k` of `n`, in the file's
+    /// order: each attribute's, and those an attribute holds, under its
+    /// condition; and what they derive (`@derives`).
+    fn attributes_at(&self, n: &GreenNode, k: usize) -> (Vec<Attribute>, Vec<Path>) {
+        let (mut found, mut derives) = (Vec::new(), Vec::new());
+        if let Some(child) = symbol_child(n, k) {
+            self.attributes_in(child, false, &mut found, &mut derives);
+        }
+        (found, derives)
+    }
+
+    fn attributes_in(
+        &self,
+        node: &GreenNode,
+        conditional: bool,
+        found: &mut Vec<Attribute>,
+        derives: &mut Vec<Path>,
+    ) {
+        let roles = self.g.roles.get(&(node.nt, node.prod));
+        if let Some(k) = roles.and_then(|r| r.derives) {
+            derives.extend(Path::of_child(node, k, self.g.cfg));
+            return;
+        }
+        if let Some(k) = roles.and_then(|r| r.attribute) {
+            if let Some(path) = Path::of_child(node, k, self.g.cfg) {
+                found.push(Attribute { path, conditional });
+            }
+            let held =
+                roles.and_then(|r| r.attribute_list).and_then(|(a, _)| symbol_child(node, a));
+            if let Some(held) = held {
+                self.attributes_in(held, true, found, derives);
+            } else {
+                // What an attribute derives is in its arguments.
+                for c in &node.children {
+                    if let GreenChild::Node(m) = c {
+                        self.derives_in(m, derives);
+                    }
+                }
+            }
+            return;
+        }
+        for c in &node.children {
+            if let GreenChild::Node(m) = c {
+                self.attributes_in(m, conditional, found, derives);
+            }
+        }
+    }
+
+    /// What the `@derives` nodes in `node`'s subtree name.
+    fn derives_in(&self, node: &GreenNode, derives: &mut Vec<Path>) {
+        if let Some(k) = self.g.roles.get(&(node.nt, node.prod)).and_then(|r| r.derives) {
+            derives.extend(Path::of_child(node, k, self.g.cfg));
+            return;
+        }
+        for c in &node.children {
+            if let GreenChild::Node(m) = c {
+                self.derives_in(m, derives);
+            }
+        }
+    }
+
+    /// The name span of the definition the pattern `node` (starting at
+    /// `base`) is, where it binds the whole value (`x`, `mut x`, `x @ p`):
+    /// one reached through nodes that only wrap another. `None` for a
+    /// pattern that destructures (`Some(x)`, `(a, b)`, `&x`).
+    fn binding_def(&self, node: &GreenNode, base: u32) -> Option<(u32, u32)> {
+        let (mut node, mut base) = (node, base);
+        loop {
+            if let Some(k) = self.g.roles.get(&(node.nt, node.prod)).and_then(|r| r.def) {
+                let (name, off) = name_child(node, k, self.g.cfg)?;
+                return Some((base + off, base + off + name.len() as u32));
+            }
+            (node, base) = only_node(node, base)?;
+        }
+    }
 
     /// The visibility the `@vis` node at or below child `k` of `n`
     /// declares; the default where there is none (an absent optional
@@ -895,7 +979,7 @@ impl Walk<'_> {
         let Some(mut node) = symbol_child(n, k) else { return private() };
         loop {
             if let Some(&(within, path)) =
-                self.roles.get(&(node.nt, node.prod)).and_then(|r| r.vis.as_ref())
+                self.g.roles.get(&(node.nt, node.prod)).and_then(|r| r.vis.as_ref())
             {
                 return match (within, path) {
                     (None, None) => Visibility::Public,
@@ -904,7 +988,7 @@ impl Walk<'_> {
                     }
                     // `pub(in path)` whose path spells none: the narrowest.
                     (None, Some(k)) => {
-                        Path::of_child(node, k, self.cfg).map_or_else(private, Visibility::Within)
+                        Path::of_child(node, k, self.g.cfg).map_or_else(private, Visibility::Within)
                     }
                 };
             }
@@ -951,11 +1035,52 @@ fn leading_trivia(n: &GreenNode) -> u32 {
 }
 
 /// The `k`th symbol child of `n`, when it is a node.
-fn symbol_child(n: &GreenNode, k: usize) -> Option<&GreenNode> {
+pub(crate) fn symbol_child(n: &GreenNode, k: usize) -> Option<&GreenNode> {
     n.children.iter().zip(symbol_indices(n)).find_map(|(c, index)| match c {
         GreenChild::Node(m) if index == Some(k) => Some(m.as_ref()),
         _ => None,
     })
+}
+
+/// The one node among `n`'s children (starting at `base`), where every
+/// other child is trivia, and where it starts.
+pub(crate) fn only_node(n: &GreenNode, base: u32) -> Option<(&GreenNode, u32)> {
+    let mut found = None;
+    let mut off = base;
+    for c in &n.children {
+        match c {
+            GreenChild::Node(m) if found.is_none() => found = Some((m.as_ref(), off)),
+            GreenChild::Node(_) => return None,
+            GreenChild::Token(t) if t.trivia => {}
+            GreenChild::Token(_) => return None,
+        }
+        off += c.width();
+    }
+    found
+}
+
+/// The path a reference's name child spells when it is a root alone (a
+/// node that begins a path and names nothing after: `Self`, `self`).
+pub(crate) fn rooted(n: &GreenNode, k: usize, cfg: &BindingConfig) -> Option<Path> {
+    symbol_child(n, k)?;
+    Path::of_child(n, k, cfg).filter(|p| p.root.is_some() && p.segments.is_empty())
+}
+
+/// The `k`th symbol child of `n`, a node, and where it starts, `n`
+/// starting at `base`.
+pub(crate) fn symbol_child_at(
+    n: &GreenNode,
+    k: usize,
+    base: u32,
+) -> Option<(&Arc<GreenNode>, u32)> {
+    let mut off = base;
+    for (c, index) in n.children.iter().zip(symbol_indices(n)) {
+        if let (GreenChild::Node(m), true) = (c, index == Some(k)) {
+            return Some((m, off));
+        }
+        off += c.width();
+    }
+    None
 }
 
 /// Each symbol child's span, by its symbol index.

@@ -12,7 +12,8 @@ use crate::structure::Structure;
 use crate::EmbeddedLang;
 use linework::{FactCard, Hint, LineEdit, Limner, Mark, Paint, PaintDelta};
 use qana_engine::{IncSession, Line, LineTerm};
-use qana_sem::SemDb;
+use qana_grammar::GreenNode;
+use qana_sem::{Resolutions, SemDb, SymbolTable};
 use qana_services::paint::{facts_at, type_hints, Painter};
 use std::sync::Arc;
 
@@ -59,6 +60,9 @@ pub struct LiveDoc {
     /// so typing costs them nothing.
     shape_rev: u64,
     shape_hash: u64,
+    /// The binding [`LiveDoc::bound`] lent, and the revision it is of:
+    /// assembled once a revision, for each name a reader asks about.
+    bound: Option<(u64, Arc<SymbolTable>, Arc<Resolutions>)>,
 }
 
 impl LiveDoc {
@@ -82,6 +86,7 @@ impl LiveDoc {
             structure: Structure::new(),
             shape_rev: 0,
             shape_hash: 0,
+            bound: None,
         }
     }
 
@@ -93,6 +98,34 @@ impl LiveDoc {
     /// `offset`.
     pub fn path_at(&self, offset: u32) -> Option<(Vec<String>, qana_sem::Path, bool)> {
         qana_sem::path_at(self.session.tree()?, &self.lang.binding, offset)
+    }
+
+    /// The document as it is now, for a project index to read what it
+    /// says (a member access's value, say): its language, its tree, its
+    /// names, and what each reference binds within it (aligned with the
+    /// names' references). The binding is the document's own, kept warm
+    /// across edits.
+    pub fn bound(
+        &mut self,
+    ) -> Option<(&EmbeddedLang, &GreenNode, Arc<SymbolTable>, Arc<Resolutions>)> {
+        let (symbols, resolutions) = match &self.bound {
+            Some((rev, symbols, resolutions)) if *rev == self.marks_rev => {
+                (symbols.clone(), resolutions.clone())
+            }
+            _ => {
+                let symbols = self.db.symbols(&self.uri);
+                let resolutions = self.db.resolve(&self.uri);
+                self.bound = Some((self.marks_rev, symbols.clone(), resolutions.clone()));
+                (symbols, resolutions)
+            }
+        };
+        Some((&self.lang, self.session.tree()?, symbols, resolutions))
+    }
+
+    /// The document's language and its tree as it is now, for reading what
+    /// is written without the names' binding.
+    pub fn tree(&self) -> Option<(&EmbeddedLang, &GreenNode)> {
+        Some((&self.lang, self.session.tree()?))
     }
 
     /// The outline and folds of the CURRENT revision: read once per

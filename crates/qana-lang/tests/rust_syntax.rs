@@ -260,3 +260,23 @@ fn what_rust_analyzers_tests_found() {
     parses("type T = Foo<Item::<T> = U, Item::<T>: Bound>;");
     parses("type F = Box<dyn Fn::(u8) -> u8>;");
 }
+
+#[test]
+fn const_traits_as_stds_own_source_writes_them() {
+    for src in [
+        "const impl<T, A: [const] Allocator + [const] Destruct> Vec<T, A> {}",
+        "impl const Clone for Infallible {}",
+        "impl<T> const Default for Option<T> {}",
+        "pub const trait From<T>: Sized {}",
+        "const unsafe trait Zeroable {}",
+        "fn f(g: impl [const] FnOnce(u8) -> bool + [const] Destruct) {}",
+        "fn f<T>() where T: const Default + ~const PartialEq {}",
+        "#[derive_const(PartialEq)]\nstruct S;",
+    ] {
+        parses(src);
+    }
+    // The items `const` begins, told apart by the token after it.
+    for src in ["const X: u8 = 1;", "const fn f() {}", "fn f() { const { 1 }; }"] {
+        parses(src);
+    }
+}

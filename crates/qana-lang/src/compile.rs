@@ -1173,6 +1173,10 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             let mut pending_generic: Option<(u32, u32)> = None;
             let mut seen_bounds = false;
             let mut seen_positional = false;
+            let mut seen_value = false;
+            let mut seen_member = false;
+            let mut seen_inits = false;
+            let mut pending_self_value: Option<(u32, u32)> = None;
             let mut seen_root = false;
             let mut seen_vis = false;
             let mut seen_impl = false;
@@ -1484,12 +1488,13 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             Some(("super", false)) => Some(Root::Unit(1)),
                             Some(("self", false)) => Some(Root::Unit(0)),
                             Some(("global", false)) => Some(Root::Global),
+                            Some(("self_type", false)) => Some(Root::SelfType),
                             _ => None,
                         };
                         if std::mem::replace(&mut seen_root, true) {
                             error(d, a.name_span, "duplicate @root".into());
                         } else if a.args.is_empty() || a.args.len() > 2 {
-                            error(d, a.name_span, "@root takes a root (`crate`, `super`, `self` or `global`) and an optional label of the first name".into());
+                            error(d, a.name_span, "@root takes a root (`crate`, `super`, `self`, `global` or `self_type`) and an optional label of the first name".into());
                         } else if let Some(root) = root {
                             let first = match a.args.get(1) {
                                 None => Some(None),
@@ -1504,7 +1509,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                                 binding.roots.push((nt, prod, root, first));
                             }
                         } else {
-                            error(d, a.args[0].1, format!("unknown root `{}` (`crate`, `super`, `self` or `global`)", a.args[0].0));
+                            error(d, a.args[0].1, format!("unknown root `{}` (`crate`, `super`, `self`, `global` or `self_type`)", a.args[0].0));
                         }
                     }
                     "vis" => {
@@ -1668,6 +1673,102 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                                 Some(&k) => binding.bounds.push((nt, prod, k)),
                                 None => error(d, a.args[0].1, format!("no symbol labeled `{}` in this alternative", a.args[0].0)),
                             }
+                        }
+                    }
+                    "value" => {
+                        // `@value(form, …)`: an expression whose value a
+                        // project index may type; nothing checks it.
+                        let label = |d: &mut Vec<QanaDiag>, i: usize| -> Option<usize> {
+                            let arg = a.args.get(i)?;
+                            match positions.get(arg.0.as_str()) {
+                                Some(&k) => Some(k),
+                                None => {
+                                    error(d, arg.1, format!("no symbol labeled `{}` in this alternative", arg.0));
+                                    None
+                                }
+                            }
+                        };
+                        let form = a.args.first().filter(|x| !x.2).map(|x| x.0.as_str());
+                        let arity = |n: usize| a.args.len() == n;
+                        let made = match form {
+                            Some("path") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Path),
+                            Some("call") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Call),
+                            Some("same") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Same),
+                            Some("typed") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Typed),
+                            Some("struct") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Struct),
+                            Some("member") if arity(3) => match (label(d, 1), label(d, 2)) {
+                                (Some(base), Some(member)) => {
+                                    Some(qana_sem::ValueForm::Member { base, position: None, member })
+                                }
+                                _ => None,
+                            },
+                            Some("member") if arity(4) => match (label(d, 1), label(d, 2), label(d, 3)) {
+                                (Some(base), Some(position), Some(member)) => {
+                                    Some(qana_sem::ValueForm::Member { base, position: Some(position), member })
+                                }
+                                _ => None,
+                            },
+                            _ => {
+                                error(d, a.name_span, "@value takes `path`, `call`, `same`, `typed` or `struct` and a label; or `member` and the labels of the value, the positional field if one is given, and the member".into());
+                                None
+                            }
+                        };
+                        if std::mem::replace(&mut seen_value, true) {
+                            error(d, a.name_span, "duplicate @value".into());
+                        } else if let Some(form) = made {
+                            binding.values.push((nt, prod, form));
+                        }
+                    }
+                    "member" => {
+                        // `@member(form, n)`: what a member access names.
+                        let form = a.args.first().filter(|x| !x.2).map(|x| x.0.as_str());
+                        let named = match (form, a.args.get(1), a.args.len()) {
+                            (Some(form @ ("field" | "method" | "position")), Some(arg), 2) => {
+                                match positions.get(arg.0.as_str()) {
+                                    Some(&k) => Some(match form {
+                                        "field" => qana_sem::MemberForm::Field(k),
+                                        "method" => qana_sem::MemberForm::Method(k),
+                                        _ => qana_sem::MemberForm::Position(k),
+                                    }),
+                                    None => {
+                                        error(d, arg.1, format!("no symbol labeled `{}` in this alternative", arg.0));
+                                        None
+                                    }
+                                }
+                            }
+                            _ => {
+                                error(d, a.name_span, "@member takes `field`, `method` or `position` and the label of what names it".into());
+                                None
+                            }
+                        };
+                        if std::mem::replace(&mut seen_member, true) {
+                            error(d, a.name_span, "duplicate @member".into());
+                        } else if let Some(form) = named {
+                            binding.member_names.push((nt, prod, form));
+                        }
+                    }
+                    "inits" => {
+                        // `@inits(name, value)`: what `name` defines holds
+                        // the value at `value`.
+                        if a.args.len() != 2 {
+                            error(d, a.name_span, "@inits takes the labels of what is defined and of its value".into());
+                        } else if std::mem::replace(&mut seen_inits, true) {
+                            error(d, a.name_span, "duplicate @inits".into());
+                        } else {
+                            match (positions.get(a.args[0].0.as_str()), positions.get(a.args[1].0.as_str())) {
+                                (Some(&name), Some(&value)) => binding.inits.push((nt, prod, name, value)),
+                                (None, _) => error(d, a.args[0].1, format!("no symbol labeled `{}` in this alternative", a.args[0].0)),
+                                (_, None) => error(d, a.args[1].1, format!("no symbol labeled `{}` in this alternative", a.args[1].0)),
+                            }
+                        }
+                    }
+                    "self_value" => {
+                        // `@self_value`: what this alternative defines is
+                        // the value a method is called on.
+                        if !a.args.is_empty() {
+                            error(d, a.name_span, "@self_value takes no arguments: it says what the alternative's @def defines".into());
+                        } else if pending_self_value.replace(a.name_span).is_some() {
+                            error(d, a.name_span, "duplicate @self_value".into());
                         }
                     }
                     "positional" => {
@@ -1898,6 +1999,19 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             format!("no symbol labeled `{}` in this alternative", arg.0),
                         ),
                     },
+                }
+            }
+            if let Some(span) = pending_self_value {
+                // The value a method is called on is what the alternative
+                // defines.
+                if binding.defs.iter().any(|e| e.0 == nt && e.1 == prod) {
+                    binding.self_values.push((nt, prod));
+                } else {
+                    error(
+                        d,
+                        span,
+                        "@self_value says what the alternative defines is the value a method is called on: give it @def".into(),
+                    );
                 }
             }
             if let Some(span) = pending_generic {

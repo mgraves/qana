@@ -40,8 +40,8 @@
 //! are, the first of these that has the name: what is declared inside it
 //! (an enum's variants, a trait's items); the items of its inherent impl
 //! blocks (every impl block without a trait whose type resolves to it);
-//! the items of its impl blocks of traits (which of those traits are in
-//! scope is not known here: each is an answer).
+//! the items of the traits it implements or derives that are in scope
+//! where the path stands (see [`types`]).
 //!
 //! What escapes still escapes: a crate outside the project, what a macro
 //! expands to, a member no summary holds. Visibility decides what a glob
@@ -73,6 +73,8 @@ use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
 
 use crate::{Attribute, Declaration, Import, Path, Root, Summary, TypeRef, UnitGraph, Visibility};
+
+mod types;
 
 /// What a path names. See the [module docs](self).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +149,14 @@ pub struct Resolver {
     /// Whether each module is open of itself (a macro may declare names in
     /// it), once asked.
     open_modules: RefCell<HashMap<Module, bool>>,
+    /// The traits each impl block implements, once found: by (file, impl
+    /// index).
+    impl_traits: RefCell<HashMap<(u32, u32), Declarations>>,
+    /// Whether each trait is in scope in each module, once asked.
+    in_scope: RefCell<HashMap<(Module, Declared), bool>>,
+    /// The traits each module brings into scope without a name (`use a::T
+    /// as _;`), its globs' and preludes' among them, once found.
+    unnamed: RefCell<HashMap<Module, Declarations>>,
 }
 
 /// A unit in a crate: a file's own (`unit` `None`), or one with its body in
@@ -212,6 +222,9 @@ type ImplBlocks = Rc<Vec<(u32, u32)>>;
 /// type resolves to.
 type Declarations = Rc<Vec<(u32, u32)>>;
 
+/// A declaration, by (file, declaration index).
+type Declared = (u32, u32);
+
 /// Where a type's impl blocks may be: each impl block (file, impl index) by
 /// the last name of its type's path, which is the type's own name or a
 /// name an import gives it (`use a::Cell as Grid; impl Grid {}`); and, by
@@ -259,6 +272,9 @@ impl Resolver {
             finding_impls: Cell::new(false),
             closed: RefCell::default(),
             open_modules: RefCell::default(),
+            impl_traits: RefCell::default(),
+            in_scope: RefCell::default(),
+            unnamed: RefCell::default(),
         }
     }
 
@@ -388,6 +404,9 @@ impl Resolver {
                 (vec![Target { declaration: None, module: Some(module) }], 0)
             }
             Some(Root::Crate) => (vec![self.crate_root(at.krate)], 0),
+            // The type the path stands in an impl block or trait of, which
+            // only where it stands says: a member access's typing knows.
+            Some(Root::SelfType) => return Err(0),
             Some(Root::Global) => {
                 let name = path.segments.first().ok_or(0usize)?;
                 // From the crate's root (Rust 2015), what its root names
@@ -425,7 +444,7 @@ impl Resolver {
         for (i, segment) in path.segments.iter().enumerate().skip(first) {
             let mut next: Vec<Target> = Vec::new();
             for target in &current {
-                next.extend(self.member(*target, segment));
+                next.extend(self.named_after(at, *target, segment));
             }
             next.sort_by_key(|t| (t.declaration, t.module.map(|m| (m.krate, m.file, m.unit))));
             next.dedup();
@@ -474,6 +493,8 @@ impl Resolver {
         match namespace {
             // A named namespace's names are not all known.
             Some(ns) if !ns.is_empty() => return false,
+            // Nor are the members of the type `Self` is, here.
+            _ if path.root == Some(Root::SelfType) => return false,
             // An import's last name may name a macro.
             None if last => return false,
             _ => {}
@@ -615,9 +636,11 @@ impl Resolver {
             })
     }
 
-    /// What `name` is after `target` in a path: a name of the module it is,
-    /// or a member of the type it declares.
-    fn member(&self, target: Target, name: &str) -> Vec<Target> {
+    /// What `name` is after `target` in a path walked from module `at`: a
+    /// name of the module it is, or a member of the type it declares (what
+    /// is declared inside it, or else its impl blocks' items, a trait's
+    /// where the trait is in scope in `at`).
+    fn named_after(&self, at: Module, target: Target, name: &str) -> Vec<Target> {
         if let Some(module) = target.module {
             return self.names_of(module, name).iter().map(|b| b.target).collect();
         }
@@ -628,29 +651,10 @@ impl Resolver {
         if !found.is_empty() {
             return found;
         }
-        let blocks = self.impls_of(file, index);
-        // Its inherent impl blocks' items, or else its trait impl blocks'.
-        for inherent in [true, false] {
-            let mut found = Vec::new();
-            for &(block_file, block) in blocks.iter() {
-                let summary = &self.summaries[block_file as usize];
-                if summary.offers().impls()[block as usize].trait_path.is_none() != inherent {
-                    continue;
-                }
-                for (i, d) in summary.offers().declarations().iter().enumerate() {
-                    if d.impl_block == Some(block) && d.name == name {
-                        found.push(Target {
-                            declaration: Some((block_file, i as u32)),
-                            module: None,
-                        });
-                    }
-                }
-            }
-            if !found.is_empty() {
-                return found;
-            }
-        }
-        Vec::new()
+        self.impl_members(at, (file, index), name, None)
+            .into_iter()
+            .map(|d| Target { declaration: Some(d), module: None })
+            .collect()
     }
 
     /// The declarations named `name` made inside declaration `index` of
@@ -1098,19 +1102,8 @@ impl Resolver {
             return ImplBlocks::default();
         }
         let names = self.impl_names();
-        let mut called = vec![self.summaries[file as usize].offers().declarations()
-            [index as usize]
-            .name
-            .clone()];
-        let mut at = 0;
-        while at < called.len() {
-            for rename in names.renames.get(&called[at]).into_iter().flatten() {
-                if !called.contains(rename) {
-                    called.push(rename.clone());
-                }
-            }
-            at += 1;
-        }
+        let called = self
+            .called(&self.summaries[file as usize].offers().declarations()[index as usize].name);
         let mut candidates: Vec<(u32, u32)> =
             called.iter().filter_map(|n| names.by_name.get(n)).flatten().copied().collect();
         candidates.sort_unstable();
@@ -1177,6 +1170,23 @@ impl Resolver {
     /// Each impl block by the last name of its type's path, and the names
     /// imports give what their paths name, by the last name of the path:
     /// gathered once.
+    /// `name`, and the names imports give what is named `name` (`use a::Cell
+    /// as Grid;`), and those imports give those, as far as they go.
+    fn called(&self, name: &str) -> Vec<String> {
+        let names = self.impl_names();
+        let mut called = vec![name.to_string()];
+        let mut at = 0;
+        while at < called.len() {
+            for rename in names.renames.get(&called[at]).into_iter().flatten() {
+                if !called.contains(rename) {
+                    called.push(rename.clone());
+                }
+            }
+            at += 1;
+        }
+        called
+    }
+
     fn impl_names(&self) -> Rc<ImplNames> {
         if let Some(names) = self.impl_names.borrow().as_ref() {
             return names.clone();

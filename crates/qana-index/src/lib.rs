@@ -49,11 +49,13 @@ use qana_sem::{SemDb, Target};
 use serde::{Deserialize, Serialize};
 
 pub use graph::{CrateInfo, CrateSource, UnitGraph};
+pub use members::{member_at, members, path_at, MemberAccess, MemberKind, Receiver};
 pub use qana_sem::{Path, Root};
 pub use references::{escaping, references, Reference};
 pub use resolve::{Resolution, Resolver};
 
 mod graph;
+mod members;
 mod references;
 mod resolve;
 mod units;
@@ -598,19 +600,21 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     found.sort_by(|a, b| a.declaration.cmp(&b.declaration));
 
     // A reference the walk did not read as a path (one a macro's
-    // expansion makes) is its name alone, in the unit around it.
+    // expansion makes) is its name alone, in the unit around it. A member
+    // access's name is none: a value's type says what it names. Nor is a
+    // path from `Self`, which names what where it stands says.
     let escaping: Vec<EscapingName> = symbols
         .refs
         .iter()
         .zip(resolutions.iter())
         .filter(|(_, target)| **target == Target::Escapes)
         .filter_map(|(r, _)| match read.refs.get(&r.span) {
-            Some(place) if place.imported => None,
-            Some(place) => place.path.clone().map(|path| EscapingName {
-                unit: unit_index(place.unit),
-                namespace: r.ns.clone(),
-                path,
-            }),
+            Some(place) if place.imported || place.member => None,
+            Some(place) => {
+                place.path.clone().filter(|p| p.root != Some(Root::SelfType)).map(|path| {
+                    EscapingName { unit: unit_index(place.unit), namespace: r.ns.clone(), path }
+                })
+            }
             None => Some(EscapingName {
                 unit: unit_index(read.unit_at(r.span)),
                 namespace: r.ns.clone(),
@@ -866,6 +870,7 @@ impl Fnv {
             }
             Some(Root::Crate) => self.u64(2),
             Some(Root::Global) => self.u64(3),
+            Some(Root::SelfType) => self.u64(4),
         }
         self.u64(path.segments.len() as u64);
         for segment in &path.segments {

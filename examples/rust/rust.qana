@@ -137,7 +137,7 @@ token KW_DEFAULT = /default(?=\s+(fn|type|const|unsafe|async|impl|extern)\s)/ @s
 token KW_RAW     = /raw(?=\s+(const|mut)\s)/                           @style(keyword)
 token KW_SAFE    = /safe(?=\s+(fn|static)\s)/                          @style(keyword)
 token KW_CFG_ATTR = /cfg_attr(?=\s*\()/                               @style(variable)
-token KW_DERIVE   = /derive(?=\s*\()/                                 @style(variable)
+token KW_DERIVE   = /derive(_const)?(?=\s*\()/                                 @style(variable)
 
 // A raw identifier is never a keyword: `r#fn` is a name.
 token RAW_IDENT = /r#[\a_][\w_]*/ @style(variable)
@@ -484,7 +484,7 @@ rule path_sep = PathSep: COLON_COLON COLON
 // arguments.
 rule tlast =
   | LastName:     n:name @precedence("return") @style(inherit, n)
-  | LastSelfType: s:"Self" @precedence("return") @style(inherit, s)
+  | LastSelfType: s:"Self" @precedence("return") @style(inherit, s) @root(self_type)
 
 // A segment that begins a path and ends no type: `self`, `super`, `crate`.
 rule kseg =
@@ -492,6 +492,10 @@ rule kseg =
   | KSuper:       "super" @root(super)
   | KCrate:       "crate" @root(crate)
   | KDollarCrate: DOLLAR "crate" @root(crate)
+
+// `Self` beginning a path: the type the impl block or trait it stands in is
+// of, which only where it stands says.
+rule self_root = SelfRoot: "Self" @root(self_type)
 
 // A plain path (no generic arguments) ending in a name or `Self`.
 rule name_path =
@@ -504,7 +508,7 @@ rule name_path =
 rule name_path_multi =
   | PathGlobal:    path_sep t:tlast @style(inherit, t) @root(global, t)
   | PathMoreName:  h:name path_sep t:tlast @style(inherit, t) @ref(h, escaping) @qualify(h, t)
-  | PathMoreSelf:  s:"Self" path_sep t:tlast @style(inherit, t) @qualify(s, t)
+  | PathMoreSelf:  s:self_root path_sep t:tlast @style(inherit, t) @qualify(s, t)
   | PathMore:      m:name_path_multi path_sep t:tlast @style(inherit, t) @qualify(m, t)
   | PathAfterKw:   k:kw_path path_sep t:tlast @style(inherit, t) @qualify(k, t)
 
@@ -539,7 +543,7 @@ rule expr_path =
 // Ending in `::<…>`.
 rule expr_args_path =
   | Turbofish:      n:name path_sep generic_args @style(inherit, n) @ref(n, escaping)
-  | TurbofishSelf:  "Self" path_sep generic_args
+  | TurbofishSelf:  self_root path_sep generic_args
   | TurbofishMulti: m:name_path_multi path_sep generic_args @style(inherit, m)
   | TurbofishAgain: p:expr_after_args_path path_sep generic_args @style(inherit, p)
   | TurbofishQual:  q:qual_path path_sep generic_args @style(inherit, q)
@@ -572,7 +576,7 @@ rule type_args_path =
   | TArgsSelfType:  "Self" generic_args
   | TArgsMulti:     m:name_path_multi generic_args @style(inherit, m)
   | TArgsTurbofish: n:name path_sep generic_args @style(inherit, n) @ref(n, escaping)
-  | TArgsTurbofishSelf:  "Self" path_sep generic_args
+  | TArgsTurbofishSelf:  self_root path_sep generic_args
   | TArgsTurbofishMulti: m:name_path_multi path_sep generic_args @style(inherit, m)
   | TArgsAgain:     p:type_after_args_path generic_args @style(inherit, p)
   | TArgsAgainTurbofish: p:type_after_args_path path_sep generic_args @style(inherit, p)
@@ -772,12 +776,12 @@ rule param =
   | NamedVariadic: outer_attrs_opt pat_no_alt COLON DOT_DOT DOT_DOT DOT
 
 rule self_param =
-  | SelfValue:      s:"self" @def(s)
-  | SelfMut:        "mut" s:"self" @def(s)
-  | SelfRef:        amp s:"self" @def(s)
-  | SelfRefMut:     amp "mut" s:"self" @def(s)
-  | SelfRefLt:      amp lifetime_ref s:"self" @def(s)
-  | SelfRefLtMut:   amp lifetime_ref "mut" s:"self" @def(s)
+  | SelfValue:      s:"self" @def(s) @self_value
+  | SelfMut:        "mut" s:"self" @def(s) @self_value
+  | SelfRef:        amp s:"self" @def(s) @self_value
+  | SelfRefMut:     amp "mut" s:"self" @def(s) @self_value
+  | SelfRefLt:      amp lifetime_ref s:"self" @def(s) @self_value
+  | SelfRefLtMut:   amp lifetime_ref "mut" s:"self" @def(s) @self_value
   | SelfTyped:      s:"self" COLON t:type @def(s) @typed(s, t)
   | SelfMutTyped:   "mut" s:"self" COLON t:type @def(s) @typed(s, t)
 
@@ -876,6 +880,8 @@ rule type_head =
 rule trait_head =
   | TraitKw:           "trait"
   | UnsafeTrait:       "unsafe" "trait"
+  | ConstTrait:        "const" "trait"
+  | ConstUnsafeTrait:  "const" "unsafe" "trait"
   | AutoTrait:         KW_AUTO "trait"
   | UnsafeAutoTrait:   "unsafe" KW_AUTO "trait"
 
@@ -899,16 +905,19 @@ rule impl_rest =
 rule impl_target_plain =
   | InherentTargetPlain: t:impl_type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @impl(t)
   | TraitTargetPlain:    tr:unq_type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr) @impl(t, tr)
+  | ConstTargetPlain:    "const" tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr) @impl(t, tr)
   | NegTargetPlain:      BANG tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr) @impl(t, tr)
 
 rule impl_target =
   | InherentTarget: t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @impl(t)
   | TraitTarget:    tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr) @impl(t, tr)
+  | ConstTarget:    "const" tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr) @impl(t, tr)
   | NegTarget:      BANG tr:type_path "for" t:type where_opt open:"{" assoc_body "}" @outline(t, class) @fold(block, open) @style(type, tr) @impl(t, tr)
 
 rule impl_head =
   | ImplKw:        "impl"
   | UnsafeImpl:    "unsafe" "impl"
+  | ConstImpl:     "const" "impl"
   | DefaultImpl:   KW_DEFAULT "impl"
   | DefaultUnsafeImpl: KW_DEFAULT "unsafe" "impl"
 
@@ -1026,12 +1035,19 @@ rule bound =
   | LifetimeBound:    lifetime_ref
   | UseBound:         "use" generic_args @type_ref(other)
 
+// A bound's trait may be const (unstable Rust that std's own source
+// writes: `[const] Destruct`, `const Default`; once `~const`), as may an
+// impl block (`impl const Clone for X`, `const impl<T> Vec<T>`) and a
+// trait (`pub const trait From<T>`).
 rule trait_bound =
   | Bound:          tr:type_path @style(type, tr) @type_ref(path, tr)
   | MaybeBound:     QMARK tr:type_path @style(type, tr) @type_ref(other)
   | ForBound:       for_lifetimes tr:type_path @style(type, tr) @scope @type_ref(path, tr)
   | MaybeForBound:  QMARK for_lifetimes tr:type_path @style(type, tr) @scope @type_ref(other)
   | AsyncBound:     "async" tr:type_path @style(type, tr) @type_ref(path, tr)
+  | MaybeConstBound: "[" "const" "]" tr:type_path @style(type, tr) @type_ref(path, tr)
+  | ConstBound:     "const" tr:type_path @style(type, tr) @type_ref(path, tr)
+  | TildeConstBound: TILDE "const" tr:type_path @style(type, tr) @type_ref(path, tr)
 
 // ---- types ----
 
@@ -1185,7 +1201,7 @@ rule pat_nr_nomut =
 // `self`, `super` and `crate` are no pattern alone.
 rule pat_path =
   | PatPathMulti:     name_path_multi
-  | PatPathSelfType:  "Self"
+  | PatPathSelfType:  "Self" @root(self_type)
   | PatPathArgs:      expr_args_path
   | PatPathAfterArgs: expr_after_args_path
   | PatPathQual:      qual_path
@@ -1272,7 +1288,7 @@ rule tail = Tail: outer_attrs_opt stmt_expr
 rule stmt =
   | EmptyStmt:  ";"
   | ItemStmt:   stmt_item
-  | LetStmt:    outer_attrs_opt "let" p:pat_no_alt a:type_ann_opt let_init_opt ";" @defer(p) @typed(p, a)
+  | LetStmt:    outer_attrs_opt "let" p:pat_no_alt a:type_ann_opt i:let_init_opt ";" @defer(p) @typed(p, a) @inits(p, i)
   | ExprStmt:   outer_attrs_opt stmt_expr ";"
   | BlockStmt:  outer_attrs_opt block_like
 
@@ -1283,8 +1299,8 @@ rule type_ann = TypeAnn: COLON type
 rule let_init_opt = let_init?
 
 rule let_init =
-  | LetInit:     EQ expr
-  | LetInitElse: EQ expr "else" block
+  | LetInit:     EQ v:expr @value(same, v)
+  | LetInitElse: EQ v:expr "else" block @value(same, v)
 
 // ---- block-like expressions ----
 
@@ -1343,11 +1359,11 @@ rule guard = Guard: "if" expr
 // An operand that is neither block-like nor a struct literal.
 rule atom =
   | Lit:        literal
-  | PathExpr:   p:expr_path @style(inherit, p)
+  | PathExpr:   p:expr_path @style(inherit, p) @value(path, p)
   | MacroCall:  p:plain_path b:BANG open:"(" tts ")" @fold(list, open) @style(macro, p, b) @ns(macro, p) @expands
   | MacroIndex: p:plain_path b:BANG open:"[" tts "]" @fold(list, open) @style(macro, p, b) @ns(macro, p) @expands
   | Unit:       "(" ")" @fold(list)
-  | Paren:      "(" elem ")" @fold(list)
+  | Paren:      "(" e:elem ")" @fold(list) @value(same, e)
   | TupleOne:   "(" elem "," ")" @fold(list)
   | Tuple:      "(" elem "," expr_list ")" @fold(list)
   | TupleTrail: "(" elem "," expr_list "," ")" @fold(list)
@@ -1376,7 +1392,7 @@ rule args_opt =
   | ArgsTrail: expr_list ","
 
 rule struct_lit =
-  | StructLit:      p:expr_path open:"{" struct_fields_opt "}" @fold(list, open) @style(type, p)
+  | StructLit:      p:expr_path open:"{" struct_fields_opt "}" @fold(list, open) @style(type, p) @value(struct, p)
 
 rule struct_fields_opt =
   | StructFieldsNone:
@@ -1414,12 +1430,12 @@ rule closure_head =
 // What follows a `.`: a field, a tuple index (or two, read as one float:
 // `x.0.1`), `await`, or a method call.
 rule member =
-  | MemberField:     name @precedence(DOT)
-  | MemberIndex:     INT
-  | MemberIndex2:    FLOAT
+  | MemberField:     n:name @precedence(DOT) @member(field, n) @ref(n, escaping) @ns(member)
+  | MemberIndex:     i:INT @member(position, i)
+  | MemberIndex2:    f:FLOAT @member(position, f)
   | MemberAwait:     "await"
-  | MemberMethod:    n:name open:"(" args_opt ")" @fold(list, open) @style(method, n)
-  | MemberTurbofish: n:name path_sep generic_args open:"(" args_opt ")" @fold(list, open) @style(method, n)
+  | MemberMethod:    n:name open:"(" args_opt ")" @fold(list, open) @style(method, n) @member(method, n) @ref(n, escaping) @ns(member)
+  | MemberTurbofish: n:name path_sep generic_args open:"(" args_opt ")" @fold(list, open) @style(method, n) @member(method, n) @ref(n, escaping) @ns(member)
 
 // ---- expressions: the full tier ----
 
@@ -1435,19 +1451,19 @@ rule expr =
   | BreakValue:  "break" expr @precedence("return")
   | BreakLabel:  "break" l:lifetime @precedence("return") @style(label, l) @ref(l) @ns(label)
   | BreakLabelValue: "break" l:lifetime expr @precedence("return") @style(label, l) @ref(l) @ns(label)
-  | Member:      expr DOT member @precedence(DOT)
-  | SplitMember: expr DOT FLOAT_DOT member @precedence(DOT)
-  | Call:        c:expr open:"(" args_opt ")" @fold(list, open) @style(function, c)
+  | Member:      b:expr DOT m:member @precedence(DOT) @value(member, b, m)
+  | SplitMember: b:expr DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
+  | Call:        c:expr open:"(" args_opt ")" @fold(list, open) @style(function, c) @value(call, c)
   | Index:       expr open:"[" expr "]" @fold(list, open)
   | Try:         expr QMARK
   | Neg:         MINUS expr @precedence(BANG)
   | Not:         BANG expr
-  | Deref:       STAR expr @precedence(BANG)
-  | Ref:         amp expr @precedence(BANG)
-  | RefMut:      amp "mut" expr @precedence(BANG)
+  | Deref:       STAR e:expr @precedence(BANG) @value(same, e)
+  | Ref:         amp e:expr @precedence(BANG) @value(same, e)
+  | RefMut:      amp "mut" e:expr @precedence(BANG) @value(same, e)
   | RawConst:    amp KW_RAW "const" expr @precedence(BANG)
   | RawMut:      amp KW_RAW "mut" expr @precedence(BANG)
-  | Cast:        expr "as" type_nb @precedence("as")
+  | Cast:        expr "as" t:type_nb @precedence("as") @value(typed, t)
   | Mul:         expr STAR expr
   | Div:         expr SLASH expr
   | Rem:         expr PERCENT expr
@@ -1504,19 +1520,19 @@ rule cond =
   | CBreakValue:  "break" cond @precedence("return")
   | CBreakLabel:  "break" l:lifetime @precedence(DOT_DOT) @style(label, l) @ref(l) @ns(label)
   | CBreakLabelValue: "break" l:lifetime cond @precedence("return") @style(label, l) @ref(l) @ns(label)
-  | CMember:      cond DOT member @precedence(DOT)
-  | CSplitMember: cond DOT FLOAT_DOT member @precedence(DOT)
-  | CCall:        c:cond open:"(" args_opt ")" @fold(list, open) @style(function, c)
+  | CMember:      b:cond DOT m:member @precedence(DOT) @value(member, b, m)
+  | CSplitMember: b:cond DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
+  | CCall:        c:cond open:"(" args_opt ")" @fold(list, open) @style(function, c) @value(call, c)
   | CIndex:       cond open:"[" expr "]" @fold(list, open)
   | CTry:         cond QMARK
   | CNeg:         MINUS cond @precedence(BANG)
   | CNot:         BANG cond
-  | CDeref:       STAR cond @precedence(BANG)
-  | CRef:         amp cond @precedence(BANG)
-  | CRefMut:      amp "mut" cond @precedence(BANG)
+  | CDeref:       STAR e:cond @precedence(BANG) @value(same, e)
+  | CRef:         amp e:cond @precedence(BANG) @value(same, e)
+  | CRefMut:      amp "mut" e:cond @precedence(BANG) @value(same, e)
   | CRawConst:    amp KW_RAW "const" cond @precedence(BANG)
   | CRawMut:      amp KW_RAW "mut" cond @precedence(BANG)
-  | CCast:        cond "as" type_nb @precedence("as")
+  | CCast:        cond "as" t:type_nb @precedence("as") @value(typed, t)
   | CMul:         cond STAR cond
   | CDiv:         cond SLASH cond
   | CRem:         cond PERCENT cond
@@ -1558,8 +1574,8 @@ rule cond =
 rule stmt_expr =
   | SAtom:        a:atom @style(inherit, a)
   | SStructExpr:  struct_lit
-  | SBlockMember: block_like DOT member @precedence(DOT)
-  | SBlockSplitMember: block_like DOT FLOAT_DOT member @precedence(DOT)
+  | SBlockMember: b:block_like DOT m:member @precedence(DOT) @value(member, b, m)
+  | SBlockSplitMember: b:block_like DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
   | SBlockTry:    block_like QMARK
   | SClosure:     closure_head expr @precedence("return") @scope
   | SClosureRet:  closure_head MINUS_ARROW GT type_nb block @scope
@@ -1569,19 +1585,19 @@ rule stmt_expr =
   | SBreakValue:  "break" expr @precedence("return")
   | SBreakLabel:  "break" l:lifetime @precedence("return") @style(label, l) @ref(l) @ns(label)
   | SBreakLabelValue: "break" l:lifetime expr @precedence("return") @style(label, l) @ref(l) @ns(label)
-  | SMember:      stmt_expr DOT member @precedence(DOT)
-  | SSplitMember: stmt_expr DOT FLOAT_DOT member @precedence(DOT)
-  | SCall:        c:stmt_expr open:"(" args_opt ")" @fold(list, open) @style(function, c)
+  | SMember:      b:stmt_expr DOT m:member @precedence(DOT) @value(member, b, m)
+  | SSplitMember: b:stmt_expr DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
+  | SCall:        c:stmt_expr open:"(" args_opt ")" @fold(list, open) @style(function, c) @value(call, c)
   | SIndex:       stmt_expr open:"[" expr "]" @fold(list, open)
   | STry:         stmt_expr QMARK
   | SNeg:         MINUS expr @precedence(BANG)
   | SNot:         BANG expr
-  | SDeref:       STAR expr @precedence(BANG)
-  | SRef:         amp expr @precedence(BANG)
-  | SRefMut:      amp "mut" expr @precedence(BANG)
+  | SDeref:       STAR e:expr @precedence(BANG) @value(same, e)
+  | SRef:         amp e:expr @precedence(BANG) @value(same, e)
+  | SRefMut:      amp "mut" e:expr @precedence(BANG) @value(same, e)
   | SRawConst:    amp KW_RAW "const" expr @precedence(BANG)
   | SRawMut:      amp KW_RAW "mut" expr @precedence(BANG)
-  | SCast:        stmt_expr "as" type_nb @precedence("as")
+  | SCast:        stmt_expr "as" t:type_nb @precedence("as") @value(typed, t)
   | SMul:         stmt_expr STAR expr
   | SDiv:         stmt_expr SLASH expr
   | SRem:         stmt_expr PERCENT expr

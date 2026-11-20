@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 
 pub use graph::{CrateInfo, CrateSource, UnitGraph};
 pub use qana_sem::{Path, Root};
-pub use references::{references, Reference};
+pub use references::{escaping, references, Reference};
 pub use resolve::{Resolution, Resolver};
 
 mod graph;
@@ -95,6 +95,7 @@ impl Summary {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Offers {
     attributes: Vec<Attribute>,
+    open: bool,
     units: Vec<Unit>,
     declarations: Vec<Declaration>,
     reexports: Vec<Import>,
@@ -107,6 +108,13 @@ impl Offers {
     /// at its top), in the file's order.
     pub fn attributes(&self) -> &[Attribute] {
         &self.attributes
+    }
+
+    /// Whether the file's own unit is open: an invocation whose expansion
+    /// may declare names (`@expands`) stands among its items, or the text
+    /// does not parse cleanly, so that a name it has may be missing here.
+    pub fn open(&self) -> bool {
+        self.open
     }
 
     /// The units the file holds, besides its own; a unit's index here is
@@ -200,6 +208,10 @@ pub struct Unit {
     /// at the top of its body where its body is here (Rust's outer, then
     /// inner, attributes), in the file's order.
     pub attributes: Vec<Attribute>,
+    /// Whether it is open: an invocation whose expansion may declare names
+    /// (`@expands`) stands among its items, or its file's text does not
+    /// parse cleanly, so that a name it has may be missing here.
+    pub open: bool,
 }
 
 /// An attribute said of a unit or an import: the path that names it, and
@@ -393,7 +405,15 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     db.set_tree(URI, tree.clone());
     let symbols = db.symbols(URI);
     let resolutions = db.resolve(URI);
-    let read = units::read(&tree, &lang.binding, &lang.outline);
+    let mut read = units::read(&tree, &lang.binding, &lang.outline);
+    // A text that does not parse cleanly may hold what the summary misses:
+    // each of its units is open.
+    if !parses_cleanly(&tree) {
+        read.open = true;
+        for (unit, _, _) in &mut read.units {
+            unit.open = true;
+        }
+    }
 
     // Units, by their names and their parents', a parent before its
     // children (its names are a prefix of theirs); `unit_index` takes a
@@ -547,6 +567,7 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     let offers_fingerprint = {
         let mut hash = Fnv::new();
         hash.attributes(&read.attributes);
+        hash.u64(u64::from(read.open));
         hash.u64(units.len() as u64);
         for u in &units {
             hash.str(&u.name);
@@ -554,6 +575,7 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
             hash.u64(u64::from(u.inline));
             hash.visibility(&u.visibility);
             hash.attributes(&u.attributes);
+            hash.u64(u64::from(u.open));
         }
         hash.u64(declarations.len() as u64);
         for d in &declarations {
@@ -613,6 +635,7 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     Summary {
         offers: Offers {
             attributes: read.attributes,
+            open: read.open,
             units,
             declarations,
             reexports,
@@ -633,6 +656,15 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
             fingerprint: locations_fingerprint,
         },
     }
+}
+
+/// Whether `node` holds no error and no missing token.
+fn parses_cleanly(node: &qana_grammar::GreenNode) -> bool {
+    node.nt != qana_grammar::green::ERROR_NT
+        && node.children.iter().all(|c| match c {
+            qana_grammar::GreenChild::Token(t) => !t.is_missing(),
+            qana_grammar::GreenChild::Node(n) => parses_cleanly(n),
+        })
 }
 
 /// The outline's symbols that no function holds (a function's body's are

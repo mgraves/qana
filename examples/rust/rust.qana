@@ -32,11 +32,16 @@
 // context reads its own line only, so a weak keyword whose next word is on
 // the next line is a name (rustc reads past the line). `macro_rules` is a
 // name: `macro_rules! name { … }` is the macro invocation that takes a
-// name, which is how rustc parses it too. `cfg_attr` before `(` is a token
-// of its own, so that an attribute can tell a conditional attribute from
-// any other (`#[cfg_attr(test, derive(Debug))]`); anywhere else it is a
-// name (`fn cfg_attr(…)`), and so is any attribute path but the first name
-// of one.
+// name, which is how rustc parses it too. `cfg_attr` and `derive` before
+// `(` are tokens of their own, so that an attribute can tell a conditional
+// attribute and a derive's macros from any other (`#[cfg_attr(test,
+// derive(Debug))]`); anywhere else each is a name (`fn derive(…)`), and so
+// is any attribute path but the first name of one.
+//
+// MACROS. A macro invocation may expand to items (`@expands`): among a
+// module's items, to the module's; in a block, even as a statement
+// (`m!(…);`, which rustc reads as one), to the block's; in a pattern, to a
+// binding. What a type macro expands to declares nothing.
 //
 // EXPRESSION TIERS. As in rustc, an expression is read under one of three
 // restrictions, and each is a tier of its own here:
@@ -132,6 +137,7 @@ token KW_DEFAULT = /default(?=\s+(fn|type|const|unsafe|async|impl|extern)\s)/ @s
 token KW_RAW     = /raw(?=\s+(const|mut)\s)/                           @style(keyword)
 token KW_SAFE    = /safe(?=\s+(fn|static)\s)/                          @style(keyword)
 token KW_CFG_ATTR = /cfg_attr(?=\s*\()/                               @style(variable)
+token KW_DERIVE   = /derive(?=\s*\()/                                 @style(variable)
 
 // A raw identifier is never a keyword: `r#fn` is a name.
 token RAW_IDENT = /r#[\a_][\w_]*/ @style(variable)
@@ -316,16 +322,32 @@ rule inner_attr = InnerAttr: h:HASH_BANG b:BANG o:"[" a:attr c:"]" @style(decora
 // macro) is defined in no Rust file this grammar reads: its path stands in
 // the `attribute` namespace, where nothing is defined, and escapes. A
 // conditional attribute (`cfg_attr(pred, attrs)`) holds its attributes
-// under its predicate, which is not decided here.
+// under its predicate, which is not decided here. A derive's paths name
+// derive macros, in the `derive` namespace, where nothing is defined
+// either.
 rule attr =
   | Attr:       p:attr_path attr_input_opt @style(inherit, p) @ns(attribute, p) @attribute(p)
   | UnsafeAttr: "unsafe" "(" p:attr_path attr_input_opt ")" @style(inherit, p) @ns(attribute, p) @attribute(p)
-  | CfgAttr:    k:KW_CFG_ATTR "(" cfg_meta "," a:cfg_attrs_opt ")" @attribute(k) @attributes(a)
+  | CfgAttr:    k:KW_CFG_ATTR "(" cfg_meta "," a:cfg_attrs_opt ")" @style(inherit, k, a) @attribute(k) @attributes(a)
+  | Derive:     k:KW_DERIVE "(" d:derives_opt ")" @style(inherit, k) @attribute(k) @ns(derive, d)
+
+rule derives_opt =
+  | DerivesNone:
+  | Derives:      derive_list
+  | DerivesTrail: derive_list ","
+
+rule derive_list = derive_item+ % ","
+
+// A derive macro's path, or a macro_rules derive's (`Nothing!`, which a
+// `derive` attribute macro of a library's, shadowing the built-in, takes).
+rule derive_item =
+  | DerivePath: attr_path
+  | DeriveBang: attr_path BANG
 
 rule cfg_attrs_opt =
   | CfgAttrsNone:
-  | CfgAttrs:      cfg_attr_list
-  | CfgAttrsTrail: cfg_attr_list ","
+  | CfgAttrs:      l:cfg_attr_list @style(inherit, l)
+  | CfgAttrsTrail: l:cfg_attr_list "," @style(inherit, l)
 
 rule cfg_attr_list = attr+ % ","
 
@@ -403,7 +425,7 @@ rule tt_token =
   | TtRaw3Open: RAW3_OPEN | TtR3Close: R3_CLOSE | TtR3Quote: R3_QUOTE
   | TtR3Text: R3_TEXT
   | TtUnion: KW_UNION | TtAuto: KW_AUTO | TtDefault: KW_DEFAULT | TtRaw: KW_RAW
-  | TtSafe: KW_SAFE | TtCfgAttr: KW_CFG_ATTR
+  | TtSafe: KW_SAFE | TtCfgAttr: KW_CFG_ATTR | TtDerive: KW_DERIVE
   | TtEqEq: EQ_EQ | TtEqArrow: EQ_ARROW | TtEq: EQ | TtBangEq: BANG_EQ
   | TtBang: BANG | TtLtShlEq: LT_SHLEQ | TtLtShl: LT_SHL | TtLtLe: LT_LE
   | TtLt: LT | TtGtShrEq: GT_SHREQ | TtGtShr: GT_SHR | TtGtGe: GT_GE | TtGt: GT
@@ -437,6 +459,7 @@ rule name =
   | Name:    t:IDENT @style(inherit, t)
   | RawName: t:RAW_IDENT @style(inherit, t)
   | CfgAttrName: t:KW_CFG_ATTR @style(inherit, t)
+  | DeriveName: t:KW_DERIVE @style(inherit, t)
 
 rule lifetime =
   | Lifetime:    t:LIFETIME @style(inherit, t)
@@ -927,9 +950,9 @@ rule foreign_vis_kind =
 // definition form (`macro_rules! name { … }`); in brackets or parentheses
 // a `;` ends it.
 rule item_macro =
-  | MacroItemBrace:   p:plain_path b:BANG open:"{" tts "}" @fold(block, open) @style(macro, p, b) @ns(macro, p)
-  | MacroItemParen:   p:plain_path b:BANG open:"(" tts close:")" ";" @fold(list, open, close) @style(macro, p, b) @ns(macro, p)
-  | MacroItemBracket: p:plain_path b:BANG open:"[" tts close:"]" ";" @fold(list, open, close) @style(macro, p, b) @ns(macro, p)
+  | MacroItemBrace:   p:plain_path b:BANG open:"{" tts "}" @fold(block, open) @style(macro, p, b) @ns(macro, p) @expands
+  | MacroItemParen:   p:plain_path b:BANG open:"(" tts close:")" ";" @fold(list, open, close) @style(macro, p, b) @ns(macro, p) @expands
+  | MacroItemBracket: p:plain_path b:BANG open:"[" tts close:"]" ";" @fold(list, open, close) @style(macro, p, b) @ns(macro, p) @expands
 
 rule macro_def = MacroDef: p:plain_path b:BANG n:name delim_tt_def @outline(n, function) @style(macro, p, b, n) @def(n, hoisted) @ns(macro) @ns(macro, p)
 
@@ -1155,7 +1178,7 @@ rule pat_nr_nomut =
   | SlicePat:       "[" pats_opt "]" @fold(list)
   | RefPat:         amp pat_nr_nomut
   | RefMutPat:      amp "mut" pat_nr
-  | MacroPat:       p:plain_path b:BANG delim_tt @style(macro, p, b) @ns(macro, p)
+  | MacroPat:       p:plain_path b:BANG delim_tt @style(macro, p, b) @ns(macro, p) @expands
 
 // A path in a pattern: one name is an identifier pattern, so a path is
 // more than one segment, `Self`, qualified, or with generic arguments.
@@ -1280,7 +1303,7 @@ rule block_like =
   | LabeledWhile:   label "while" cond block @scope
   | For:            "for" p:pat "in" c:cond block @defer(p, c) @scope
   | LabeledFor:     label "for" p:pat "in" c:cond block @defer(p, c) @scope
-  | BraceMacro:     p:plain_path b:BANG open:"{" tts "}" @fold(block, open) @style(macro, p, b) @ns(macro, p)
+  | BraceMacro:     p:plain_path b:BANG open:"{" tts "}" @fold(block, open) @style(macro, p, b) @ns(macro, p) @expands
 
 rule label = Label: l:lifetime COLON @style(label, l) @def(l) @ns(label)
 
@@ -1321,8 +1344,8 @@ rule guard = Guard: "if" expr
 rule atom =
   | Lit:        literal
   | PathExpr:   p:expr_path @style(inherit, p)
-  | MacroCall:  p:plain_path b:BANG open:"(" tts ")" @fold(list, open) @style(macro, p, b) @ns(macro, p)
-  | MacroIndex: p:plain_path b:BANG open:"[" tts "]" @fold(list, open) @style(macro, p, b) @ns(macro, p)
+  | MacroCall:  p:plain_path b:BANG open:"(" tts ")" @fold(list, open) @style(macro, p, b) @ns(macro, p) @expands
+  | MacroIndex: p:plain_path b:BANG open:"[" tts "]" @fold(list, open) @style(macro, p, b) @ns(macro, p) @expands
   | Unit:       "(" ")" @fold(list)
   | Paren:      "(" elem ")" @fold(list)
   | TupleOne:   "(" elem "," ")" @fold(list)

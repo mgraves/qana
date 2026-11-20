@@ -44,10 +44,26 @@
 //! scope is not known here: each is an answer).
 //!
 //! What escapes still escapes: a crate outside the project, what a macro
-//! expands to, `Self` (whose type a summary does not say). Nothing is
-//! reported unresolved. Visibility decides what a glob brings; a path that
-//! names what it may not see is followed anyway, for a reader may go to it
-//! (the compiler says the rest).
+//! expands to, a member no summary holds. Visibility decides what a glob
+//! brings; a path that names what it may not see is followed anyway, for a
+//! reader may go to it (the compiler says the rest).
+//!
+//! A path that names nothing is **unresolved** where the summaries say all
+//! there is to say, and only there: its name was looked for in the default
+//! namespace, or, in an import's path, is not the last (which may name a
+//! macro); and every place it was looked for is closed. A module is open
+//! when an invocation that may declare names stands among its items
+//! ([`Unit::open`](crate::Unit::open)), when an attribute or a derive that
+//! is not inert ([`CrateInfo::inert`]) appears anywhere in it or is said of
+//! it, or when a glob of it does not resolve or reaches an open module; a
+//! name an import of it gives escapes; and a type's members (its impl
+//! blocks may come from derives and macros) are never all known. A crate's
+//! preludes are places too, and so are the crates it names that the graph
+//! does not hold ([`CrateInfo::unindexed`]), where anything may be. That
+//! every library the graph holds has been read, the caller knows.
+//!
+//! [`CrateInfo::inert`]: crate::CrateInfo::inert
+//! [`CrateInfo::unindexed`]: crate::CrateInfo::unindexed
 //!
 //! [`CrateInfo::closed_by`]: crate::CrateInfo::closed_by
 
@@ -74,6 +90,10 @@ pub enum Resolution {
     /// It is a name the language provides, which no source declares
     /// (Rust's primitive types, `u8`).
     Builtin,
+    /// It names nothing, from its `segment`th segment on, and every place
+    /// that segment's name was looked for holds all the names it has. See
+    /// the [module docs](self).
+    Unresolved { segment: usize },
 }
 
 /// Resolves paths over a unit graph and the summaries of a project's files,
@@ -117,13 +137,16 @@ pub struct Resolver {
     impls: RefCell<HashMap<(u32, u32), ImplBlocks>>,
     /// The declarations each impl block's type resolves to, once found:
     /// by (file, impl index).
-    impl_types: RefCell<HashMap<(u32, u32), Rc<Vec<(u32, u32)>>>>,
+    impl_types: RefCell<HashMap<(u32, u32), Declarations>>,
     /// Whether some are being found: an impl block's type is a path, and
     /// while they are, a type's members are those declared inside it.
     finding_impls: Cell<bool>,
     /// Whether each module is closed to its crate's named crates and
     /// preludes, once asked.
     closed: RefCell<HashMap<Module, bool>>,
+    /// Whether each module is open of itself (a macro may declare names in
+    /// it), once asked.
+    open_modules: RefCell<HashMap<Module, bool>>,
 }
 
 /// A unit in a crate: a file's own (`unit` `None`), or one with its body in
@@ -185,6 +208,10 @@ type Items = Rc<HashMap<String, Vec<u32>>>;
 /// A type's impl blocks: (file, impl index).
 type ImplBlocks = Rc<Vec<(u32, u32)>>;
 
+/// Declarations, each by (file, declaration index): what an impl block's
+/// type resolves to.
+type Declarations = Rc<Vec<(u32, u32)>>;
+
 /// Where a type's impl blocks may be: each impl block (file, impl index) by
 /// the last name of its type's path, which is the type's own name or a
 /// name an import gives it (`use a::Cell as Grid; impl Grid {}`); and, by
@@ -231,6 +258,7 @@ impl Resolver {
             impl_types: RefCell::default(),
             finding_impls: Cell::new(false),
             closed: RefCell::default(),
+            open_modules: RefCell::default(),
         }
     }
 
@@ -252,15 +280,24 @@ impl Resolver {
         let mut declarations: Vec<(PathBuf, u32)> = Vec::new();
         let mut modules: Vec<PathBuf> = Vec::new();
         let mut furthest = 0;
+        let mut failed: Vec<(Module, usize)> = Vec::new();
         for (krate, _) in self.graph.places(file) {
             let at = Module { krate, file: id, unit: self.unit_named(id, units) };
             match self.walk(at, path) {
                 Ok(targets) => {
+                    let before = declarations.len() + modules.len();
                     for target in targets {
                         self.say(target, namespace, &mut declarations, &mut modules);
                     }
+                    if declarations.len() + modules.len() == before {
+                        // Found, but not in the namespace looked in.
+                        failed.push((at, path.segments.len().saturating_sub(1)));
+                    }
                 }
-                Err(segment) => furthest = furthest.max(segment),
+                Err(segment) => {
+                    furthest = furthest.max(segment);
+                    failed.push((at, segment));
+                }
             }
         }
         if declarations.is_empty() && modules.is_empty() {
@@ -274,7 +311,17 @@ impl Resolver {
             return match (builtin, path.segments.len()) {
                 (true, 1) => Resolution::Builtin,
                 (true, _) => Resolution::Escapes { segment: 1 },
-                (false, _) => Resolution::Escapes { segment: furthest },
+                (false, _) => {
+                    let closed = !failed.is_empty()
+                        && failed
+                            .iter()
+                            .all(|&(at, segment)| self.names_nothing(at, path, namespace, segment));
+                    if closed {
+                        Resolution::Unresolved { segment: furthest }
+                    } else {
+                        Resolution::Escapes { segment: furthest }
+                    }
+                }
             };
         }
         declarations.sort();
@@ -343,7 +390,17 @@ impl Resolver {
             Some(Root::Crate) => (vec![self.crate_root(at.krate)], 0),
             Some(Root::Global) => {
                 let name = path.segments.first().ok_or(0usize)?;
-                let found = self.named_crates(at.krate, name, from == Start::Loading);
+                // From the crate's root (Rust 2015), what its root names
+                // first: its `extern crate`s are there.
+                let mut found: Vec<Target> = Vec::new();
+                if self.graph.crates()[at.krate as usize].imports_from_root {
+                    if let Some(root) = self.crate_root(at.krate).module {
+                        found = self.names_of(root, name).iter().map(|b| b.target).collect();
+                    }
+                }
+                if found.is_empty() {
+                    found = self.named_crates(at.krate, name, from == Start::Loading);
+                }
                 if found.is_empty() {
                     return Err(0);
                 }
@@ -378,6 +435,184 @@ impl Resolver {
             current = next;
         }
         Ok(current)
+    }
+
+    /// Walk the path of `import`, made in `module`: from the crate's root
+    /// where its crate's imports start there and the path has no root of
+    /// its own; its first name from any crate the crate may load where it
+    /// loads one.
+    fn walk_import(&self, module: Module, import: &Import) -> Walked {
+        let from = if import.loads { Start::Loading } else { Start::Anywhere };
+        let at = match self.crate_root(module.krate).module {
+            Some(root)
+                if import.path.root.is_none()
+                    && self.graph.crates()[module.krate as usize].imports_from_root =>
+            {
+                root
+            }
+            _ => module,
+        };
+        self.walk_from(at, &import.path, from)
+    }
+
+    // ------------------------------------------------------------------
+    // What names nothing
+    // ------------------------------------------------------------------
+
+    /// Whether `path`, from `at`, names nothing at its `segment`th
+    /// segment with every place that name was looked for closed. See the
+    /// [module docs](self).
+    fn names_nothing(
+        &self,
+        at: Module,
+        path: &Path,
+        namespace: Option<&str>,
+        segment: usize,
+    ) -> bool {
+        let Some(name) = path.segments.get(segment) else { return false };
+        let last = segment + 1 == path.segments.len();
+        match namespace {
+            // A named namespace's names are not all known.
+            Some(ns) if !ns.is_empty() => return false,
+            // An import's last name may name a macro.
+            None if last => return false,
+            _ => {}
+        }
+        let from_a_module = segment > 0 || matches!(path.root, Some(Root::Crate | Root::Unit(_)));
+        if from_a_module {
+            // A name of the module (or type) the path has reached.
+            let prefix = Path { root: path.root, segments: path.segments[..segment].to_vec() };
+            let Ok(targets) = self.walk(at, &prefix) else { return false };
+            // Each a module, each closed: a type's members are not all known.
+            return targets.iter().all(|t| t.module.is_some_and(|m| !self.lookup_open(m, name)));
+        }
+        let info = &self.graph.crates()[at.krate as usize];
+        let root = self.crate_root(at.krate).module;
+        if path.root == Some(Root::Global) {
+            if info.imports_from_root && root.is_none_or(|r| self.lookup_open(r, name)) {
+                return false;
+            }
+            if info.unindexed.iter().any(|u| u == name) {
+                return false;
+            }
+            // No import of the root's loads it under that name.
+            return !root.is_some_and(|r| self.loads_named(r, name));
+        }
+        // A first name looked for where the path stands, then in the crates
+        // the crate names and its preludes.
+        if self.lookup_open(at, name) {
+            return false;
+        }
+        if self.closed(at) {
+            return true;
+        }
+        // A crate it names that the graph does not hold.
+        if info.unindexed.iter().any(|u| u == name) {
+            return false;
+        }
+        let Some(root) = root else { return false };
+        if self.loads_named(root, name) {
+            return false;
+        }
+        info.preludes.iter().all(|prelude| match self.walk_from(root, prelude, Start::Prelude) {
+            Ok(targets) => {
+                targets.iter().all(|t| t.module.is_some_and(|m| !self.lookup_open(m, name)))
+            }
+            Err(_) => false,
+        })
+    }
+
+    /// Whether an import of `root` loads a library under `name`.
+    fn loads_named(&self, root: Module, name: &str) -> bool {
+        self.imports_of(root).any(|i| i.loads && i.name.as_deref() == Some(name))
+    }
+
+    /// Whether a name, `name`, not found in `module` might be there after
+    /// all: the module, or one a glob of it reaches, is open of itself, or
+    /// has a glob that does not resolve, or an import that gives the name.
+    fn lookup_open(&self, module: Module, name: &str) -> bool {
+        let mut seen: Vec<Module> = Vec::new();
+        let mut todo = vec![module];
+        while let Some(m) = todo.pop() {
+            if seen.contains(&m) {
+                continue;
+            }
+            seen.push(m);
+            if self.open_of_itself(m) {
+                return true;
+            }
+            let imports: Vec<Import> = self.imports_of(m).cloned().collect();
+            for import in &imports {
+                if !import.glob {
+                    if import.name.as_deref() == Some(name) {
+                        return true;
+                    }
+                    continue;
+                }
+                match self.walk_import(m, import) {
+                    Err(_) => return true,
+                    Ok(targets) => todo.extend(targets.iter().filter_map(|t| t.module)),
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether a macro may declare names in `module`: an invocation stands
+    /// among its items, an attribute or derive that is not inert appears
+    /// anywhere in it, or one is said of it or of a module it is inside
+    /// (which may rewrite all that module holds).
+    fn open_of_itself(&self, module: Module) -> bool {
+        if let Some(&open) = self.open_modules.borrow().get(&module) {
+            return open;
+        }
+        let summary = &self.summaries[module.file as usize];
+        let invoked = match module.unit {
+            Some(unit) => summary.offers().units()[unit as usize].open,
+            None => summary.offers().open(),
+        };
+        let open = invoked
+            || summary.needs().escaping().iter().any(|e| {
+                e.unit == module.unit
+                    && (e.namespace == "attribute" || e.namespace == "derive")
+                    && !self.inert(module.krate, &e.path)
+            })
+            || self.rewritten(module);
+        self.open_modules.borrow_mut().insert(module, open);
+        open
+    }
+
+    /// Whether an attribute that is not inert is said of `module` (on its
+    /// declaration, or at the top of its body), or of a module it is inside.
+    fn rewritten(&self, module: Module) -> bool {
+        let summary = &self.summaries[module.file as usize];
+        let said = |attributes: &[Attribute]| {
+            attributes.iter().any(|a| !self.inert(module.krate, &a.path))
+        };
+        let of_it = match module.unit {
+            Some(unit) => said(&summary.offers().units()[unit as usize].attributes),
+            None => {
+                said(summary.offers().attributes())
+                    || self.declaring_unit(module).is_some_and(|(file, unit)| {
+                        said(
+                            &self.summaries[file as usize].offers().units()[unit as usize]
+                                .attributes,
+                        )
+                    })
+            }
+        };
+        of_it || self.parent(module).is_some_and(|parent| self.rewritten(parent))
+    }
+
+    /// Whether `path`, an attribute's or a derive's in crate `krate`, begins
+    /// with one the crate's language says is inert.
+    fn inert(&self, krate: u32, path: &Path) -> bool {
+        path.root.is_none()
+            && self.graph.crates()[krate as usize].inert.iter().any(|i| {
+                i.root.is_none()
+                    && path.segments.len() >= i.segments.len()
+                    && path.segments[..i.segments.len()] == i.segments[..]
+            })
     }
 
     /// What `name` is after `target` in a path: a name of the module it is,
@@ -774,8 +1009,7 @@ impl Resolver {
         }
         let imports: Vec<Import> = self.imports_of(module).cloned().collect();
         for import in imports.iter().filter(|i| !i.glob && i.name.as_deref() == Some(name)) {
-            let from = if import.loads { Start::Loading } else { Start::Anywhere };
-            if let Ok(targets) = self.walk_from(module, &import.path, from) {
+            if let Ok(targets) = self.walk_import(module, import) {
                 for target in targets {
                     found.push(Binding {
                         target,
@@ -787,7 +1021,7 @@ impl Resolver {
         }
         if found.is_empty() {
             for import in imports.iter().filter(|i| i.glob) {
-                let Ok(targets) = self.walk(module, &import.path) else { continue };
+                let Ok(targets) = self.walk_import(module, import) else { continue };
                 for target in targets {
                     match (target.module, target.declaration) {
                         (Some(globbed), _) => {
@@ -906,7 +1140,7 @@ impl Resolver {
     /// the block is, in each crate its file is in; and whether that is kept
     /// (it met no lookup's answer so far). Called while impls are being
     /// found.
-    fn impl_type(&self, block: (u32, u32)) -> (Rc<Vec<(u32, u32)>>, bool) {
+    fn impl_type(&self, block: (u32, u32)) -> (Declarations, bool) {
         if let Some(types) = self.impl_types.borrow().get(&block) {
             return (types.clone(), true);
         }

@@ -1,6 +1,7 @@
 //! A file's references to names, for finding a declaration's usages: where
 //! each is, the path it spells from where it stands, and what it binds to
-//! within the file.
+//! within the file. And a file's escaping references, for telling which
+//! of them name nothing.
 //!
 //! A project index keeps no references (a summary holds a file's words, not
 //! where they are used): a search reads them again, from the files whose
@@ -96,6 +97,60 @@ pub fn references(lang: &EmbeddedLang, text: &str, names: &[String]) -> Vec<Refe
             in_import: read.refs.get(&r.span).is_some_and(|place| place.imported),
             binds,
             local,
+        });
+    }
+    found.sort_by_key(|r| r.span);
+    found
+}
+
+/// The references in `text`, a file of `lang`'s language, that escape it
+/// (none of its definitions binds them), in the text's order: each one a
+/// project index may resolve, and find names nothing. Left out are those
+/// an expansion made (what the file's own macros expand to), and those in
+/// a scope where an invocation whose expansion may declare names stands
+/// (`@expands`: a block holding a macro invocation), or in a scope inside
+/// one, which may name what it declares. One among a unit's items opens
+/// the unit, as its summary says ([`Unit::open`](crate::Unit::open)): a
+/// resolver knows that.
+pub fn escaping(lang: &EmbeddedLang, text: &str) -> Vec<Reference> {
+    let session = lang.session(text);
+    let tree = session.tree().expect("parsing is total").clone();
+    let mut db = SemDb::new(lang.binding.clone());
+    db.set_types(lang.types.clone());
+    db.set_macro_bodies(&lang.macros);
+    db.set_tree(URI, tree.clone());
+    let symbols = db.symbols(URI);
+    let resolutions = db.resolve(URI);
+    let read = units::read(&tree, &lang.binding, &lang.outline);
+    let lines = LineStarts::of(text);
+
+    let mut found: Vec<Reference> = Vec::new();
+    for (r, target) in symbols.refs.iter().zip(resolutions.iter()) {
+        if *target != Target::Escapes {
+            continue;
+        }
+        let Some(place) = read.refs.get(&r.span) else {
+            continue;
+        };
+        if place.scopes.iter().any(|scope| read.expanding.contains(scope)) {
+            continue;
+        }
+        let (units, path) = match qana_sem::path_at(&tree, &lang.binding, r.span.0) {
+            Some((units, path, _)) => (units, Some(path)),
+            None => (Vec::new(), None),
+        };
+        let (line, column) = lines.position(text, r.span.0);
+        found.push(Reference {
+            span: r.span,
+            line,
+            column,
+            line_text: lines.text(text, line).to_string(),
+            units,
+            path,
+            namespace: r.ns.clone(),
+            in_import: place.imported,
+            binds: None,
+            local: false,
         });
     }
     found.sort_by_key(|r| r.span);

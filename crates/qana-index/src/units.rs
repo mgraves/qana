@@ -1,8 +1,14 @@
 //! The walk that reads a file's units, imports, visibilities, attributes
 //! and impl blocks from its tree, as its grammar's binding says (`@unit`,
 //! `@root`, `@vis`, `@visibility`, `@import`, `@import_glob`,
-//! `@import_prefix`, `@loads`, `@attribute`, `@attributes`, `@impl`), and
-//! the unit and path of each definition and reference.
+//! `@import_prefix`, `@loads`, `@attribute`, `@attributes`, `@expands`,
+//! `@impl`), and the unit and path of each definition and reference.
+//!
+//! An invocation whose expansion may declare names (`@expands`) opens the
+//! unit it stands among the items of, or else the innermost scope around
+//! it (a block): a reference inside a scope so marked may name what the
+//! expansion declares. So does an import in a block, which a summary does
+//! not read: what it brings is the block's.
 //!
 //! What a function's body holds is the body's: its units, imports and
 //! impl blocks are not read (as its declarations are not offered), while
@@ -45,6 +51,8 @@ struct Roles {
     /// `@attributes(attrs[, item])`: the attributes child, and the item
     /// child.
     attribute_list: Option<(usize, Option<usize>)>,
+    /// `@expands`: an invocation whose expansion may declare names.
+    expands: bool,
     /// `@import_prefix`: the path child, and the trees child.
     prefix: Option<(Option<usize>, usize)>,
     /// `@impl(type[, trait])`.
@@ -91,6 +99,9 @@ fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Ro
     for &(nt, prod, attrs, item) in &cfg.attribute_lists {
         map.entry((nt, prod)).or_default().attribute_list = Some((attrs, item));
     }
+    for &(nt, prod) in &cfg.expands {
+        map.entry((nt, prod)).or_default().expands = true;
+    }
     for &(nt, prod, ty, tr) in &cfg.impls {
         map.entry((nt, prod)).or_default().implementation = Some((ty, tr));
     }
@@ -119,6 +130,9 @@ pub(crate) struct RefPlace {
     /// Whether it is in an import's path or a visibility's, which the
     /// import or the visibility says in full.
     pub imported: bool,
+    /// The scopes around it below its unit's, outermost first, by their
+    /// walk index.
+    pub scopes: Rc<Vec<u32>>,
 }
 
 /// A byte span of the file.
@@ -129,6 +143,12 @@ pub(crate) type Span = (u32, u32);
 pub(crate) struct FileUnits {
     /// The attributes said of the file's own unit.
     pub attributes: Vec<Attribute>,
+    /// Whether the file's own unit is open (an `@expands` construct
+    /// stands among its items).
+    pub open: bool,
+    /// The scopes below a unit's that an `@expands` construct stands in
+    /// (not inside a scope of its own), by walk index.
+    pub expanding: HashSet<u32>,
     pub units: Vec<(Unit, Span, Span)>,
     pub imports: Vec<(Import, Span)>,
     pub impls: Vec<(Impl, Span)>,
@@ -179,6 +199,11 @@ struct Cx {
     /// The attributes what is declared here takes, when an enclosing
     /// `@attributes` gave them and no scope opened since.
     attributes: Option<Rc<Vec<Attribute>>>,
+    /// The scopes around it below its unit's, outermost first: empty among
+    /// a unit's items.
+    scopes: Rc<Vec<u32>>,
+    /// The tree's root, whose scope is the file's own unit's.
+    root: bool,
     /// An impl block whose members scope has not opened yet.
     impl_pending: Option<u32>,
     /// The impl block whose members scope this is.
@@ -199,6 +224,8 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
         roles: roles(cfg, outline),
         out: FileUnits {
             attributes: Vec::new(),
+            open: false,
+            expanding: HashSet::new(),
             units: Vec::new(),
             imports: Vec::new(),
             impls: Vec::new(),
@@ -207,12 +234,15 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
             bodies: Vec::new(),
             import_defs: HashSet::new(),
         },
+        scopes: 0,
     };
     let cx = Cx {
         unit: None,
         in_body: false,
         visibility: None,
         attributes: None,
+        scopes: Rc::default(),
+        root: true,
         impl_pending: None,
         members_of: None,
         prefix: Prefix::None,
@@ -233,6 +263,8 @@ struct Walk<'a> {
     cfg: &'a BindingConfig,
     roles: HashMap<(u16, u16), Roles>,
     out: FileUnits,
+    /// How many scopes below a unit's the walk has opened.
+    scopes: u32,
 }
 
 impl Walk<'_> {
@@ -310,11 +342,34 @@ impl Walk<'_> {
                 }
                 _ => Some(Path { root: None, segments: vec![name.clone()] }),
             };
-            self.out.refs.insert(span, RefPlace { unit: cx.unit, path, imported: cx.imported });
+            self.out.refs.insert(
+                span,
+                RefPlace { unit: cx.unit, path, imported: cx.imported, scopes: cx.scopes.clone() },
+            );
+        }
+
+        // An invocation that may declare names opens the unit it stands
+        // among the items of, or else the innermost scope around it.
+        if roles.expands {
+            match (cx.scopes.last(), cx.unit) {
+                (Some(&scope), _) => {
+                    self.out.expanding.insert(scope);
+                }
+                (None, None) => self.out.open = true,
+                (None, Some(unit)) => self.out.units[unit as usize].0.open = true,
+            }
         }
 
         // What its children stand in.
         let mut inner = cx.clone();
+        inner.root = false;
+        if roles.scope.is_some() && !cx.root && roles.unit.is_none() {
+            // A scope below its unit's: a function, a type, a block.
+            let mut scopes = cx.scopes.as_ref().clone();
+            scopes.push(self.scopes);
+            self.scopes += 1;
+            inner.scopes = Rc::new(scopes);
+        }
         if let Some(members) = roles.scope {
             inner.visibility = None;
             inner.attributes = None;
@@ -356,6 +411,7 @@ impl Walk<'_> {
                     inline: body.is_some(),
                     visibility: visibility_here(*span),
                     attributes: attributes_here(*span),
+                    open: false,
                 },
                 *span,
                 cx.item.unwrap_or(whole),
@@ -366,12 +422,17 @@ impl Walk<'_> {
                 }
                 let mut body_cx = inner.clone();
                 body_cx.unit = Some(index);
+                body_cx.scopes = Rc::default();
                 child_cx.push((body, body_cx));
             }
         }
 
         if let (Some(_), Some((_, span))) = (roles.import, &def_name) {
             self.out.import_defs.insert(*span);
+        }
+        if let (Some(_), Some(&scope)) = (roles.import, cx.scopes.last()) {
+            // An import in a block: what it brings, no summary holds.
+            self.out.expanding.insert(scope);
         }
         if let Some((path, glob)) = roles.import {
             let own = match path {

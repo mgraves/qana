@@ -52,6 +52,19 @@ pub struct CrateInfo {
     /// `no_implicit_prelude`): unconditional ones, said of the module.
     /// Paths from a root (`::std`) are not closed to them.
     pub closed_by: Vec<crate::Path>,
+    /// The attributes and derives the language provides that declare
+    /// nothing (Rust's `cfg`, `allow`, `rustfmt::…`; `Debug`, `Clone`): an
+    /// attribute or a derive whose path begins with one of these. Any other
+    /// may be a macro declaring names where it stands, so a module where one
+    /// appears is open: a name not found there escapes.
+    pub inert: Vec<crate::Path>,
+    /// Whether an import's path without a root, and a path from `::`, start
+    /// at the crate's root (Rust 2015), not where the import stands.
+    pub imports_from_root: bool,
+    /// The names of crates it may name that the graph does not hold (its
+    /// dependencies for another target, or behind a feature it was not
+    /// built with): a path that begins with one escapes.
+    pub unindexed: Vec<String>,
 }
 
 /// Where a crate comes from.

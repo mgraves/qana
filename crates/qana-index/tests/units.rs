@@ -29,7 +29,7 @@ fn private() -> Visibility {
 }
 
 fn unit(name: &str, parent: Option<u32>, inline: bool, visibility: Visibility) -> Unit {
-    Unit { name: name.into(), parent, inline, visibility, attributes: Vec::new() }
+    Unit { name: name.into(), parent, inline, visibility, attributes: Vec::new(), open: false }
 }
 
 /// A declaration as (container, name, unit, visibility, impl block).
@@ -279,6 +279,9 @@ fn a_unit_graph_places_each_file_in_its_crates_at_its_module_path() {
         preludes: Vec::new(),
         builtins: Vec::new(),
         closed_by: Vec::new(),
+        inert: Vec::new(),
+        imports_from_root: false,
+        unindexed: Vec::new(),
     };
     let mut graph = UnitGraph::new();
     let lib = graph.add_crate(krate("geo", "lib", "/p/src/lib.rs"));

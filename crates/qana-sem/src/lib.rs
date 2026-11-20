@@ -219,6 +219,11 @@ pub struct BindingConfig {
     /// path names (`@loads`: Rust's `extern crate`). Made at a crate's
     /// root, its name is one every module of the crate may use.
     pub loads: Vec<(u16, u16)>,
+    /// (nt, prod) — the production is an invocation whose expansion may
+    /// declare names where it stands (`@expands`: Rust's macro
+    /// invocations), which no summary sees: a unit with one among its
+    /// items is open, and so is a block with one in it.
+    pub expands: Vec<(u16, u16)>,
 }
 
 impl BindingConfig {
@@ -327,6 +332,9 @@ pub fn compose_binding(
     }
     for &(nt, prod) in &guest.loads {
         out.loads.push((nt + nts, prod + prods));
+    }
+    for &(nt, prod) in &guest.expands {
+        out.expands.push((nt + nts, prod + prods));
     }
     out.unordered = host.unordered;
     out

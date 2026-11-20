@@ -12,7 +12,8 @@
 // it names (`@impl`). Attributes (`#[a]` on an item, `#![a]` at the top
 // of a file or a module's body) are said of what the item declares, or of
 // the module (`@attribute`, `@attributes`); `when(cond, attrs)` holds its
-// attributes under a condition.
+// attributes under a condition. `expand m;` invokes what may declare names
+// where it stands (`@expands`).
 //
 // It is the binding tier's test language for them, Rust's module system
 // in miniature, before `rust.qana` uses them. Binding within a file is
@@ -39,7 +40,7 @@ token HASH   = "#" @style(punctuation)
 token LBRACK = "[" @style(bracket)
 token RBRACK = "]" @style(bracket)
 
-keywords IDENT = pub crate super self in mod fn use as impl for struct extern when "_"
+keywords IDENT = pub crate super self in mod fn use as impl for struct extern when expand "_"
 
 pair LPAREN RPAREN
 pair LBRACE RBRACE
@@ -83,6 +84,7 @@ rule item_kind =
   | Extern:     "extern" "crate" n:name ";" @def(n, hoisted, open) @root(global, n) @import @loads
   | ExternAs:   "extern" "crate" n:name "as" r:name ";" @def(r, hoisted, open) @root(global, n) @import @loads
   | ExternSelf: "extern" "crate" "self" "as" r:name ";" @def(r, hoisted, open) @root(crate) @import @loads
+  | Invoke:     "expand" p:path ";" @ns(macro, p) @expands
   | Impl:    "impl" t:path open:"{" impl_body "}" @impl(t) @scope @outline(t, class) @fold(block, open)
   | ImplFor: "impl" tr:path "for" t:path open:"{" impl_body "}" @impl(t, tr) @scope @outline(t, class) @fold(block, open)
 

@@ -97,6 +97,9 @@ fn project() -> Resolver {
         preludes: Vec::new(),
         builtins: Vec::new(),
         closed_by: Vec::new(),
+        inert: Vec::new(),
+        imports_from_root: false,
+        unindexed: Vec::new(),
     };
     let mut graph = UnitGraph::new();
     let geo = graph.add_crate(krate("geo", "/p/src/lib.ul", Vec::new()));
@@ -150,7 +153,7 @@ fn names(resolver: &Resolver, file: &str, path: &Path) -> Named {
                 .map(|m| m.file_name().unwrap().to_string_lossy().into_owned())
                 .collect(),
         )),
-        Resolution::Escapes { segment } => Err(segment),
+        Resolution::Escapes { segment } | Resolution::Unresolved { segment } => Err(segment),
         Resolution::Builtin => panic!("{path:?}: this project has no builtins"),
     }
 }
@@ -310,8 +313,8 @@ fn a_path_inside_an_inline_unit_starts_there() {
     assert_eq!(in_util, from_root);
     assert_eq!(
         r.resolve(FilePath::new("/p/src/lib.ul"), &[], &path(None, &["hidden"]), Some("")),
-        Resolution::Escapes { segment: 0 },
-        "not from the root"
+        Resolution::Unresolved { segment: 0 },
+        "not from the root, whose glob of `util` does not bring what it hides"
     );
 }
 
@@ -346,6 +349,9 @@ fn one_file(text: &str) -> Resolver {
         preludes: Vec::new(),
         builtins: Vec::new(),
         closed_by: Vec::new(),
+        inert: Vec::new(),
+        imports_from_root: false,
+        unindexed: Vec::new(),
     });
     Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
 }
@@ -380,7 +386,7 @@ fn a_web_of_globs_is_settled_once_and_every_name_found_through_it() {
     }
     assert!(matches!(
         r.resolve(FilePath::new("/w/lib.ul"), &[], &path(None, &["m7", "nowhere"]), Some("")),
-        Resolution::Escapes { segment: 1 }
+        Resolution::Unresolved { segment: 1 }
     ));
     assert!(
         start.elapsed() < std::time::Duration::from_secs(5),
@@ -527,6 +533,9 @@ fn with_preludes() -> Resolver {
             preludes: prelude.into_iter().collect(),
             builtins: vec!["u8".into(), "str".into()],
             closed_by: closed_by.clone(),
+            inert: vec![path(None, &["no_implicit_prelude"])],
+            imports_from_root: false,
+            unindexed: Vec::new(),
         };
     let std_prelude = path(Some(Root::Global), &["std", "prelude", "rust_2021"]);
     let mut graph = UnitGraph::new();
@@ -552,11 +561,12 @@ fn with_preludes() -> Resolver {
     Resolver::new(Rc::new(graph), summaries)
 }
 
-/// What `path` names from inside `units` of `file`: each declaration as
-/// `file:name`, each module as its file; or how it escaped.
+/// What `path` names from inside `units` of `file`, in the default
+/// namespace: each declaration as `file:name`, each module as its file; or
+/// how it escaped.
 fn named(r: &Resolver, file: &str, units: &[&str], path: &Path) -> Result<Vec<String>, String> {
     let units: Vec<String> = units.iter().map(|u| u.to_string()).collect();
-    match r.resolve(FilePath::new(file), &units, path, None) {
+    match r.resolve(FilePath::new(file), &units, path, Some("")) {
         Resolution::Found { declarations, modules } => Ok(declarations
             .into_iter()
             .map(|(file, index)| {
@@ -568,6 +578,7 @@ fn named(r: &Resolver, file: &str, units: &[&str], path: &Path) -> Result<Vec<St
             .chain(modules.into_iter().map(|m| m.display().to_string()))
             .collect()),
         Resolution::Escapes { segment } => Err(format!("escapes at {segment}")),
+        Resolution::Unresolved { segment } => Err(format!("unresolved at {segment}")),
         Resolution::Builtin => Err("builtin".into()),
     }
 }
@@ -599,7 +610,11 @@ fn a_preludes_names_are_every_modules_after_its_own() {
         Ok(vec!["/c/lib.ul:Option".into()]),
         "std's prelude is its own `prelude::rust_2021`, from its root"
     );
-    assert_eq!(named(&r, "/c/lib.ul", &["option"], &one("Vec")), Err("escapes at 0".into()));
+    assert_eq!(
+        named(&r, "/c/lib.ul", &["option"], &one("Vec")),
+        Err("unresolved at 0".into()),
+        "core has no prelude, and nothing else names it"
+    );
 }
 
 #[test]
@@ -622,10 +637,10 @@ fn the_crates_a_crate_names_are_its_dependencies_and_what_its_root_loads() {
     }
     assert_eq!(
         named(&r, "/w/other.ul", &[], &boxed),
-        Err("escapes at 0".into()),
+        Err("unresolved at 0".into()),
         "alloc is loadable, and named only once loaded"
     );
-    assert_eq!(named(&r, "/w/other.ul", &[], &global_boxed), Err("escapes at 0".into()));
+    assert_eq!(named(&r, "/w/other.ul", &[], &global_boxed), Err("unresolved at 0".into()));
 }
 
 #[test]
@@ -636,10 +651,10 @@ fn a_closed_module_and_those_inside_it_have_neither_crates_nor_preludes() {
         ("/w/lib.ul", &["hygiene", "deeper"]),
         ("/w/declared.ul", &[]),
     ] {
-        assert_eq!(named(&r, file, units, &one("Vec")), Err("escapes at 0".into()), "{units:?}");
+        assert_eq!(named(&r, file, units, &one("Vec")), Err("unresolved at 0".into()), "{units:?}");
         assert_eq!(
             named(&r, file, units, &path(None, &["std", "vec", "Vec"])),
-            Err("escapes at 0".into())
+            Err("unresolved at 0".into())
         );
         assert_eq!(
             named(&r, file, units, &path(Some(Root::Global), &["std", "vec", "Vec"])),
@@ -667,9 +682,13 @@ fn a_builtin_is_what_a_first_name_is_when_it_is_nothing_else() {
     );
     assert_eq!(
         named(&r, "/w/lib.ul", &[], &path(Some(Root::Crate), &["u8"])),
-        Err("escapes at 0".into())
+        Err("unresolved at 0".into())
     );
-    assert_eq!(named(&r, "/w/lib.ul", &[], &one("i8")), Err("escapes at 0".into()), "not one");
+    assert_eq!(
+        named(&r, "/w/lib.ul", &[], &one("i8")),
+        Err("unresolved at 0".into()),
+        "not one of this language's"
+    );
 }
 
 /// The names of what `path` names in the one file of [`one_file`]`(text)`.
@@ -694,7 +713,7 @@ fn one_file_names(text: &str, path: &Path) -> Result<Vec<String>, usize> {
                 })
                 .collect())
         }
-        Resolution::Escapes { segment } => Err(segment),
+        Resolution::Escapes { segment } | Resolution::Unresolved { segment } => Err(segment),
         Resolution::Builtin => Err(usize::MAX),
     }
 }
@@ -724,8 +743,16 @@ impl Show for Outcome {
 }
 ";
     let at = |segments: &[&str]| one_file_names(text, &path(None, segments));
-    assert_eq!(at(&["Outcome", "Ok"]), Ok(vec!["Ok".into()]), "declared inside it, as a variant is");
-    assert_eq!(at(&["Outcome", "new"]), Ok(vec!["impl new".into()]), "an inherent item hides a trait's");
+    assert_eq!(
+        at(&["Outcome", "Ok"]),
+        Ok(vec!["Ok".into()]),
+        "declared inside it, as a variant is"
+    );
+    assert_eq!(
+        at(&["Outcome", "new"]),
+        Ok(vec!["impl new".into()]),
+        "an inherent item hides a trait's"
+    );
     assert_eq!(
         at(&["Outcome", "make"]),
         Ok(vec!["impl Make for make".into(), "impl Show for make".into()]),
@@ -757,4 +784,97 @@ mod elsewhere {
     assert_eq!(at(&["shapes", "Circle", "radius"]), Ok(vec!["impl radius".into()]));
     assert_eq!(at(&["shapes", "Circle", "area"]), Ok(vec!["impl area".into()]));
     assert_eq!(at(&["Round", "area"]), Ok(vec!["impl area".into()]), "and the rename's");
+}
+
+/// A crate of one file whose language says `allow` is inert, which names
+/// `web_sys` on another target.
+fn one_file_inert(text: &str) -> Resolver {
+    let summary = Rc::new(summarize(unitlang(), text));
+    let mut graph = UnitGraph::new();
+    graph.add_crate(CrateInfo {
+        name: "web".into(),
+        kind: "lib".into(),
+        root: "/w/lib.ul".into(),
+        edition: "2021".into(),
+        dependencies: Vec::new(),
+        loadable: Vec::new(),
+        source: qana_index::CrateSource::Workspace,
+        preludes: Vec::new(),
+        builtins: Vec::new(),
+        closed_by: Vec::new(),
+        inert: vec![path(None, &["allow"])],
+        imports_from_root: false,
+        unindexed: vec!["web_sys".to_string()],
+    });
+    Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
+}
+
+#[test]
+fn a_name_is_unresolved_only_where_every_place_it_was_looked_for_is_closed() {
+    let text = "pub mod plain {
+    pub struct Here {}
+}
+
+pub mod invoking {
+    expand make;
+}
+
+pub mod attributed {
+    #[magic]
+    pub struct There {}
+}
+
+pub mod allowed {
+    #[allow]
+    pub struct Fine {}
+}
+
+pub mod outer {
+    #[magic]
+    pub mod rewritten {
+        pub mod inside {}
+    }
+}
+
+pub mod globbing {
+    pub use super::invoking::*;
+}
+
+pub mod importing {
+    use nowhere::Gone;
+}
+";
+    let r = one_file_inert(text);
+    let at = |segments: &[&str], namespace: Option<&str>| {
+        r.resolve(FilePath::new("/w/lib.ul"), &[], &path(None, segments), namespace)
+    };
+    let unresolved = |segment| Resolution::Unresolved { segment };
+    let escapes = |segment| Resolution::Escapes { segment };
+    assert_eq!(at(&["plain", "Missing"], Some("")), unresolved(1));
+    assert_eq!(at(&["Missing"], Some("")), unresolved(0));
+    assert_eq!(at(&["allowed", "Missing"], Some("")), unresolved(1), "an inert attribute");
+    assert_eq!(at(&["importing", "Other"], Some("")), unresolved(1));
+    assert_eq!(at(&["invoking", "Missing"], Some("")), escapes(1), "an invocation may declare it");
+    assert_eq!(at(&["attributed", "Missing"], Some("")), escapes(1), "so may an attribute");
+    assert_eq!(
+        at(&["outer", "rewritten", "inside", "Missing"], Some("")),
+        escapes(3),
+        "one said of a module may rewrite all it holds"
+    );
+    assert_eq!(at(&["globbing", "Missing"], Some("")), escapes(1), "a glob of an open module");
+    assert_eq!(at(&["importing", "Gone"], Some("")), escapes(1), "an import gives it");
+    assert_eq!(at(&["plain", "Here", "member"], Some("")), escapes(2), "a type's members");
+    assert_eq!(at(&["plain", "Missing"], Some("macro")), escapes(1), "a named namespace");
+    assert_eq!(at(&["plain", "Missing"], None), escapes(1), "an import's last name");
+    assert_eq!(at(&["missing", "Here"], None), unresolved(0), "an import's path before it");
+    assert_eq!(at(&["web_sys", "window"], Some("")), escapes(0), "a crate the graph does not hold");
+    assert_eq!(
+        r.resolve(
+            FilePath::new("/w/lib.ul"),
+            &[],
+            &path(Some(Root::Global), &["web_sys", "window"]),
+            Some("")
+        ),
+        escapes(0)
+    );
 }

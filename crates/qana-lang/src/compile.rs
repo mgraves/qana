@@ -1165,6 +1165,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             let mut pending_attribute: Option<usize> = None;
             let mut pending_attributes: Option<usize> = None;
             let mut pending_loads: Option<(u32, u32)> = None;
+            let mut seen_expands = false;
             let mut seen_root = false;
             let mut seen_vis = false;
             let mut seen_impl = false;
@@ -1554,6 +1555,17 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             error(d, a.name_span, "@loads takes no arguments".into());
                         } else if pending_loads.replace(a.name_span).is_some() {
                             error(d, a.name_span, "duplicate @loads".into());
+                        }
+                    }
+                    "expands" => {
+                        // `@expands`: an invocation whose expansion may
+                        // declare names where it stands.
+                        if !a.args.is_empty() {
+                            error(d, a.name_span, "@expands takes no arguments".into());
+                        } else if std::mem::replace(&mut seen_expands, true) {
+                            error(d, a.name_span, "duplicate @expands".into());
+                        } else {
+                            binding.expands.push((nt, prod));
                         }
                     }
                     "import_glob" => {

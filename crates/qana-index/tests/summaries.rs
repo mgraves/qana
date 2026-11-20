@@ -298,6 +298,7 @@ fn a_rust_files_summary_holds_its_units_imports_reexports_visibilities_and_impls
         inline,
         visibility,
         attributes: Vec::new(),
+        open: false,
     };
     assert_eq!(
         offers.units(),
@@ -531,4 +532,94 @@ fn an_imports_attributes_are_its_items_and_extern_crate_loads() {
         Some((&path(Some(Root::Global), &["core"]), false)),
         "a `use` loads nothing"
     );
+}
+
+const MACROS: &str = "use std::fmt;
+
+thread_local! {
+    static COUNT: u32 = 0;
+}
+
+#[derive(Debug, serde::Serialize, Nothing!)]
+#[cfg_attr(test, derive(Clone))]
+pub struct Point {
+    x: Missing,
+}
+
+pub mod quiet {
+    pub fn f() -> Absent {
+        let v = helper();
+        {
+            println!(\"{}\", Inner);
+            nested();
+        }
+        v
+    }
+}
+
+pub mod loud {
+    lazy_static! {
+        static ref X: u8 = 0;
+    }
+}
+
+fn g() {
+    let m!(bound) = 1;
+    bound;
+}
+";
+
+#[test]
+fn an_item_macro_opens_its_module_and_one_in_a_block_its_block() {
+    let summary = summarize(rust(), MACROS);
+    assert!(summary.offers().open(), "`thread_local! {{…}}` among the file's own items");
+    let units = summary.offers().units();
+    let open = |name: &str| units.iter().find(|u| u.name == name).map(|u| u.open);
+    assert_eq!(open("loud"), Some(true));
+    assert_eq!(open("quiet"), Some(false), "a macro in a function's block is the block's");
+}
+
+#[test]
+fn escaping_leaves_out_what_a_macro_in_a_block_around_it_may_declare() {
+    let found: Vec<(String, String)> = qana_index::escaping(rust(), MACROS)
+        .into_iter()
+        .map(|r| (r.namespace, r.path.map(|p| p.segments.join("::")).unwrap_or_default()))
+        .collect();
+    let has = |ns: &str, path: &str| found.iter().any(|(n, p)| n == ns && p == path);
+    assert!(has("", "Missing") && has("", "Absent") && has("", "helper"), "{found:?}");
+    assert!(!has("", "Inner") && !has("", "nested"), "the block holds `println!`: {found:?}");
+    assert!(!has("", "bound"), "a pattern macro may bind it: {found:?}");
+    assert!(has("derive", "serde::Serialize") && has("derive", "Debug") && has("derive", "Clone"));
+    assert!(has("derive", "Nothing"), "a macro_rules derive's path");
+    assert!(
+        found.iter().any(|(n, p)| n == "import" && p == "std::fmt"),
+        "an import's path: {found:?}"
+    );
+}
+
+#[test]
+fn an_import_in_a_block_opens_the_block_and_a_file_that_does_not_parse_its_units() {
+    let text = "fn h() {
+    use crate::settings::{self, Level};
+    settings::level();
+    Level::Off;
+}
+
+fn k() {
+    Elsewhere;
+}
+";
+    let found: Vec<String> = qana_index::escaping(rust(), text)
+        .into_iter()
+        .filter(|r| r.namespace.is_empty())
+        .filter_map(|r| r.path.map(|p| p.segments.join("::")))
+        .collect();
+    assert_eq!(found, ["Elsewhere"], "what the block's import brings, no summary holds");
+    assert!(!summarize(rust(), text).offers().open());
+
+    let broken =
+        "pub mod inner {\n    pub fn f( {}\n}\nimpl<T: [const] Default> Default for X<T> {}\n";
+    let summary = summarize(rust(), broken);
+    assert!(summary.offers().open(), "a text that does not parse may hold what it misses");
+    assert!(summary.offers().units().iter().all(|u| u.open));
 }

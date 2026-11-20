@@ -456,3 +456,15 @@ fn lsp_sends_a_doc_comment_as_a_documentation_comment() {
         .find(|q| q[2] == 1 && types[q[3] as usize] == "function");
     assert!(f.is_some(), "{:?}", tokens.data);
 }
+
+#[test]
+fn a_conditional_attribute_is_a_decorator_and_a_function_of_that_name_a_function() {
+    let c = classes(
+        "#[cfg_attr(test, derive(Clone))]\nstruct S;\nfn cfg_attr(x: u8) {}\nfn derive() {}\n",
+    );
+    assert_eq!(class_of(&c, "cfg_attr", 0), "decorator");
+    assert_eq!(class_of(&c, "derive", 0), "decorator", "an attribute a conditional one holds");
+    assert_eq!(class_of(&c, "Clone", 0), "variable", "a derive's arguments are what they are");
+    assert_eq!(class_of(&c, "cfg_attr", 1), "function");
+    assert_eq!(class_of(&c, "derive", 1), "function");
+}

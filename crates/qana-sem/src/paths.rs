@@ -128,12 +128,18 @@ impl Path {
 
 /// Where the reference at byte `offset` of `tree` stands, and the path it
 /// spells: the names of the units with a body around it, outermost first
-/// (`@unit(name, body)`), and its path, after the prefixes of the use
-/// groups it is in (`@import_prefix`). A qualified name's path is its
-/// base's then its name; any other reference's is its name. `None` where
-/// no reference's name holds `offset`, or where the path spells none.
-pub fn path_at(tree: &GreenNode, cfg: &BindingConfig, offset: u32) -> Option<(Vec<String>, Path)> {
-    reference_at(tree, 0, cfg, offset, Vec::new(), Prefix::None)
+/// (`@unit(name, body)`); its path, after the prefixes of the use groups it
+/// is in (`@import_prefix`); and whether it is in an import's path (or a
+/// visibility's): such a path names what it imports in every namespace. A
+/// qualified name's path is its base's then its name; any other
+/// reference's is its name. `None` where no reference's name holds
+/// `offset`, or where the path spells none.
+pub fn path_at(
+    tree: &GreenNode,
+    cfg: &BindingConfig,
+    offset: u32,
+) -> Option<(Vec<String>, Path, bool)> {
+    reference_at(tree, 0, cfg, offset, Vec::new(), Prefix::None, false)
 }
 
 /// The use group prefix a walk to an offset is under.
@@ -152,7 +158,8 @@ fn reference_at(
     offset: u32,
     units: Vec<String>,
     prefix: Prefix,
-) -> Option<(Vec<String>, Path)> {
+    imported: bool,
+) -> Option<(Vec<String>, Path, bool)> {
     for &(_, _, k, kind) in cfg.refs.iter().filter(|r| r.0 == n.nt && r.1 == n.prod) {
         let Some((name, off)) = name_child(n, k, cfg) else { continue };
         let (start, end) = (base + off, base + off + name.len() as u32);
@@ -173,7 +180,7 @@ fn reference_at(
             Prefix::Path(prefix) => own.after(&prefix)?,
             Prefix::Broken => return None,
         };
-        return Some((units, path));
+        return Some((units, path, imported));
     }
     let mut off = base;
     for (c, index) in n.children.iter().zip(symbol_indices(n)) {
@@ -185,7 +192,13 @@ fn reference_at(
         }
         let mut units = units;
         let mut prefix = prefix;
+        let mut imported = imported;
         if let Some(k) = index {
+            let is = |at: Option<usize>| at == Some(k);
+            let (nt, prod) = (n.nt, n.prod);
+            imported |= cfg.imports.iter().any(|i| i.0 == nt && i.1 == prod && is(i.2))
+                || cfg.prefixes.iter().any(|p| p.0 == nt && p.1 == prod && is(p.2))
+                || cfg.vis_levels.iter().any(|v| v.0 == nt && v.1 == prod && is(v.3));
             let unit = cfg.units.iter().find(|u| u.0 == n.nt && u.1 == n.prod && u.3 == Some(k));
             if let Some(&(_, _, name, _)) = unit {
                 if let Some((name, _)) = name_child(n, name, cfg) {
@@ -207,7 +220,7 @@ fn reference_at(
                 };
             }
         }
-        return reference_at(m, start, cfg, offset, units, prefix);
+        return reference_at(m, start, cfg, offset, units, prefix, imported);
     }
     None
 }

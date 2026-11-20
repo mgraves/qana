@@ -87,10 +87,11 @@ impl LiveDoc {
 
     /// Where the name at byte `offset` stands and the path it spells, for a
     /// project index to resolve: the names of the units with a body
-    /// around it, outermost first, and its path, after the prefixes of the
-    /// use groups it is in ([`qana_sem::path_at`]). `None` where no
-    /// reference's name is at `offset`.
-    pub fn path_at(&self, offset: u32) -> Option<(Vec<String>, qana_sem::Path)> {
+    /// around it, outermost first; its path, after the prefixes of the use
+    /// groups it is in; and whether it is in an import's path
+    /// ([`qana_sem::path_at`]). `None` where no reference's name is at
+    /// `offset`.
+    pub fn path_at(&self, offset: u32) -> Option<(Vec<String>, qana_sem::Path, bool)> {
         qana_sem::path_at(self.session.tree()?, &self.lang.binding, offset)
     }
 

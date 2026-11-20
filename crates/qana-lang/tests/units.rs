@@ -158,7 +158,7 @@ fn the_path_at_a_name_is_its_qualifiers_then_it_after_its_groups_prefix() {
     let at = |word: &str| {
         let offset = text.find(word).expect(word) as u32;
         qana_sem::path_at(&tree, &out.def.binding, offset)
-            .map(|(units, path)| (units, path.root, path.segments))
+            .map(|(units, path, _)| (units, path.root, path.segments))
     };
     let s = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
     assert_eq!(
@@ -176,4 +176,25 @@ fn the_path_at_a_name_is_its_qualifiers_then_it_after_its_groups_prefix() {
     assert_eq!(at("d as"), Some((s(&[]), None, s(&["a", "b", "d"]))));
     assert_eq!(at("e}"), None, "a name a rename defines is no reference");
     assert_eq!(at(" fn"), None, "nor is space");
+}
+
+#[test]
+fn the_path_at_a_name_says_whether_an_import_names_it() {
+    let out = compile_source(&QanaToolchain::new(), UNITLANG);
+    let (lexer, tables) = certify(&out.def).expect("in envelope");
+    let lexer: &'static _ = Box::leak(Box::new(lexer));
+    let tables: &'static _ = Box::leak(Box::new(tables));
+    let sg: &'static _ = Box::leak(Box::new(out.def.sg.clone()));
+    let text = "use a::b as c;\nuse x::{y};\npub(in crate::v) fn f() {\n    a::b;\n}\n";
+    let session = IncSession::new(lexer, sg, tables, text).unwrap();
+    let tree = session.tree().unwrap().clone();
+    let imported = |word: &str| {
+        let offset = text.find(word).expect(word) as u32;
+        qana_sem::path_at(&tree, &out.def.binding, offset).map(|(_, _, imported)| imported)
+    };
+    assert_eq!(imported("b as"), Some(true), "a renamed import's path");
+    assert_eq!(imported("x::"), Some(true), "a group's prefix");
+    assert_eq!(imported("y}"), Some(true), "a group's tree");
+    assert_eq!(imported("v)"), Some(true), "a visibility's path");
+    assert_eq!(imported("b;"), Some(false), "a path in a body");
 }

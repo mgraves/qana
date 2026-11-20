@@ -124,7 +124,7 @@ type Named = Result<(Vec<(String, String)>, Vec<String>), usize>;
 /// What `path` names from `file`'s own unit, said as (file, declaration
 /// name) and module files.
 fn names(resolver: &Resolver, file: &str, path: &Path) -> Named {
-    match resolver.resolve(FilePath::new(file), &[], path, "") {
+    match resolver.resolve(FilePath::new(file), &[], path, Some("")) {
         Resolution::Found { declarations, modules } => Ok((
             declarations
                 .into_iter()
@@ -190,7 +190,12 @@ fn super_goes_up_from_a_files_unit_to_the_one_that_declares_it() {
         Ok((vec![decl("lib.ul", "clamp")], vec![]))
     );
     assert_eq!(
-        r.resolve(FilePath::new("/p/src/lib.ul"), &[], &path(Some(Root::Unit(1)), &["x"]), ""),
+        r.resolve(
+            FilePath::new("/p/src/lib.ul"),
+            &[],
+            &path(Some(Root::Unit(1)), &["x"]),
+            Some("")
+        ),
         Resolution::Escapes { segment: 0 },
         "a crate's root has no parent"
     );
@@ -278,7 +283,7 @@ fn what_is_not_in_the_project_escapes_where_it_leaves() {
     assert_eq!(names(&r, "/p/src/lib.ul", &path(None, &["std", "fmt"])), Err(0));
     assert_eq!(names(&r, "/p/src/lib.ul", &path(Some(Root::Crate), &["util", "gone"])), Err(1));
     assert_eq!(
-        r.resolve(FilePath::new("/p/elsewhere.ul"), &[], &path(None, &["x"]), ""),
+        r.resolve(FilePath::new("/p/elsewhere.ul"), &[], &path(None, &["x"]), Some("")),
         Resolution::Escapes { segment: 0 },
         "a file in no crate"
     );
@@ -291,15 +296,31 @@ fn a_path_inside_an_inline_unit_starts_there() {
         FilePath::new("/p/src/lib.ul"),
         &["util".to_string()],
         &path(None, &["hidden"]),
-        "",
+        Some(""),
     );
     let from_root =
-        r.resolve(FilePath::new("/p/src/lib.ul"), &[], &path(None, &["util", "hidden"]), "");
+        r.resolve(FilePath::new("/p/src/lib.ul"), &[], &path(None, &["util", "hidden"]), Some(""));
     assert!(matches!(&in_util, Resolution::Found { declarations, .. } if declarations.len() == 1));
     assert_eq!(in_util, from_root);
     assert_eq!(
-        r.resolve(FilePath::new("/p/src/lib.ul"), &[], &path(None, &["hidden"]), ""),
+        r.resolve(FilePath::new("/p/src/lib.ul"), &[], &path(None, &["hidden"]), Some("")),
         Resolution::Escapes { segment: 0 },
         "not from the root"
+    );
+}
+
+#[test]
+fn a_declaration_is_found_in_its_namespace_or_in_any() {
+    let r = project();
+    let circle = path(None, &["Circle"]);
+    let lib = FilePath::new("/p/src/lib.ul");
+    assert!(matches!(r.resolve(lib, &[], &circle, Some("")), Resolution::Found { .. }));
+    assert!(
+        matches!(r.resolve(lib, &[], &circle, Some("import")), Resolution::Escapes { .. }),
+        "not in a namespace it is not declared in"
+    );
+    assert!(
+        matches!(r.resolve(lib, &[], &circle, None), Resolution::Found { .. }),
+        "an import's path names it in any"
     );
 }

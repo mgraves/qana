@@ -140,13 +140,14 @@ impl Resolver {
     /// What `path` names where it stands: in `file`, inside the units with
     /// a body named `units` (outermost first; the file's own unit when
     /// empty), looking for its last segment in `namespace` (empty for the
-    /// default one). In each crate the file is in.
+    /// default one), or in every namespace (`None`: as an import's path
+    /// does). In each crate the file is in.
     pub fn resolve(
         &self,
         file: &FilePath,
         units: &[String],
         path: &Path,
-        namespace: &str,
+        namespace: Option<&str>,
     ) -> Resolution {
         let Some(&id) = self.ids.get(file) else {
             return Resolution::Escapes { segment: 0 };
@@ -181,7 +182,7 @@ impl Resolver {
     fn say(
         &self,
         target: Target,
-        namespace: &str,
+        namespace: Option<&str>,
         declarations: &mut Vec<(PathBuf, u32)>,
         modules: &mut Vec<PathBuf>,
     ) {
@@ -191,7 +192,7 @@ impl Resolver {
         }
         if let Some((file, index)) = target.declaration {
             let d = &self.summaries[file as usize].offers().declarations()[index as usize];
-            if target.module.is_some() || d.namespace == namespace {
+            if target.module.is_some() || namespace.is_none_or(|ns| d.namespace == ns) {
                 declarations.push((self.files[file as usize].clone(), index));
             }
         }

@@ -463,10 +463,15 @@ let artifact: GrammarArtifact = postcard::from_bytes(&bytes)?;
 let lang = EmbeddedLang::from_artifact(artifact);
 ```
 
-The bytes are the encoding of this version of qana's types, and say
-nothing of which version that was: a cache of artifacts keys each one by
-qana's version as well as by its grammar's text. `artifact.name()` and
-`artifact.extensions()` say which language it is without loading it.
+The bytes are the encoding of this build of qana's types, and say
+nothing of which build that was. A cache keeps each artifact under
+`GrammarArtifact::key(source)`, which changes with the grammar's text and
+with the code that certifies it: built in qana's workspace, with any
+change to the sources of `qana-lang` and the crates it certifies with,
+whether or not a version moved; built from a registry, with a new
+version. An artifact found under the key this build computes is the one
+this build would certify. `artifact.name()` and `artifact.extensions()`
+say which language it is without loading it.
 
 A worked integration lives outside this repo: `synkro_qana` in the
 Synkro workspace implements that GUI framework's `TokenProvider` and

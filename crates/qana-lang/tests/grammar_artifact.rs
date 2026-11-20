@@ -383,3 +383,17 @@ fn tables_with_conflicts_round_trip() {
         );
     }
 }
+
+#[test]
+fn an_artifacts_key_follows_its_grammars_text() {
+    let rust = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/rust/rust.qana"
+    ))
+    .expect("rust.qana");
+    assert_eq!(GrammarArtifact::key(&rust), GrammarArtifact::key(&rust.clone()), "the same text");
+    let mut edited = rust.clone();
+    edited.push(' ');
+    assert_ne!(GrammarArtifact::key(&rust), GrammarArtifact::key(&edited), "one byte more");
+    assert_ne!(GrammarArtifact::key(""), GrammarArtifact::key(" "));
+}

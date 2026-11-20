@@ -23,6 +23,8 @@ use qana_grammar::{build_lr, CompiledLexer, GreenNode, LrTables, SynGrammar};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+include!(concat!(env!("OUT_DIR"), "/certifier_fingerprint.rs"));
+
 /// The bootstrap toolchain for `.qana` files themselves: certified lexer,
 /// LR tables, and production indices — everything needed to parse and
 /// compile grammar files with the same engine target languages use.
@@ -70,9 +72,10 @@ pub struct QanaOutcome {
 /// [`EmbeddedLang::from_artifact`]. A loaded artifact serves its language
 /// exactly as the freshly certified one did.
 ///
-/// The bytes are these types' own encoding in this version of qana, and
-/// nothing in them says which version that was: a cache of artifacts
-/// keys each by qana's version as well as by its grammar's text.
+/// The bytes are these types' own encoding in this build of qana, and
+/// nothing in them says which build that was: a cache of artifacts keeps
+/// each under its [`key`](GrammarArtifact::key), which changes with the
+/// grammar's text and with the code that certifies it.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GrammarArtifact {
     // Each is the `EmbeddedLang` field of the same name, owned.
@@ -131,6 +134,24 @@ impl GrammarArtifact {
     /// without the dot. Empty when it declares none.
     pub fn extensions(&self) -> &[String] {
         &self.extensions
+    }
+
+    /// The key to keep the artifact certified from `source` by this build
+    /// of qana under. It changes when the grammar's text does, and when
+    /// the code that certifies it does: built in qana's workspace, any
+    /// change to the sources of qana-lang and the crates it certifies
+    /// with, whether or not it bumps a version; built from a registry, a
+    /// new version. So an artifact kept under the key it was certified
+    /// with is the one this build would certify, and one kept by another
+    /// build is not found under it.
+    pub fn key(source: &str) -> u64 {
+        // 64-bit FNV-1a over the certifier's fingerprint, then the text.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for &byte in CERTIFIER.to_le_bytes().iter().chain(source.as_bytes()) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
     }
 }
 

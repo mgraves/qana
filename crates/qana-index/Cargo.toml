@@ -10,6 +10,7 @@ keywords = ["grammar", "index", "language", "editor"]
 categories = ["parsing", "development-tools"]
 
 [dependencies]
+qana-grammar.workspace = true
 qana-lang.workspace = true
 qana-sem.workspace = true
 qana-services.workspace = true

@@ -3,7 +3,9 @@
 
 use std::sync::OnceLock;
 
-use qana_index::{summarize, summary_key, EscapingName, Summary};
+use qana_index::{
+    summarize, summary_key, EscapingName, Impl, Import, Path, Root, Summary, Unit, Visibility,
+};
 use qana_lang::EmbeddedLang;
 
 const RUST_QANA: &str = include_str!("../../../examples/rust/rust.qana");
@@ -141,14 +143,19 @@ fn a_file_needs_the_names_it_refers_to_and_does_not_define() {
     let summary = summarize(rust(), SAMPLE);
     let needs = summary.needs().escaping();
     let need = |namespace: &str, name: &str| EscapingName {
+        unit: None,
         namespace: namespace.into(),
-        name: name.into(),
+        path: Path { root: None, segments: vec![name.into()] },
     };
     for escaping in [need("", "Vec"), need("", "String"), need("macro", "format")] {
         assert!(needs.contains(&escaping), "{escaping:?} in {needs:?}");
     }
     assert!(
-        !needs.iter().any(|n| n.name == "Cell" || n.name == "show"),
+        !needs.iter().any(|n| n
+            .path
+            .segments
+            .last()
+            .is_some_and(|last| last == "Cell" || last == "show")),
         "what the file defines it does not need: {needs:?}"
     );
     assert!(needs.windows(2).all(|w| w[0] < w[1]), "sorted, each once");
@@ -228,4 +235,165 @@ fn a_c_file_is_summarized_from_its_own_grammar() {
     assert!(names.contains(&("main".to_string(), "function".to_string())), "{names:?}");
     let main = summary.offers().declarations().iter().find(|d| d.name == "main").expect("main");
     assert_eq!(main.signature, "int main(void)");
+}
+
+const MODULES: &str = "mod shapes;
+pub(crate) mod util;
+
+pub mod geo {
+    pub struct Point {
+        pub x: f32,
+        y: f32,
+    }
+
+    pub(super) mod inner {
+        pub(in crate::geo) fn deep() {}
+    }
+
+    fn origin() -> Point {
+        super::shapes::Circle::new()
+    }
+}
+
+use crate::shapes::{self, Circle as Round, area::*};
+pub use geo::Point;
+use std::fmt::{self, Display};
+use ::serde::Serialize as _;
+extern crate alloc;
+
+impl geo::Point {
+    pub fn new() -> Self {
+        Round::default();
+        crate::util::clamp(1.0)
+    }
+}
+
+impl<T> Display for Wrapper<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
+}
+
+impl fmt::Debug for geo::Point {}
+";
+
+fn path(root: Option<Root>, segments: &[&str]) -> Path {
+    Path { root, segments: segments.iter().map(|s| s.to_string()).collect() }
+}
+
+fn private() -> Visibility {
+    Visibility::Within(path(Some(Root::Unit(0)), &[]))
+}
+
+#[test]
+fn a_rust_files_summary_holds_its_units_imports_reexports_visibilities_and_impls() {
+    let summary = summarize(rust(), MODULES);
+    let offers = summary.offers();
+    let unit = |name: &str, parent: Option<u32>, inline: bool, visibility: Visibility| Unit {
+        name: name.into(),
+        parent,
+        inline,
+        visibility,
+    };
+    assert_eq!(
+        offers.units(),
+        [
+            unit("geo", None, true, Visibility::Public),
+            unit("inner", Some(0), true, Visibility::Within(path(Some(Root::Unit(1)), &[]))),
+            unit("shapes", None, false, private()),
+            unit("util", None, false, Visibility::Within(path(Some(Root::Crate), &[]))),
+        ]
+    );
+
+    let point = path(None, &["geo", "Point"]);
+    assert_eq!(
+        offers.impls(),
+        [
+            Impl {
+                unit: None,
+                self_type: Some(path(None, &["Wrapper"])),
+                trait_path: Some(path(None, &["Display"])),
+            },
+            Impl { unit: None, self_type: Some(point.clone()), trait_path: None },
+            Impl {
+                unit: None,
+                self_type: Some(point.clone()),
+                trait_path: Some(path(None, &["fmt", "Debug"])),
+            },
+        ],
+        "generic arguments are not the path"
+    );
+
+    let import = |path: Path, name: Option<&str>, glob: bool| Import {
+        unit: None,
+        path,
+        name: name.map(str::to_string),
+        glob,
+        visibility: private(),
+    };
+    assert_eq!(
+        offers.reexports(),
+        [Import { visibility: Visibility::Public, ..import(point, Some("Point"), false) }]
+    );
+    assert_eq!(
+        summary.needs().imports(),
+        [
+            import(path(None, &["std", "fmt"]), Some("fmt"), false),
+            import(path(None, &["std", "fmt", "Display"]), Some("Display"), false),
+            import(path(Some(Root::Crate), &["shapes"]), Some("shapes"), false),
+            import(path(Some(Root::Crate), &["shapes", "Circle"]), Some("Round"), false),
+            import(path(Some(Root::Crate), &["shapes", "area"]), None, true),
+            import(path(Some(Root::Global), &["alloc"]), Some("alloc"), false),
+            import(path(Some(Root::Global), &["serde", "Serialize"]), None, false),
+        ],
+        "`extern crate` imports a crate"
+    );
+
+    let placed = |name: &str| {
+        let d = offers.declarations().iter().find(|d| d.name == name).expect(name);
+        (d.unit, d.visibility.clone(), d.impl_block)
+    };
+    assert_eq!(placed("Point"), (Some(0), Visibility::Public, None));
+    assert_eq!(placed("x"), (Some(0), Visibility::Public, None));
+    assert_eq!(placed("y"), (Some(0), private(), None));
+    assert_eq!(
+        placed("deep"),
+        (Some(1), Visibility::Within(path(Some(Root::Crate), &["geo"])), None)
+    );
+    assert_eq!(placed("new"), (None, Visibility::Public, Some(1)));
+    assert_eq!(placed("fmt"), (None, private(), Some(0)));
+}
+
+#[test]
+fn a_rust_files_needs_are_paths_from_where_they_stand_and_not_its_imports() {
+    let summary = summarize(rust(), MODULES);
+    let needs = summary.needs().escaping();
+    let need =
+        |unit: Option<u32>, path: Path| EscapingName { unit, namespace: String::new(), path };
+    for expected in [
+        need(Some(0), path(Some(Root::Unit(1)), &["shapes", "Circle", "new"])),
+        need(None, path(Some(Root::Crate), &["util", "clamp"])),
+        need(None, path(None, &["fmt", "Formatter"])),
+        need(None, path(None, &["Round", "default"])),
+    ] {
+        assert!(needs.contains(&expected), "{expected:?} in {needs:?}");
+    }
+    assert!(
+        !needs.iter().any(|n| ["std", "serde", "alloc"].contains(&n.path.segments[0].as_str())
+            || n.path.root == Some(Root::Crate) && n.path.segments == ["geo"]),
+        "what an import or a visibility says in full is not a need: {needs:?}"
+    );
+}
+
+#[test]
+fn a_units_item_is_its_declaration_with_its_attributes_and_visibility() {
+    let text = "#[cfg(test)]\n#[path = \"other.rs\"]\npub(crate) mod tests;\n\nmod plain;\n";
+    let summary = summarize(rust(), text);
+    let item = |i: usize| {
+        let (start, end) = summary.locations().unit_item_span(i);
+        &text[start as usize..end as usize]
+    };
+    assert_eq!(summary.offers().units()[1].name, "tests");
+    assert_eq!(item(1), "#[cfg(test)]\n#[path = \"other.rs\"]\npub(crate) mod tests;");
+    assert_eq!(item(0), "mod plain;");
 }

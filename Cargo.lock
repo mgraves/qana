@@ -103,6 +103,7 @@ name = "qana-index"
 version = "0.0.1"
 dependencies = [
  "postcard",
+ "qana-grammar",
  "qana-lang",
  "qana-sem",
  "qana-services",

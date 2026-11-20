@@ -383,6 +383,65 @@ error: no member `nothere` in this module
 error: `tau_hidden` exists in the module but is not exported
 ```
 
+### Units, paths and visibility, for a project index
+
+The module tier above treats each file as one flat module, resolved
+among the files a session holds. A language whose modules nest, whose
+paths begin at roots, and whose files a build system arranges into a
+crate (Rust's) declares that structure with eight more annotations, which
+a project index (`qana-index`) reads into each file's summary, and whose
+`Resolver` resolves paths across files over a project model's unit graph
+(Rust's: `cargo metadata` and its rules for module files). Within a file,
+binding is unchanged: what a path names in another file is the index's to
+find.
+[examples/units](../examples/units/unitlang.qana) is their language:
+
+```
+| ModDecl: "mod" n:name ";" @def(n, hoisted, open) @unit(n)
+| ModDef:  "mod" n:name "{" b:items "}" @def(n, hoisted, open) @unit(n, b) @scope(unordered, barrier)
+| PubItem: v:vis k:item_kind @visibility(v, k)
+| PubCrate: "pub" "(" "crate" ")" @vis(crate)
+| CrateRoot:  "crate" @root(crate)
+| SuperAgain: root "::" "super" @root(super)
+| UseRename: p:use_path "as" n:name @def(n, hoisted, open) @import(p) @ns(import, p)
+| UseGroup:  p:path "::" "{" t:use_trees "}" @import_prefix(p, t)
+| UseGlob:   p:path "::" "*" @import_glob(p)
+| ImplFor: "impl" tr:path "for" t:path "{" impl_body "}" @impl(t, tr) @scope
+```
+
+- `@unit(name[, body])`: the definition `name` makes is a unit, a scope
+  for imports and visibility. With `body`, its body is that child (and
+  the definition is a module of it, as `@module(body)` says); without,
+  its body is in another file, which a project model finds.
+- `@root(kind[, first])`: the node begins a path at a root: `self` (the
+  unit it stands in), `super` (its parent; `super` on `self` or `super`
+  goes one further), `crate` (the crate's root unit) or `global` (the
+  crates, `::name`), then the name `first` holds.
+- `@vis(level)`: a visibility: `public`, `crate`, `super`, `private`, or
+  `in` with the label of a path. `@visibility(v, item)`: what `item`
+  defines and imports where the node stands has the visibility at `v`;
+  without one there, the default, within its own unit.
+- `@import(path)`, `@import`: the alternative imports the declaration
+  the path names, under the name its `@def` gives it (or, when that
+  `@def` reaches no name, as `self` in a group does, the path's last
+  name; without a `@def`, none, as `as _`). Without a label, the path
+  is the one the node itself spells (`extern crate a` with
+  `@root(global, a)`). A token is a path of one segment: the module
+  tier's `@import(name)` is this one.
+- `@import_glob(path)`, `@import_glob`: every name the unit the path
+  names offers. `@import_prefix([path,] trees)`: the imports in `trees`
+  begin with the path.
+- `@impl(type[, trait])`: an implementation block of the type the path
+  at `type` names, of the trait at `trait`; its members are what is
+  defined directly in the members scope it opens.
+
+What path a subtree spells is read from the annotations: a token is one
+segment; a `@qualify(base, name)` node is its base's path then its name;
+a `@root` node is its root; a node that passes its name to one child
+(`@style(inherit, …)`) is that child's path; any other node is its only
+symbol child's. So `Vec::<T>::new` spells `Vec::new`, and `&T` spells
+none.
+
 ---
 
 ## In an editor
@@ -519,8 +578,11 @@ declaration on the `.qana` surface yet.
 **Semantics.** The semantic layer does binding, scoping, and the
 declared type tier described above — atoms, signatures, and name-flow,
 but no type constructors, no subtyping, and no cross-file type flow.
-There is no module or import system — top-level names form one
-namespace across files. Custom diagnostics and quick fixes are not
+Across files, the module tier resolves flat modules among the files a
+session holds; units, paths and visibility are read into summaries for a
+project index (`qana-index`), which resolves paths across a project's
+files on demand; the index does not yet keep every name resolved as files
+change, so it reports nothing unresolved. Custom diagnostics and quick fixes are not
 authorable; error messages are terminal-level ("missing SEMI").
 
 **Editor surface.** Hover, formatting, code actions, inlay hints, and

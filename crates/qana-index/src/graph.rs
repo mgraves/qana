@@ -29,6 +29,46 @@ pub struct CrateInfo {
     /// The project's crates it may name, each by the name it names it
     /// by: an index into [`UnitGraph::crates`].
     pub dependencies: Vec<(String, u32)>,
+    /// Where it comes from: the project, or a library.
+    pub source: CrateSource,
+}
+
+/// Where a crate comes from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CrateSource {
+    /// The project's own: its files are the project's, indexed as they
+    /// change.
+    Workspace,
+    /// A library from a registry, never changed once fetched; `id` names
+    /// its package, version and registry.
+    Registry { id: String },
+    /// A library from a git revision, never changed once fetched; `id`
+    /// names its package and revision.
+    Git { id: String },
+    /// A library at a path outside the project, which may change.
+    Path,
+    /// The language's own (Rust's std, from the toolchain's sources);
+    /// `id` names the toolchain.
+    Toolchain { id: String },
+}
+
+impl CrateSource {
+    /// Whether the crate is a library: not the project's own.
+    pub fn is_library(&self) -> bool {
+        !matches!(self, CrateSource::Workspace)
+    }
+
+    /// What names a library that never changes once fetched, for keeping
+    /// what is read of it; `None` for one that may change (the project's,
+    /// a path's).
+    pub fn fixed_id(&self) -> Option<&str> {
+        match self {
+            CrateSource::Registry { id }
+            | CrateSource::Git { id }
+            | CrateSource::Toolchain { id } => Some(id),
+            CrateSource::Workspace | CrateSource::Path => None,
+        }
+    }
 }
 
 /// A project's crates, and where the units declared without a body have

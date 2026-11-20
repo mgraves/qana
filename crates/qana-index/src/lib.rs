@@ -48,7 +48,7 @@ use qana_lang::{EmbeddedLang, GrammarArtifact};
 use qana_sem::{SemDb, Target};
 use serde::{Deserialize, Serialize};
 
-pub use graph::{CrateInfo, UnitGraph};
+pub use graph::{CrateInfo, CrateSource, UnitGraph};
 pub use qana_sem::{Path, Root};
 pub use references::{references, Reference};
 pub use resolve::{Resolution, Resolver};

@@ -92,6 +92,7 @@ fn project() -> Resolver {
         root: root.into(),
         edition: "2021".into(),
         dependencies,
+        source: qana_index::CrateSource::Workspace,
     };
     let mut graph = UnitGraph::new();
     let geo = graph.add_crate(krate("geo", "/p/src/lib.ul", Vec::new()));
@@ -323,4 +324,96 @@ fn a_declaration_is_found_in_its_namespace_or_in_any() {
         matches!(r.resolve(lib, &[], &circle, None), Resolution::Found { .. }),
         "an import's path names it in any"
     );
+}
+
+/// A crate of one file, `/w/lib.ul`.
+fn one_file(text: &str) -> Resolver {
+    let summary = Rc::new(summarize(unitlang(), text));
+    let mut graph = UnitGraph::new();
+    graph.add_crate(CrateInfo {
+        name: "web".into(),
+        kind: "lib".into(),
+        root: "/w/lib.ul".into(),
+        edition: "2021".into(),
+        dependencies: Vec::new(),
+        source: qana_index::CrateSource::Workspace,
+    });
+    Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
+}
+
+#[test]
+fn a_web_of_globs_is_settled_once_and_every_name_found_through_it() {
+    // Forty modules, each globbing its parent and the next, and a root
+    // that globs them all: every module is in one cycle with every other,
+    // as std's architecture modules are.
+    let n = 40;
+    let mut text = String::new();
+    for i in 0..n {
+        text.push_str(&format!(
+            "pub mod m{i} {{\n    use super::*;\n    pub use super::m{}::*;\n    pub fn f{i}() {{}}\n}}\n",
+            (i + 1) % n
+        ));
+        text.push_str(&format!("pub use m{i}::*;\n"));
+    }
+    let r = one_file(&text);
+    let start = std::time::Instant::now();
+    for i in 0..n {
+        let found = r.resolve(
+            FilePath::new("/w/lib.ul"),
+            &[],
+            &path(None, &["m0", &format!("f{i}")]),
+            Some(""),
+        );
+        assert!(
+            matches!(&found, Resolution::Found { declarations, .. } if declarations.len() == 1),
+            "f{i} through the web: {found:?}"
+        );
+    }
+    assert!(matches!(
+        r.resolve(FilePath::new("/w/lib.ul"), &[], &path(None, &["m7", "nowhere"]), Some("")),
+        Resolution::Escapes { segment: 1 }
+    ));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "settled once, not explored again for each lookup: {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_cycle_inside_a_cycle_is_settled_and_the_outer_one_still_grows() {
+    // `a` and `b` glob each other; `c` and `d` glob each other, and `c`
+    // globs `a`: the inner cycle settles while the outer is under way.
+    let r = one_file(
+        "pub mod a {\n    pub use super::b::*;\n    pub fn in_a() {}\n}\n\
+         pub mod b {\n    pub use super::a::*;\n    pub use super::c::*;\n    pub fn in_b() {}\n}\n\
+         pub mod c {\n    pub use super::d::*;\n    pub use super::a::*;\n    pub fn in_c() {}\n}\n\
+         pub mod d {\n    pub use super::c::*;\n    pub fn in_d() {}\n}\n",
+    );
+    for (from, name) in
+        [("a", "in_d"), ("d", "in_a"), ("d", "in_b"), ("b", "in_c"), ("c", "in_b"), ("a", "in_a")]
+    {
+        let found =
+            r.resolve(FilePath::new("/w/lib.ul"), &[], &path(None, &[from, name]), Some(""));
+        assert!(
+            matches!(&found, Resolution::Found { declarations, .. } if declarations.len() == 1),
+            "{from}::{name}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn an_impl_blocks_type_through_another_type_is_found_without_finding_impl_blocks_again() {
+    let r = one_file(
+        "pub struct Point {\n    pub x: Num;\n}\n\
+         impl Point::x {\n    fn on_x() {}\n}\n\
+         impl Point {\n    pub fn new() {}\n}\n",
+    );
+    for (segments, expected) in [(&["Point", "new"][..], "new"), (&["Point", "x"], "x")] {
+        let found = r.resolve(FilePath::new("/w/lib.ul"), &[], &path(None, segments), Some(""));
+        let Resolution::Found { declarations, .. } = found else {
+            panic!("{segments:?}: {found:?}");
+        };
+        assert_eq!(declarations.len(), 1, "{expected}");
+    }
 }

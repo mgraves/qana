@@ -9,8 +9,13 @@
 //! globbed module has that is visible from it, and an enum's variants.
 //! Imports name what their paths resolve to, from the module they are
 //! made in, so names depend on one another, in cycles through globs and
-//! re-exports. They are found on demand and kept: an answer that a cycle
-//! cut short is not kept.
+//! re-exports. They are found on demand and kept. A lookup that meets one
+//! still under way (a cycle) takes what that one has found so far, and is
+//! provisional; the outermost lookup of the cycle runs again, each
+//! provisional lookup under it found once a round, until a round finds
+//! nothing new, and then all are kept. What a name binds only grows from
+//! round to round, so the rounds end; a binding found once stays an
+//! answer.
 //!
 //! A path starts at its root (a unit up from where it stands, the crate's
 //! root, or a crate named by its first segment) or, without one, at the
@@ -26,8 +31,8 @@
 //! brings; a path that names what it may not see is followed anyway, for a
 //! reader may go to it (the compiler says the rest).
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
 
@@ -59,16 +64,34 @@ pub struct Resolver {
     summaries: Vec<Rc<Summary>>,
     /// Each module's bindings of a name, as found.
     names: RefCell<HashMap<(Module, String), Bindings>>,
-    /// The (module, name) lookups under way: met again, a cycle.
-    open: RefCell<HashSet<(Module, String)>>,
-    /// Whether a lookup under way met a cycle, so its answer may be short.
-    cut: RefCell<bool>,
+    /// The (module, name) lookups under way, each with its depth: met
+    /// again, a cycle.
+    open: RefCell<HashMap<(Module, String), usize>>,
+    /// How many lookups are under way.
+    depth: Cell<usize>,
+    /// The shallowest lookup under way that the innermost one has met
+    /// (directly or through a provisional answer): `usize::MAX` for none.
+    reached: Cell<usize>,
+    /// The answers so far of the lookups in a cycle not yet settled: each
+    /// with the round it was found in and the shallowest lookup under way
+    /// it met.
+    provisional: RefCell<HashMap<(Module, String), Provisional>>,
+    /// The round being found, the next round's, and whether an answer of
+    /// the cycle being settled has grown in it.
+    round: Cell<u64>,
+    next_round: Cell<u64>,
+    grew: Cell<bool>,
+    /// How many provisional answers have been made: their order.
+    made: Cell<u64>,
     /// Each file-and-unit's items by name, as indexes into its summary's
     /// declarations.
     items: RefCell<HashMap<(u32, Option<u32>), Items>>,
     /// The impl blocks of each declaration that is a type, once found:
     /// (file, impl index) by (file, declaration index).
     impls: RefCell<Option<ImplBlocks>>,
+    /// Whether they are being found: an impl block's type is a path, and
+    /// while they are, a type's members are those declared inside it.
+    finding_impls: Cell<bool>,
 }
 
 /// A unit in a crate: a file's own (`unit` `None`), or one with its body in
@@ -88,7 +111,7 @@ struct Target {
     module: Option<Module>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Binding {
     target: Target,
     /// Who may see it, and the module it is declared or imported in.
@@ -101,6 +124,16 @@ type Walked = Result<Vec<Target>, usize>;
 
 /// What a name binds in a module.
 type Bindings = Rc<Vec<Binding>>;
+
+/// A lookup's answer so far, in a cycle not yet settled: the round it was
+/// found in, the shallowest lookup under way it met, and when it was made.
+#[derive(Clone)]
+struct Provisional {
+    found: Bindings,
+    round: u64,
+    reached: usize,
+    made: u64,
+}
 
 /// A unit's items by name, as indexes into its file's declarations.
 type Items = Rc<HashMap<String, Vec<u32>>>;
@@ -131,9 +164,16 @@ impl Resolver {
             summaries: kept,
             names: RefCell::default(),
             open: RefCell::default(),
-            cut: RefCell::new(false),
+            depth: Cell::new(0),
+            reached: Cell::new(usize::MAX),
+            provisional: RefCell::default(),
+            round: Cell::new(0),
+            next_round: Cell::new(1),
+            grew: Cell::new(false),
+            made: Cell::new(0),
             items: RefCell::default(),
             impls: RefCell::new(None),
+            finding_impls: Cell::new(false),
         }
     }
 
@@ -427,22 +467,125 @@ impl Resolver {
         if let Some(found) = self.names.borrow().get(&key) {
             return found.clone();
         }
-        if !self.open.borrow_mut().insert(key.clone()) {
-            *self.cut.borrow_mut() = true;
-            return Rc::new(Vec::new());
+        // Under way: a cycle. What it has found so far.
+        let open = self.open.borrow().get(&key).copied();
+        if let Some(depth) = open {
+            self.reach(depth);
+            let so_far = self.provisional.borrow().get(&key).map(|p| p.found.clone());
+            return so_far.unwrap_or_default();
         }
-        let outer_cut = std::mem::replace(&mut *self.cut.borrow_mut(), false);
-        let found = Rc::new(self.find_names(module, name));
+        // Found already in this round of the cycle being settled.
+        let this_round =
+            self.provisional.borrow().get(&key).filter(|p| p.round == self.round.get()).cloned();
+        if let Some(p) = this_round {
+            self.reach(p.reached);
+            return p.found;
+        }
+
+        let depth = self.depth.get();
+        self.depth.set(depth + 1);
+        self.open.borrow_mut().insert(key.clone(), depth);
+        let outer_reached = self.reached.replace(usize::MAX);
+        let outer_grew = self.grew.replace(false);
+        let outer_round = self.round.get();
+        let first = self.made.get();
+        let (mut settling, mut provisional) = (false, false);
+        let found = loop {
+            let before = self.provisional.borrow().get(&key).map(|p| p.found.clone());
+            let found = grown(before.as_deref(), self.find_names(module, name));
+            let reached = self.reached.get();
+            if reached < depth {
+                // In a cycle a lookup further out settles.
+                self.keep_provisional(&key, &found, before.as_deref(), reached);
+                provisional = true;
+                break found;
+            }
+            if reached == usize::MAX && !settling {
+                // It met no lookup under way: found.
+                self.provisional.borrow_mut().remove(&key);
+                self.names.borrow_mut().insert(key.clone(), found.clone());
+                break found;
+            }
+            // The outermost lookup of a cycle: again, in a round of its
+            // own, until a round finds nothing new.
+            settling = true;
+            self.keep_provisional(&key, &found, before.as_deref(), depth);
+            if !self.grew.replace(false) {
+                self.settle(depth, first);
+                break found;
+            }
+            self.round.set(self.next_round.get());
+            self.next_round.set(self.next_round.get() + 1);
+            self.reached.set(usize::MAX);
+        };
         self.open.borrow_mut().remove(&key);
-        let cut = *self.cut.borrow();
-        if !cut {
-            self.names.borrow_mut().insert(key, found.clone());
-        }
-        *self.cut.borrow_mut() = outer_cut || cut;
+        self.depth.set(depth);
+        self.round.set(outer_round);
+        // What grew under a provisional lookup grew in the cycle further
+        // out; what grew under a settled one is settled.
+        let grew = self.grew.get();
+        self.grew.set(outer_grew || (provisional && grew));
+        let reached = self.reached.get();
+        self.reached.set(if reached < depth { outer_reached.min(reached) } else { outer_reached });
         found
     }
 
+    /// The innermost lookup under way has met the one at `depth`.
+    fn reach(&self, depth: usize) {
+        self.reached.set(self.reached.get().min(depth));
+    }
+
+    /// Keep `found` as `key`'s answer so far, found in this round, having
+    /// met the lookup under way at `reached`, and note whether it grew from
+    /// `before`.
+    fn keep_provisional(
+        &self,
+        key: &(Module, String),
+        found: &Bindings,
+        before: Option<&Vec<Binding>>,
+        reached: usize,
+    ) {
+        if before.is_none_or(|b| b.len() < found.len()) {
+            self.grew.set(true);
+        }
+        let made = self.made.get();
+        self.made.set(made + 1);
+        self.provisional.borrow_mut().insert(
+            key.clone(),
+            Provisional { found: found.clone(), round: self.round.get(), reached, made },
+        );
+    }
+
+    /// The cycle whose outermost lookup, at `depth`, began when `first`
+    /// provisional answers had been made is settled: the answers made under
+    /// it in its last round are kept, and those of its earlier rounds that
+    /// the last did not find again are dropped (a lookup finds them anew).
+    fn settle(&self, depth: usize, first: u64) {
+        let round = self.round.get();
+        let mut names = self.names.borrow_mut();
+        self.provisional.borrow_mut().retain(|key, p| {
+            if p.made < first || p.reached < depth {
+                return true;
+            }
+            if p.round == round {
+                names.insert(key.clone(), p.found.clone());
+            }
+            false
+        });
+    }
+
     fn find_names(&self, module: Module, name: &str) -> Vec<Binding> {
+        let mut found = self.find_names_once(module, name);
+        let mut unique: Vec<Binding> = Vec::with_capacity(found.len());
+        for binding in found.drain(..) {
+            if !unique.contains(&binding) {
+                unique.push(binding);
+            }
+        }
+        unique
+    }
+
+    fn find_names_once(&self, module: Module, name: &str) -> Vec<Binding> {
         let summary = self.summaries[module.file as usize].clone();
         let declarations = summary.offers().declarations();
         let mut found: Vec<Binding> = Vec::new();
@@ -532,10 +675,16 @@ impl Resolver {
     // ------------------------------------------------------------------
 
     /// The impl blocks of each type, found once: each block's type resolved
-    /// from where the block is, in each crate its file is in.
+    /// from where the block is, in each crate its file is in. While they
+    /// are being found (a block's type is a path through a type, say),
+    /// there are none: a type's members are then those declared inside it,
+    /// for an impl block's type does not name another block's items.
     fn impl_blocks(&self) -> ImplBlocks {
         if let Some(found) = self.impls.borrow().as_ref() {
             return found.clone();
+        }
+        if self.finding_impls.replace(true) {
+            return ImplBlocks::default();
         }
         let mut found: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
         for (file, summary) in self.summaries.iter().enumerate() {
@@ -558,6 +707,22 @@ impl Resolver {
         }
         let found = Rc::new(found);
         *self.impls.borrow_mut() = Some(found.clone());
+        self.finding_impls.set(false);
         found
     }
+}
+
+/// `found`, with what `before` held that it does not: an answer only grows
+/// while a cycle is settled.
+fn grown(before: Option<&Vec<Binding>>, found: Vec<Binding>) -> Bindings {
+    let Some(before) = before else {
+        return Rc::new(found);
+    };
+    let mut all = before.clone();
+    for binding in found {
+        if !all.contains(&binding) {
+            all.push(binding);
+        }
+    }
+    Rc::new(all)
 }

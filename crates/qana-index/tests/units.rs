@@ -272,6 +272,7 @@ fn a_unit_graph_places_each_file_in_its_crates_at_its_module_path() {
         root: PathBuf::from(root),
         edition: "2021".into(),
         dependencies: Vec::new(),
+        source: qana_index::CrateSource::Workspace,
     };
     let mut graph = UnitGraph::new();
     let lib = graph.add_crate(krate("geo", "lib", "/p/src/lib.rs"));

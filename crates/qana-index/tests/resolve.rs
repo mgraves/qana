@@ -92,7 +92,11 @@ fn project() -> Resolver {
         root: root.into(),
         edition: "2021".into(),
         dependencies,
+        loadable: Vec::new(),
         source: qana_index::CrateSource::Workspace,
+        preludes: Vec::new(),
+        builtins: Vec::new(),
+        closed_by: Vec::new(),
     };
     let mut graph = UnitGraph::new();
     let geo = graph.add_crate(krate("geo", "/p/src/lib.ul", Vec::new()));
@@ -147,6 +151,7 @@ fn names(resolver: &Resolver, file: &str, path: &Path) -> Named {
                 .collect(),
         )),
         Resolution::Escapes { segment } => Err(segment),
+        Resolution::Builtin => panic!("{path:?}: this project has no builtins"),
     }
 }
 
@@ -336,7 +341,11 @@ fn one_file(text: &str) -> Resolver {
         root: "/w/lib.ul".into(),
         edition: "2021".into(),
         dependencies: Vec::new(),
+        loadable: Vec::new(),
         source: qana_index::CrateSource::Workspace,
+        preludes: Vec::new(),
+        builtins: Vec::new(),
+        closed_by: Vec::new(),
     });
     Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
 }
@@ -416,4 +425,336 @@ fn an_impl_blocks_type_through_another_type_is_found_without_finding_impl_blocks
         };
         assert_eq!(declarations.len(), 1, "{expected}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The crates a crate names, its preludes and its builtins
+// ---------------------------------------------------------------------------
+
+/// A crate of std's shape (`/c/lib.ul`): an option module and a prelude.
+const CORE: &str = "pub mod option {
+    pub struct Option {}
+}
+
+pub mod prelude {
+    pub mod v1 {
+        pub use crate::option::Option;
+        pub struct Copy {}
+    }
+}
+";
+
+/// A library only a crate that loads it may name (`/a/lib.ul`).
+const ALLOC: &str = "pub mod boxed {
+    pub struct Box {}
+}
+";
+
+/// std (`/s/lib.ul`): its prelude globs core's, and a prelude of its own
+/// is its crate's (`vec` uses it).
+const STD: &str = "pub mod vec {
+    pub struct Vec {}
+    pub mod inner {}
+}
+
+pub mod prelude {
+    pub mod rust_2021 {
+        pub use core::prelude::v1::*;
+        pub use crate::vec::Vec;
+    }
+}
+";
+
+/// The project's crate (`/w/lib.ul`), naming core and std, loading alloc.
+const WEB: &str = "extern crate alloc;
+extern crate self as web;
+
+pub mod shapes {
+    pub mod deep {}
+}
+
+pub mod own {
+    pub struct Vec {}
+}
+
+#[no_implicit_prelude]
+pub mod hygiene {
+    pub mod deeper {}
+}
+
+#[when(test, no_implicit_prelude)]
+pub mod maybe {}
+
+#[no_implicit_prelude]
+mod declared;
+";
+
+/// `/w/declared.ul`, closed by the attribute on its declaration's item.
+const DECLARED: &str = "pub struct Here {}\n";
+
+/// Another of the project's crates (`/w/other.ul`), naming core and std,
+/// which loads nothing.
+const OTHER: &str = "pub struct Other {}\n";
+
+const FILES: [(&str, &str); 7] = [
+    ("/c/lib.ul", CORE),
+    ("/a/lib.ul", ALLOC),
+    ("/s/lib.ul", STD),
+    ("/w/lib.ul", WEB),
+    ("/w/declared.ul", DECLARED),
+    ("/w/other.ul", OTHER),
+    ("/w/pre.ul", ""),
+];
+
+/// core, alloc and std, and the project's crates `web` and `other`, each
+/// with std's prelude and the builtins `u8` and `str`; std's own prelude is
+/// its `prelude::rust_2021`, from its root.
+fn with_preludes() -> Resolver {
+    let summaries: Vec<(PathBuf, Rc<Summary>)> = FILES
+        .iter()
+        .map(|(path, text)| (PathBuf::from(path), Rc::new(summarize(unitlang(), text))))
+        .collect();
+    let closed_by = vec![path(None, &["no_implicit_prelude"])];
+    let krate =
+        |name: &str, root: &str, named: Vec<(&str, u32)>, prelude: Option<Path>| CrateInfo {
+            name: name.into(),
+            kind: "lib".into(),
+            root: root.into(),
+            edition: "2021".into(),
+            dependencies: named.iter().map(|&(n, k)| (n.to_string(), k)).collect(),
+            loadable: vec![("alloc".to_string(), 1)],
+            source: qana_index::CrateSource::Workspace,
+            preludes: prelude.into_iter().collect(),
+            builtins: vec!["u8".into(), "str".into()],
+            closed_by: closed_by.clone(),
+        };
+    let std_prelude = path(Some(Root::Global), &["std", "prelude", "rust_2021"]);
+    let mut graph = UnitGraph::new();
+    let core = graph.add_crate(krate("core", "/c/lib.ul", Vec::new(), None));
+    graph.add_crate(krate("alloc", "/a/lib.ul", vec![("core", core)], None));
+    let std = graph.add_crate(krate(
+        "std",
+        "/s/lib.ul",
+        vec![("core", core)],
+        Some(path(None, &["prelude", "rust_2021"])),
+    ));
+    let named = vec![("core", core), ("std", std)];
+    let web = graph.add_crate(krate("web", "/w/lib.ul", named.clone(), Some(std_prelude.clone())));
+    graph.add_crate(krate("other", "/w/other.ul", named, Some(std_prelude)));
+    let declared = summaries[3].1.offers().units().iter().position(|u| u.name == "declared");
+    graph.add_body(
+        web,
+        FilePath::new("/w/lib.ul"),
+        declared.unwrap() as u32,
+        "/w/declared.ul".into(),
+        vec!["declared".into()],
+    );
+    Resolver::new(Rc::new(graph), summaries)
+}
+
+/// What `path` names from inside `units` of `file`: each declaration as
+/// `file:name`, each module as its file; or how it escaped.
+fn named(r: &Resolver, file: &str, units: &[&str], path: &Path) -> Result<Vec<String>, String> {
+    let units: Vec<String> = units.iter().map(|u| u.to_string()).collect();
+    match r.resolve(FilePath::new(file), &units, path, None) {
+        Resolution::Found { declarations, modules } => Ok(declarations
+            .into_iter()
+            .map(|(file, index)| {
+                let text = FILES.iter().find(|(p, _)| FilePath::new(p) == file).unwrap().1;
+                let summary = summarize(unitlang(), text);
+                let name = &summary.offers().declarations()[index as usize].name;
+                format!("{}:{name}", file.display())
+            })
+            .chain(modules.into_iter().map(|m| m.display().to_string()))
+            .collect()),
+        Resolution::Escapes { segment } => Err(format!("escapes at {segment}")),
+        Resolution::Builtin => Err("builtin".into()),
+    }
+}
+
+fn one(name: &str) -> Path {
+    path(None, &[name])
+}
+
+#[test]
+fn a_preludes_names_are_every_modules_after_its_own() {
+    let r = with_preludes();
+    for units in [&[][..], &["shapes"], &["shapes", "deep"]] {
+        assert_eq!(named(&r, "/w/lib.ul", units, &one("Vec")), Ok(vec!["/s/lib.ul:Vec".into()]));
+        assert_eq!(
+            named(&r, "/w/lib.ul", units, &one("Option")),
+            Ok(vec!["/c/lib.ul:Option".into()]),
+            "through std's prelude's glob of core's"
+        );
+    }
+    assert_eq!(
+        named(&r, "/w/lib.ul", &["own"], &one("Vec")),
+        Ok(vec!["/w/lib.ul:Vec".into()]),
+        "a module's own names come first"
+    );
+    assert_eq!(named(&r, "/w/declared.ul", &[], &one("Vec")).ok(), None, "closed, below");
+    assert_eq!(named(&r, "/w/other.ul", &[], &one("Copy")), Ok(vec!["/c/lib.ul:Copy".into()]));
+    assert_eq!(
+        named(&r, "/s/lib.ul", &["vec", "inner"], &one("Option")),
+        Ok(vec!["/c/lib.ul:Option".into()]),
+        "std's prelude is its own `prelude::rust_2021`, from its root"
+    );
+    assert_eq!(named(&r, "/c/lib.ul", &["option"], &one("Vec")), Err("escapes at 0".into()));
+}
+
+#[test]
+fn the_crates_a_crate_names_are_its_dependencies_and_what_its_root_loads() {
+    let r = with_preludes();
+    let boxed = path(None, &["alloc", "boxed", "Box"]);
+    let global_boxed = path(Some(Root::Global), &["alloc", "boxed", "Box"]);
+    for units in [&[][..], &["shapes", "deep"]] {
+        assert_eq!(named(&r, "/w/lib.ul", units, &boxed), Ok(vec!["/a/lib.ul:Box".into()]));
+        assert_eq!(named(&r, "/w/lib.ul", units, &global_boxed), Ok(vec!["/a/lib.ul:Box".into()]));
+        assert_eq!(
+            named(&r, "/w/lib.ul", units, &path(None, &["web", "own", "Vec"])),
+            Ok(vec!["/w/lib.ul:Vec".into()]),
+            "`extern crate self as web` names the crate itself"
+        );
+        assert_eq!(
+            named(&r, "/w/lib.ul", units, &path(None, &["std", "vec", "Vec"])),
+            Ok(vec!["/s/lib.ul:Vec".into()])
+        );
+    }
+    assert_eq!(
+        named(&r, "/w/other.ul", &[], &boxed),
+        Err("escapes at 0".into()),
+        "alloc is loadable, and named only once loaded"
+    );
+    assert_eq!(named(&r, "/w/other.ul", &[], &global_boxed), Err("escapes at 0".into()));
+}
+
+#[test]
+fn a_closed_module_and_those_inside_it_have_neither_crates_nor_preludes() {
+    let r = with_preludes();
+    for (file, units) in [
+        ("/w/lib.ul", &["hygiene"][..]),
+        ("/w/lib.ul", &["hygiene", "deeper"]),
+        ("/w/declared.ul", &[]),
+    ] {
+        assert_eq!(named(&r, file, units, &one("Vec")), Err("escapes at 0".into()), "{units:?}");
+        assert_eq!(
+            named(&r, file, units, &path(None, &["std", "vec", "Vec"])),
+            Err("escapes at 0".into())
+        );
+        assert_eq!(
+            named(&r, file, units, &path(Some(Root::Global), &["std", "vec", "Vec"])),
+            Ok(vec!["/s/lib.ul:Vec".into()]),
+            "a path from a root is not closed"
+        );
+        assert_eq!(named(&r, file, units, &one("u8")), Err("builtin".into()));
+    }
+    assert_eq!(
+        named(&r, "/w/lib.ul", &["maybe"], &one("Vec")),
+        Ok(vec!["/s/lib.ul:Vec".into()]),
+        "an attribute held under a condition may not hold: the prelude is an answer"
+    );
+}
+
+#[test]
+fn a_builtin_is_what_a_first_name_is_when_it_is_nothing_else() {
+    let r = with_preludes();
+    assert_eq!(named(&r, "/w/lib.ul", &["shapes"], &one("u8")), Err("builtin".into()));
+    assert_eq!(named(&r, "/w/lib.ul", &[], &one("str")), Err("builtin".into()));
+    assert_eq!(
+        named(&r, "/w/lib.ul", &[], &path(None, &["u8", "MAX"])),
+        Err("escapes at 1".into()),
+        "what a builtin holds, no summary says"
+    );
+    assert_eq!(
+        named(&r, "/w/lib.ul", &[], &path(Some(Root::Crate), &["u8"])),
+        Err("escapes at 0".into())
+    );
+    assert_eq!(named(&r, "/w/lib.ul", &[], &one("i8")), Err("escapes at 0".into()), "not one");
+}
+
+/// The names of what `path` names in the one file of [`one_file`]`(text)`.
+fn one_file_names(text: &str, path: &Path) -> Result<Vec<String>, usize> {
+    let r = one_file(text);
+    match r.resolve(FilePath::new("/w/lib.ul"), &[], path, None) {
+        Resolution::Found { declarations, .. } => {
+            let summary = summarize(unitlang(), text);
+            let declared = summary.offers().declarations();
+            Ok(declarations
+                .into_iter()
+                .map(|(_, i)| {
+                    let d = &declared[i as usize];
+                    let block = d.impl_block.map(|b| {
+                        let of = &summary.offers().impls()[b as usize];
+                        match &of.trait_path {
+                            Some(t) => format!("impl {} for ", t.segments.join("::")),
+                            None => "impl ".to_string(),
+                        }
+                    });
+                    format!("{}{}", block.unwrap_or_default(), d.name)
+                })
+                .collect())
+        }
+        Resolution::Escapes { segment } => Err(segment),
+        Resolution::Builtin => Err(usize::MAX),
+    }
+}
+
+#[test]
+fn a_types_own_members_come_first_then_its_inherent_items_then_its_traits() {
+    let text = "struct Outcome {
+    pub Ok: Num;
+}
+
+impl Try for Outcome {
+    fn Ok() {}
+    fn into_result() {}
+}
+
+impl Outcome {
+    fn new() {}
+}
+
+impl Make for Outcome {
+    fn new() {}
+    fn make() {}
+}
+
+impl Show for Outcome {
+    fn make() {}
+}
+";
+    let at = |segments: &[&str]| one_file_names(text, &path(None, segments));
+    assert_eq!(at(&["Outcome", "Ok"]), Ok(vec!["Ok".into()]), "declared inside it, as a variant is");
+    assert_eq!(at(&["Outcome", "new"]), Ok(vec!["impl new".into()]), "an inherent item hides a trait's");
+    assert_eq!(
+        at(&["Outcome", "make"]),
+        Ok(vec!["impl Make for make".into(), "impl Show for make".into()]),
+        "without one, each trait's is an answer"
+    );
+    assert_eq!(at(&["Outcome", "into_result"]), Ok(vec!["impl Try for into_result".into()]));
+}
+
+#[test]
+fn an_impl_block_written_through_a_renamed_import_is_its_types() {
+    let text = "pub mod shapes {
+    pub struct Circle {}
+}
+
+use crate::shapes::Circle as Round;
+
+impl Round {
+    fn radius() {}
+}
+
+mod elsewhere {
+    pub use crate::shapes::Circle as Disc;
+    impl Disc {
+        fn area() {}
+    }
+}
+";
+    let at = |segments: &[&str]| one_file_names(text, &path(None, segments));
+    assert_eq!(at(&["shapes", "Circle", "radius"]), Ok(vec!["impl radius".into()]));
+    assert_eq!(at(&["shapes", "Circle", "area"]), Ok(vec!["impl area".into()]));
+    assert_eq!(at(&["Round", "area"]), Ok(vec!["impl area".into()]), "and the rename's");
 }

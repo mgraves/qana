@@ -94,6 +94,7 @@ impl Summary {
 /// blocks, by what they say.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Offers {
+    attributes: Vec<Attribute>,
     units: Vec<Unit>,
     declarations: Vec<Declaration>,
     reexports: Vec<Import>,
@@ -102,6 +103,12 @@ pub struct Offers {
 }
 
 impl Offers {
+    /// The attributes said of the file's own unit (Rust's inner attributes
+    /// at its top), in the file's order.
+    pub fn attributes(&self) -> &[Attribute] {
+        &self.attributes
+    }
+
     /// The units the file holds, besides its own; a unit's index here is
     /// what names it.
     pub fn units(&self) -> &[Unit] {
@@ -189,6 +196,21 @@ pub struct Unit {
     pub inline: bool,
     /// Who may see it.
     pub visibility: Visibility,
+    /// The attributes said of it: those on its declaration, then those
+    /// at the top of its body where its body is here (Rust's outer, then
+    /// inner, attributes), in the file's order.
+    pub attributes: Vec<Attribute>,
+}
+
+/// An attribute said of a unit or an import: the path that names it, and
+/// whether it holds only under a condition (Rust's `cfg_attr(pred, attr)`,
+/// whose condition a summary does not decide).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Attribute {
+    /// The path that names it (`no_std`, `rustfmt::skip`).
+    pub path: Path,
+    /// Whether it holds only under a condition.
+    pub conditional: bool,
 }
 
 /// What a unit imports: one declaration, under a name, or every name of a
@@ -207,6 +229,13 @@ pub struct Import {
     pub glob: bool,
     /// Who may see it: an import others may see is a re-export.
     pub visibility: Visibility,
+    /// The attributes said of it (on the item that makes it), in the
+    /// file's order.
+    pub attributes: Vec<Attribute>,
+    /// Whether it loads the library its path names (Rust's `extern
+    /// crate`): made at a crate's root, its name is one every module of
+    /// the crate may use.
+    pub loads: bool,
 }
 
 /// An impl block: what it is of, and of which trait.
@@ -517,12 +546,14 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
 
     let offers_fingerprint = {
         let mut hash = Fnv::new();
+        hash.attributes(&read.attributes);
         hash.u64(units.len() as u64);
         for u in &units {
             hash.str(&u.name);
             hash.unit(u.parent);
             hash.u64(u64::from(u.inline));
             hash.visibility(&u.visibility);
+            hash.attributes(&u.attributes);
         }
         hash.u64(declarations.len() as u64);
         for d in &declarations {
@@ -580,7 +611,14 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     };
 
     Summary {
-        offers: Offers { units, declarations, reexports, impls, fingerprint: offers_fingerprint },
+        offers: Offers {
+            attributes: read.attributes,
+            units,
+            declarations,
+            reexports,
+            impls,
+            fingerprint: offers_fingerprint,
+        },
         needs: Needs { imports, escaping, fingerprint: needs_fingerprint },
         locations: Locations {
             names,
@@ -756,6 +794,16 @@ impl Fnv {
             }
             self.u64(u64::from(i.glob));
             self.visibility(&i.visibility);
+            self.attributes(&i.attributes);
+            self.u64(u64::from(i.loads));
+        }
+    }
+
+    fn attributes(&mut self, attributes: &[Attribute]) {
+        self.u64(attributes.len() as u64);
+        for a in attributes {
+            self.path(&a.path);
+            self.u64(u64::from(a.conditional));
         }
     }
 

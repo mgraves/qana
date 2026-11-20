@@ -1,6 +1,7 @@
 //! The binding annotations a project index reads units, paths,
-//! visibility, imports and impl blocks from (`@unit`, `@root`, `@vis`,
-//! `@visibility`, `@import`, `@import_glob`, `@import_prefix`, `@impl`):
+//! visibility, imports, attributes and impl blocks from (`@unit`, `@root`,
+//! `@vis`, `@visibility`, `@import`, `@import_glob`, `@import_prefix`,
+//! `@loads`, `@attribute`, `@attributes`, `@impl`):
 //! what each compiles to, what a path spells, and what each refuses.
 //! Unitlang (`examples/units`) is their language; qana-index's tests read
 //! its summaries.
@@ -55,6 +56,12 @@ fn unitlang_compiles_each_annotation_into_the_binding() {
     assert!(b.imports.iter().any(|e| e.1 == prod("UseAllGlob") && e.2.is_none()));
     assert!(b.prefixes.iter().any(|e| e.1 == prod("UseGlobalGroup") && e.2.is_none()));
     assert!(b.impls.iter().any(|e| e.1 == prod("ImplFor") && e.3.is_some()));
+    assert!(has(&b.loads, "Extern") && has(&b.loads, "ExternSelf") && !has(&b.loads, "UsePath"));
+    assert!(b.attributes.iter().any(|e| e.1 == prod("Attr")));
+    assert!(b.attributes.iter().any(|e| e.1 == prod("When")), "a conditional one is one too");
+    assert!(b.attribute_lists.iter().any(|e| e.1 == prod("File") && e.3.is_none()));
+    assert!(b.attribute_lists.iter().any(|e| e.1 == prod("PubItem") && e.3.is_some()));
+    assert!(b.attribute_lists.iter().any(|e| e.1 == prod("When") && e.3.is_none()));
     assert!(!b.module_tier(), "importing a path does not make each file a flat module");
 }
 
@@ -136,6 +143,26 @@ fn an_alternative_imports_one_way() {
     refused("rule file = File: \"use\" p:IDENT @def(p) @import(p) @import_glob(p)", "not both");
     refused("rule file = File: \"use\" p:IDENT @import_glob(p, p)", "@import_glob takes at most");
     refused("rule file = File: \"use\" p:IDENT @import_prefix(p, q)", "no symbol labeled `q`");
+}
+
+#[test]
+fn what_loads_is_an_import() {
+    refused("rule file = Ext: \"use\" n:IDENT @def(n) @loads", "give the alternative @import");
+    refused(
+        "rule file = Ext: \"use\" n:IDENT @def(n) @import(n) @loads(n)",
+        "@loads takes no arguments",
+    );
+}
+
+#[test]
+fn attributes_are_said_of_a_path_and_listed_in_a_rule() {
+    refused("rule file = A: p:IDENT @attribute", "@attribute takes the label of the path");
+    refused("rule file = A: p:IDENT @attribute(q)", "no symbol labeled `q`");
+    refused("rule file = A: \"use\" a:IDENT @attributes(a)", "a body must be a rule symbol");
+    refused(
+        "rule file = A: \"use\" a:list @attributes(a, b)\nrule list = IDENT*",
+        "no symbol labeled `b`",
+    );
 }
 
 #[test]

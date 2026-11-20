@@ -1,20 +1,22 @@
-//! The walk that reads a file's units, imports, visibilities and impl
-//! blocks from its tree, as its grammar's binding says (`@unit`, `@root`,
-//! `@vis`, `@visibility`, `@import`, `@import_glob`, `@import_prefix`,
-//! `@impl`), and the unit and path of each definition and reference.
+//! The walk that reads a file's units, imports, visibilities, attributes
+//! and impl blocks from its tree, as its grammar's binding says (`@unit`,
+//! `@root`, `@vis`, `@visibility`, `@import`, `@import_glob`,
+//! `@import_prefix`, `@loads`, `@attribute`, `@attributes`, `@impl`), and
+//! the unit and path of each definition and reference.
 //!
 //! What a function's body holds is the body's: its units, imports and
 //! impl blocks are not read (as its declarations are not offered), while
 //! its references are, in the unit the function is in.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use qana_grammar::green::{LIST_PROD, RUN_PROD};
 use qana_grammar::{GreenChild, GreenNode};
 use qana_sem::{name_child, symbol_indices, BindingConfig, Path, RefKind, Root};
 use qana_services::OutlineConfig;
 
-use crate::{Impl, Import, Unit, Visibility, FUNCTION};
+use crate::{Attribute, Impl, Import, Unit, Visibility, FUNCTION};
 
 /// What the binding says of one production, gathered from the config's
 /// tables once, so the walk asks each node once.
@@ -36,6 +38,13 @@ struct Roles {
     visibility: Option<(usize, usize)>,
     /// `@import`/`@import_glob`: the path child, and whether a glob.
     import: Option<(Option<usize>, bool)>,
+    /// `@loads`: the import loads the library its path names.
+    loads: bool,
+    /// `@attribute(path)`: the path child.
+    attribute: Option<usize>,
+    /// `@attributes(attrs[, item])`: the attributes child, and the item
+    /// child.
+    attribute_list: Option<(usize, Option<usize>)>,
     /// `@import_prefix`: the path child, and the trees child.
     prefix: Option<(Option<usize>, usize)>,
     /// `@impl(type[, trait])`.
@@ -73,6 +82,15 @@ fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Ro
     for &(nt, prod, path, trees) in &cfg.prefixes {
         map.entry((nt, prod)).or_default().prefix = Some((path, trees));
     }
+    for &(nt, prod) in &cfg.loads {
+        map.entry((nt, prod)).or_default().loads = true;
+    }
+    for &(nt, prod, path) in &cfg.attributes {
+        map.entry((nt, prod)).or_default().attribute = Some(path);
+    }
+    for &(nt, prod, attrs, item) in &cfg.attribute_lists {
+        map.entry((nt, prod)).or_default().attribute_list = Some((attrs, item));
+    }
     for &(nt, prod, ty, tr) in &cfg.impls {
         map.entry((nt, prod)).or_default().implementation = Some((ty, tr));
     }
@@ -109,6 +127,8 @@ pub(crate) type Span = (u32, u32);
 /// What the walk read, units, imports and impl blocks in document order,
 /// each with its span (a unit's: its name's, then its item's).
 pub(crate) struct FileUnits {
+    /// The attributes said of the file's own unit.
+    pub attributes: Vec<Attribute>,
     pub units: Vec<(Unit, Span, Span)>,
     pub imports: Vec<(Import, Span)>,
     pub impls: Vec<(Impl, Span)>,
@@ -156,6 +176,9 @@ struct Cx {
     /// The visibility what is defined here has, when an enclosing
     /// `@visibility` gave one and no scope opened since.
     visibility: Option<Visibility>,
+    /// The attributes what is declared here takes, when an enclosing
+    /// `@attributes` gave them and no scope opened since.
+    attributes: Option<Rc<Vec<Attribute>>>,
     /// An impl block whose members scope has not opened yet.
     impl_pending: Option<u32>,
     /// The impl block whose members scope this is.
@@ -175,6 +198,7 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
         cfg,
         roles: roles(cfg, outline),
         out: FileUnits {
+            attributes: Vec::new(),
             units: Vec::new(),
             imports: Vec::new(),
             impls: Vec::new(),
@@ -188,6 +212,7 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
         unit: None,
         in_body: false,
         visibility: None,
+        attributes: None,
         impl_pending: None,
         members_of: None,
         prefix: Prefix::None,
@@ -228,6 +253,33 @@ impl Walk<'_> {
             }
         };
 
+        // The attributes `@attributes` gives (an attribute's own it holds
+        // under its condition, and says nothing of here): what is declared
+        // in the item child takes them, after those an enclosing node gave;
+        // without an item child, the unit the node stands in.
+        let attributes_given = match (roles.attribute_list, roles.attribute) {
+            (Some((attrs, item)), None) => Some((self.attributes_at(n, attrs), item)),
+            _ => None,
+        };
+        let attributes_here = |name: (u32, u32)| -> Vec<Attribute> {
+            let mut attributes: Vec<Attribute> =
+                cx.attributes.as_deref().cloned().unwrap_or_default();
+            if let Some((given, Some(item))) = &attributes_given {
+                if span_of(*item).is_some_and(|item| item.0 <= name.0 && name.1 <= item.1) {
+                    attributes.extend(given.iter().cloned());
+                }
+            }
+            attributes
+        };
+        if let (Some((given, None)), false) = (&attributes_given, cx.in_body) {
+            match cx.unit {
+                None => self.out.attributes.extend(given.iter().cloned()),
+                Some(unit) => {
+                    self.out.units[unit as usize].0.attributes.extend(given.iter().cloned())
+                }
+            }
+        }
+
         // This node's definition, in the scope it stands in.
         let mut def_name: Option<(String, (u32, u32))> = None;
         if let Some(k) = roles.def {
@@ -265,6 +317,7 @@ impl Walk<'_> {
         let mut inner = cx.clone();
         if let Some(members) = roles.scope {
             inner.visibility = None;
+            inner.attributes = None;
             inner.members_of = if members { cx.impl_pending } else { None };
             inner.impl_pending = None;
         }
@@ -302,6 +355,7 @@ impl Walk<'_> {
                     parent: cx.unit,
                     inline: body.is_some(),
                     visibility: visibility_here(*span),
+                    attributes: attributes_here(*span),
                 },
                 *span,
                 cx.item.unwrap_or(whole),
@@ -338,13 +392,18 @@ impl Walk<'_> {
                         None => full.segments.last().cloned(),
                     },
                 };
-                let visibility = match &def_name {
-                    Some((_, span)) => visibility_here(*span),
-                    None => cx.visibility.clone().unwrap_or_else(private),
+                let (visibility, attributes) = match &def_name {
+                    Some((_, span)) => (visibility_here(*span), attributes_here(*span)),
+                    None => (
+                        cx.visibility.clone().unwrap_or_else(private),
+                        cx.attributes.as_deref().cloned().unwrap_or_default(),
+                    ),
                 };
-                self.out
-                    .imports
-                    .push((Import { unit: cx.unit, path: full, name, glob, visibility }, whole));
+                let loads = roles.loads;
+                self.out.imports.push((
+                    Import { unit: cx.unit, path: full, name, glob, visibility, attributes, loads },
+                    whole,
+                ));
             }
             if let Some(k) = path {
                 let mut path_cx = inner.clone();
@@ -378,13 +437,17 @@ impl Walk<'_> {
 
         if let Some((_, item)) = roles.visibility {
             if let Some((v, _)) = &given {
-                let mut item_cx = inner.clone();
                 // Not in a scope this node opens: there, the item's
                 // visibility is not what its contents have.
                 if roles.scope.is_none() {
-                    item_cx.visibility = Some(v.clone());
+                    cx_of(&mut child_cx, item, &inner).visibility = Some(v.clone());
                 }
-                child_cx.push((item, item_cx));
+            }
+        }
+        if let Some((given, Some(item))) = attributes_given {
+            // Nor its attributes.
+            if roles.scope.is_none() {
+                cx_of(&mut child_cx, item, &inner).attributes = Some(Rc::new(given));
             }
         }
 
@@ -406,6 +469,37 @@ impl Walk<'_> {
                 }
             }
             off += c.width();
+        }
+    }
+
+    /// The attributes in the subtree of child `k` of `n`, in the file's
+    /// order: each attribute's, and those an attribute holds, under its
+    /// condition.
+    fn attributes_at(&self, n: &GreenNode, k: usize) -> Vec<Attribute> {
+        let mut found = Vec::new();
+        if let Some(child) = symbol_child(n, k) {
+            self.attributes_in(child, false, &mut found);
+        }
+        found
+    }
+
+    fn attributes_in(&self, node: &GreenNode, conditional: bool, found: &mut Vec<Attribute>) {
+        let roles = self.roles.get(&(node.nt, node.prod));
+        if let Some(k) = roles.and_then(|r| r.attribute) {
+            if let Some(path) = Path::of_child(node, k, self.cfg) {
+                found.push(Attribute { path, conditional });
+            }
+            let held =
+                roles.and_then(|r| r.attribute_list).and_then(|(a, _)| symbol_child(node, a));
+            if let Some(held) = held {
+                self.attributes_in(held, true, found);
+            }
+            return;
+        }
+        for c in &node.children {
+            if let GreenChild::Node(m) = c {
+                self.attributes_in(m, conditional, found);
+            }
         }
     }
 
@@ -437,6 +531,19 @@ impl Walk<'_> {
             }
         }
     }
+}
+
+/// The context child `k` stands in, among those that differ from
+/// `inner`: made from `inner` when there is none yet.
+fn cx_of<'c>(child_cx: &'c mut Vec<(usize, Cx)>, k: usize, inner: &Cx) -> &'c mut Cx {
+    let at = match child_cx.iter().position(|(c, _)| *c == k) {
+        Some(at) => at,
+        None => {
+            child_cx.push((k, inner.clone()));
+            child_cx.len() - 1
+        }
+    };
+    &mut child_cx[at].1
 }
 
 /// The width of the trivia before `n`'s first token.

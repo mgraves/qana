@@ -18,25 +18,45 @@
 //! answer.
 //!
 //! A path starts at its root (a unit up from where it stands, the crate's
-//! root, or a crate named by its first segment) or, without one, at the
-//! names of the module it stands in and then at the crates its crate may
-//! name. Each segment after is a name of the module before it, a member of
-//! the type before it (an enum's variants and a trait's items, which are
-//! declared inside it, and the items of every impl block whose type
-//! resolves to it), or nothing: the path escapes there.
+//! root, or a crate its crate names, by its first segment) or, without
+//! one, at the first of these that has its first segment:
 //!
-//! What escapes still escapes: a crate outside the project, a language's
-//! prelude, what a macro expands to, `Self` (whose type a summary does not
-//! say). Nothing is reported unresolved. Visibility decides what a glob
-//! brings; a path that names what it may not see is followed anyway, for a
-//! reader may go to it (the compiler says the rest).
+//! - the names of the module it stands in;
+//! - the crates its crate names: those it names without loading them, and
+//!   those its root loads under a name (an import that loads, `@loads`:
+//!   Rust's `extern crate`, whose own path may name any crate the crate
+//!   may load);
+//! - the names of its crate's preludes that the module may see, as though
+//!   each were globbed into every module;
+//! - the names the language provides (builtins), which no source declares:
+//!   a path that is one names it, and one that goes on escapes after it.
+//!
+//! A module with an attribute that closes it ([`CrateInfo::closed_by`],
+//! said unconditionally of it or of a module it is inside) has neither the
+//! crates nor the preludes; a path from a root still has them.
+//!
+//! Each segment after is a name of the module before it, a member of the
+//! type before it, or nothing: the path escapes there. A type's members
+//! are, the first of these that has the name: what is declared inside it
+//! (an enum's variants, a trait's items); the items of its inherent impl
+//! blocks (every impl block without a trait whose type resolves to it);
+//! the items of its impl blocks of traits (which of those traits are in
+//! scope is not known here: each is an answer).
+//!
+//! What escapes still escapes: a crate outside the project, what a macro
+//! expands to, `Self` (whose type a summary does not say). Nothing is
+//! reported unresolved. Visibility decides what a glob brings; a path that
+//! names what it may not see is followed anyway, for a reader may go to it
+//! (the compiler says the rest).
+//!
+//! [`CrateInfo::closed_by`]: crate::CrateInfo::closed_by
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
 
-use crate::{Declaration, Import, Path, Root, Summary, UnitGraph, Visibility};
+use crate::{Attribute, Declaration, Import, Path, Root, Summary, UnitGraph, Visibility};
 
 /// What a path names. See the [module docs](self).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,8 +69,11 @@ pub enum Resolution {
     Found { declarations: Vec<(PathBuf, u32)>, modules: Vec<PathBuf> },
     /// It names what the project does not hold, from its `segment`th
     /// segment (0 for the first) on: a crate outside the project, a
-    /// prelude, a macro's expansion, a member no summary holds.
+    /// macro's expansion, a member no summary holds.
     Escapes { segment: usize },
+    /// It is a name the language provides, which no source declares
+    /// (Rust's primitive types, `u8`).
+    Builtin,
 }
 
 /// Resolves paths over a unit graph and the summaries of a project's files,
@@ -86,12 +109,21 @@ pub struct Resolver {
     /// Each file-and-unit's items by name, as indexes into its summary's
     /// declarations.
     items: RefCell<HashMap<(u32, Option<u32>), Items>>,
+    /// Each impl block by the last name of its type's path, and the names
+    /// imports give what they import under another name, once gathered.
+    impl_names: RefCell<Option<Rc<ImplNames>>>,
     /// The impl blocks of each declaration that is a type, once found:
     /// (file, impl index) by (file, declaration index).
-    impls: RefCell<Option<ImplBlocks>>,
-    /// Whether they are being found: an impl block's type is a path, and
+    impls: RefCell<HashMap<(u32, u32), ImplBlocks>>,
+    /// The declarations each impl block's type resolves to, once found:
+    /// by (file, impl index).
+    impl_types: RefCell<HashMap<(u32, u32), Rc<Vec<(u32, u32)>>>>,
+    /// Whether some are being found: an impl block's type is a path, and
     /// while they are, a type's members are those declared inside it.
     finding_impls: Cell<bool>,
+    /// Whether each module is closed to its crate's named crates and
+    /// preludes, once asked.
+    closed: RefCell<HashMap<Module, bool>>,
 }
 
 /// A unit in a crate: a file's own (`unit` `None`), or one with its body in
@@ -122,6 +154,18 @@ struct Binding {
 /// What a path's walk has reached, or where it left the project.
 type Walked = Result<Vec<Target>, usize>;
 
+/// Where a path's first name may come from, besides the module's names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Start {
+    /// The crates its crate names, then its preludes.
+    Anywhere,
+    /// The crates its crate names, and those it may load: an import that
+    /// loads's path.
+    Loading,
+    /// The crates its crate names: a prelude's own path.
+    Prelude,
+}
+
 /// What a name binds in a module.
 type Bindings = Rc<Vec<Binding>>;
 
@@ -138,9 +182,19 @@ struct Provisional {
 /// A unit's items by name, as indexes into its file's declarations.
 type Items = Rc<HashMap<String, Vec<u32>>>;
 
-/// The impl blocks of each type: (file, impl index) by (file,
-/// declaration index).
-type ImplBlocks = Rc<HashMap<(u32, u32), Vec<(u32, u32)>>>;
+/// A type's impl blocks: (file, impl index).
+type ImplBlocks = Rc<Vec<(u32, u32)>>;
+
+/// Where a type's impl blocks may be: each impl block (file, impl index) by
+/// the last name of its type's path, which is the type's own name or a
+/// name an import gives it (`use a::Cell as Grid; impl Grid {}`); and, by
+/// the last name of an import's path, the names imports give what it names
+/// (`Grid` by `Cell`).
+#[derive(Default)]
+struct ImplNames {
+    by_name: HashMap<String, Vec<(u32, u32)>>,
+    renames: HashMap<String, Vec<String>>,
+}
 
 impl Resolver {
     /// A resolver over `graph`, and the `summaries` of the project's files
@@ -172,8 +226,11 @@ impl Resolver {
             grew: Cell::new(false),
             made: Cell::new(0),
             items: RefCell::default(),
-            impls: RefCell::new(None),
+            impl_names: RefCell::new(None),
+            impls: RefCell::default(),
+            impl_types: RefCell::default(),
             finding_impls: Cell::new(false),
+            closed: RefCell::default(),
         }
     }
 
@@ -207,7 +264,18 @@ impl Resolver {
             }
         }
         if declarations.is_empty() && modules.is_empty() {
-            return Resolution::Escapes { segment: furthest };
+            // A first name that is nothing else may be the language's.
+            let first = path.segments.first().filter(|_| path.root.is_none() && furthest == 0);
+            let builtin = first.is_some_and(|name| {
+                self.graph.places(file).iter().any(|&(krate, _)| {
+                    self.graph.crates()[krate as usize].builtins.iter().any(|b| b == name)
+                })
+            });
+            return match (builtin, path.segments.len()) {
+                (true, 1) => Resolution::Builtin,
+                (true, _) => Resolution::Escapes { segment: 1 },
+                (false, _) => Resolution::Escapes { segment: furthest },
+            };
         }
         declarations.sort();
         declarations.dedup();
@@ -258,6 +326,12 @@ impl Resolver {
 
     /// Walk `path` from module `at`.
     fn walk(&self, at: Module, path: &Path) -> Walked {
+        self.walk_from(at, path, Start::Anywhere)
+    }
+
+    /// Walk `path` from module `at`, its first name from the module's
+    /// names, then from where `from` says.
+    fn walk_from(&self, at: Module, path: &Path, from: Start) -> Walked {
         let (mut current, first) = match path.root {
             Some(Root::Unit(up)) => {
                 let mut module = at;
@@ -269,14 +343,21 @@ impl Resolver {
             Some(Root::Crate) => (vec![self.crate_root(at.krate)], 0),
             Some(Root::Global) => {
                 let name = path.segments.first().ok_or(0usize)?;
-                (self.extern_crate(at.krate, name).ok_or(0usize)?, 1)
+                let found = self.named_crates(at.krate, name, from == Start::Loading);
+                if found.is_empty() {
+                    return Err(0);
+                }
+                (found, 1)
             }
             None => {
                 let name = path.segments.first().ok_or(0usize)?;
                 let mut found: Vec<Target> =
                     self.names_of(at, name).iter().map(|b| b.target).collect();
-                if found.is_empty() {
-                    found = self.extern_crate(at.krate, name).unwrap_or_default();
+                if found.is_empty() && !self.closed(at) {
+                    found = self.named_crates(at.krate, name, from == Start::Loading);
+                    if found.is_empty() && from == Start::Anywhere {
+                        found = self.prelude_names(at, name);
+                    }
                 }
                 if found.is_empty() {
                     return Err(0);
@@ -308,10 +389,19 @@ impl Resolver {
         let Some((file, index)) = target.declaration else {
             return Vec::new();
         };
-        let mut found = self.declared_inside(file, index, name);
-        if let Some(blocks) = self.impl_blocks().get(&(file, index)) {
-            for &(block_file, block) in blocks {
+        let found = self.declared_inside(file, index, name);
+        if !found.is_empty() {
+            return found;
+        }
+        let blocks = self.impls_of(file, index);
+        // Its inherent impl blocks' items, or else its trait impl blocks'.
+        for inherent in [true, false] {
+            let mut found = Vec::new();
+            for &(block_file, block) in blocks.iter() {
                 let summary = &self.summaries[block_file as usize];
+                if summary.offers().impls()[block as usize].trait_path.is_none() != inherent {
+                    continue;
+                }
                 for (i, d) in summary.offers().declarations().iter().enumerate() {
                     if d.impl_block == Some(block) && d.name == name {
                         found.push(Target {
@@ -321,8 +411,11 @@ impl Resolver {
                     }
                 }
             }
+            if !found.is_empty() {
+                return found;
+            }
         }
-        found
+        Vec::new()
     }
 
     /// The declarations named `name` made inside declaration `index` of
@@ -355,17 +448,99 @@ impl Resolver {
         }
     }
 
-    /// The crate `krate` names `name`, as its root.
-    fn extern_crate(&self, krate: u32, name: &str) -> Option<Vec<Target>> {
+    /// The crates `krate` names `name`, each as its root: those it names
+    /// without loading them, and those its root loads under that name; or,
+    /// for an import that loads (`loading`), those it names without loading
+    /// them and those it may load.
+    fn named_crates(&self, krate: u32, name: &str, loading: bool) -> Vec<Target> {
         let info = &self.graph.crates()[krate as usize];
-        let found: Vec<Target> = info
+        let loadable = if loading { info.loadable.as_slice() } else { &[] };
+        let mut found: Vec<Target> = info
             .dependencies
             .iter()
+            .chain(loadable)
             .filter(|(named, _)| named == name)
             .map(|&(_, dependency)| self.crate_root(dependency))
             .filter(|t| t.module.is_some())
             .collect();
-        (!found.is_empty()).then_some(found)
+        if !loading {
+            if let Some(root) = self.crate_root(krate).module {
+                let loads: Vec<Import> = self
+                    .imports_of(root)
+                    .filter(|i| i.loads && !i.glob && i.name.as_deref() == Some(name))
+                    .cloned()
+                    .collect();
+                for import in &loads {
+                    if let Ok(targets) = self.walk_from(root, &import.path, Start::Loading) {
+                        found.extend(targets);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// What `name` is in the preludes of `at`'s crate: the names of each
+    /// prelude's module that `at` may see.
+    fn prelude_names(&self, at: Module, name: &str) -> Vec<Target> {
+        let preludes = &self.graph.crates()[at.krate as usize].preludes;
+        let Some(root) = self.crate_root(at.krate).module.filter(|_| !preludes.is_empty()) else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for prelude in preludes {
+            let Ok(targets) = self.walk_from(root, prelude, Start::Prelude) else { continue };
+            for module in targets.iter().filter_map(|t| t.module) {
+                for binding in self.names_of(module, name).iter() {
+                    if self.visible(binding, at) {
+                        found.push(binding.target);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// Whether `module`, or a module it is inside, is closed to its crate's
+    /// named crates and preludes: an attribute its crate's
+    /// [`closed_by`](crate::CrateInfo::closed_by) holds is said of it
+    /// unconditionally.
+    fn closed(&self, module: Module) -> bool {
+        if let Some(&closed) = self.closed.borrow().get(&module) {
+            return closed;
+        }
+        let closers = &self.graph.crates()[module.krate as usize].closed_by;
+        let says = |attributes: &[Attribute]| {
+            attributes.iter().any(|a| !a.conditional && closers.contains(&a.path))
+        };
+        let closed = !closers.is_empty() && {
+            let summary = &self.summaries[module.file as usize];
+            let own = match module.unit {
+                Some(unit) => says(&summary.offers().units()[unit as usize].attributes),
+                // A file's own unit: what the file says at its top, and
+                // what the unit that declares it says of it.
+                None => {
+                    says(summary.offers().attributes())
+                        || self.declaring_unit(module).is_some_and(|(file, unit)| {
+                            says(
+                                &self.summaries[file as usize].offers().units()[unit as usize]
+                                    .attributes,
+                            )
+                        })
+                }
+            };
+            own || self.parent(module).is_some_and(|parent| self.closed(parent))
+        };
+        self.closed.borrow_mut().insert(module, closed);
+        closed
+    }
+
+    /// The unit that declares a file's own unit `module` without a body,
+    /// by its file and its index there; `None` for a crate's root.
+    fn declaring_unit(&self, module: Module) -> Option<(u32, u32)> {
+        let file = &self.files[module.file as usize];
+        let (declaring, unit) = self.graph.declared_by(module.krate, file)?;
+        Some((*self.ids.get(declaring)?, unit))
     }
 
     /// The module `module` is declared in; `None` for a crate's root.
@@ -377,9 +552,7 @@ impl Resolver {
                 Some(Module { unit: parent, ..module })
             }
             None => {
-                let file = &self.files[module.file as usize];
-                let (declaring, unit) = self.graph.declared_by(module.krate, file)?;
-                let declaring = *self.ids.get(declaring)?;
+                let (declaring, unit) = self.declaring_unit(module)?;
                 let parent =
                     self.summaries[declaring as usize].offers().units()[unit as usize].parent;
                 Some(Module { krate: module.krate, file: declaring, unit: parent })
@@ -601,7 +774,8 @@ impl Resolver {
         }
         let imports: Vec<Import> = self.imports_of(module).cloned().collect();
         for import in imports.iter().filter(|i| !i.glob && i.name.as_deref() == Some(name)) {
-            if let Ok(targets) = self.walk(module, &import.path) {
+            let from = if import.loads { Start::Loading } else { Start::Anywhere };
+            if let Ok(targets) = self.walk_from(module, &import.path, from) {
                 for target in targets {
                     found.push(Binding {
                         target,
@@ -674,41 +848,127 @@ impl Resolver {
     // Impl blocks
     // ------------------------------------------------------------------
 
-    /// The impl blocks of each type, found once: each block's type resolved
-    /// from where the block is, in each crate its file is in. While they
-    /// are being found (a block's type is a path through a type, say),
-    /// there are none: a type's members are then those declared inside it,
-    /// for an impl block's type does not name another block's items.
-    fn impl_blocks(&self) -> ImplBlocks {
-        if let Some(found) = self.impls.borrow().as_ref() {
+    /// The impl blocks of declaration `index` of `file`, a type, found once:
+    /// each block whose type's path ends in its name, or in a name imports
+    /// give it (an import whose path ends in one of those, renaming), and
+    /// whose type resolves to it. While some are being found (a block's
+    /// type is a path through a type, say), there are none: a type's
+    /// members are then those declared inside it, for an impl block's type
+    /// does not name another block's items. What was found with a lookup's
+    /// answer so far, in a cycle not yet settled, is not kept.
+    fn impls_of(&self, file: u32, index: u32) -> ImplBlocks {
+        if let Some(found) = self.impls.borrow().get(&(file, index)) {
             return found.clone();
         }
-        if self.finding_impls.replace(true) {
+        if self.finding_impls.get() {
             return ImplBlocks::default();
         }
-        let mut found: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
-        for (file, summary) in self.summaries.iter().enumerate() {
-            let file = file as u32;
-            for (block, i) in summary.offers().impls().iter().zip(0u32..) {
-                let Some(self_type) = &block.self_type else { continue };
-                for (krate, _) in self.graph.places(&self.files[file as usize]) {
-                    let at = Module { krate, file, unit: block.unit };
-                    let Ok(targets) = self.walk(at, self_type) else { continue };
-                    for target in targets {
-                        if let (Some(declaration), None) = (target.declaration, target.module) {
-                            let blocks = found.entry(declaration).or_default();
-                            if !blocks.contains(&(file, i)) {
-                                blocks.push((file, i));
-                            }
+        let names = self.impl_names();
+        let mut called = vec![self.summaries[file as usize].offers().declarations()
+            [index as usize]
+            .name
+            .clone()];
+        let mut at = 0;
+        while at < called.len() {
+            for rename in names.renames.get(&called[at]).into_iter().flatten() {
+                if !called.contains(rename) {
+                    called.push(rename.clone());
+                }
+            }
+            at += 1;
+        }
+        let mut candidates: Vec<(u32, u32)> =
+            called.iter().filter_map(|n| names.by_name.get(n)).flatten().copied().collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        self.finding_impls.set(true);
+        let outer_reached = self.reached.replace(usize::MAX);
+        let mut settled = true;
+        let mut found: Vec<(u32, u32)> = Vec::new();
+        for block in candidates {
+            let (types, kept) = self.impl_type(block);
+            settled &= kept;
+            if types.contains(&(file, index)) {
+                found.push(block);
+            }
+        }
+        self.finding_impls.set(false);
+        self.reached.set(outer_reached.min(self.reached.get()));
+        let found = Rc::new(found);
+        if settled {
+            self.impls.borrow_mut().insert((file, index), found.clone());
+        }
+        found
+    }
+
+    /// The declarations impl block `block`'s type resolves to, from where
+    /// the block is, in each crate its file is in; and whether that is kept
+    /// (it met no lookup's answer so far). Called while impls are being
+    /// found.
+    fn impl_type(&self, block: (u32, u32)) -> (Rc<Vec<(u32, u32)>>, bool) {
+        if let Some(types) = self.impl_types.borrow().get(&block) {
+            return (types.clone(), true);
+        }
+        let (block_file, i) = block;
+        let summary = &self.summaries[block_file as usize];
+        let Some(of) = summary.offers().impls().get(i as usize) else {
+            return (Rc::default(), true);
+        };
+        let outer_reached = self.reached.replace(usize::MAX);
+        let mut types: Vec<(u32, u32)> = Vec::new();
+        if let Some(self_type) = &of.self_type {
+            for (krate, _) in self.graph.places(&self.files[block_file as usize]) {
+                let at = Module { krate, file: block_file, unit: of.unit };
+                let Ok(targets) = self.walk(at, self_type) else { continue };
+                for target in targets {
+                    if let (Some(declaration), None) = (target.declaration, target.module) {
+                        if !types.contains(&declaration) {
+                            types.push(declaration);
                         }
                     }
                 }
             }
         }
-        let found = Rc::new(found);
-        *self.impls.borrow_mut() = Some(found.clone());
-        self.finding_impls.set(false);
-        found
+        let reached = self.reached.get();
+        self.reached.set(outer_reached.min(reached));
+        let types = Rc::new(types);
+        let kept = reached == usize::MAX;
+        if kept {
+            self.impl_types.borrow_mut().insert(block, types.clone());
+        }
+        (types, kept)
+    }
+
+    /// Each impl block by the last name of its type's path, and the names
+    /// imports give what their paths name, by the last name of the path:
+    /// gathered once.
+    fn impl_names(&self) -> Rc<ImplNames> {
+        if let Some(names) = self.impl_names.borrow().as_ref() {
+            return names.clone();
+        }
+        let mut names = ImplNames::default();
+        for (file, summary) in self.summaries.iter().enumerate() {
+            for (i, block) in summary.offers().impls().iter().enumerate() {
+                if let Some(last) = block.self_type.as_ref().and_then(|t| t.segments.last()) {
+                    names.by_name.entry(last.clone()).or_default().push((file as u32, i as u32));
+                }
+            }
+            let imports = summary.offers().reexports().iter().chain(summary.needs().imports());
+            for import in imports.filter(|i| !i.glob) {
+                if let (Some(name), Some(last)) = (&import.name, import.path.segments.last()) {
+                    if name != last {
+                        let renames = names.renames.entry(last.clone()).or_default();
+                        if !renames.contains(name) {
+                            renames.push(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let names = Rc::new(names);
+        *self.impl_names.borrow_mut() = Some(names.clone());
+        names
     }
 }
 

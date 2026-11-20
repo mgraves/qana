@@ -203,6 +203,22 @@ pub struct BindingConfig {
     /// at `type child` names, for the trait at `trait child`. Its members
     /// are the definitions made directly in the members scope it opens.
     pub impls: Vec<(u16, u16, usize, Option<usize>)>,
+    /// (nt, prod, path child) — the node is an attribute (`@attribute(path)`)
+    /// the path at `path child` names, said of what the attributes it
+    /// stands among are said of.
+    pub attributes: Vec<(u16, u16, usize)>,
+    /// (nt, prod, attributes child, item child) — the attributes in the
+    /// subtree of `attributes child` (`@attributes(attrs[, item])`) are
+    /// said of what the `item child` declares where this node stands (a
+    /// unit, an import; not in a scope it opens), or, without one, of the
+    /// unit the node stands in. Inside attributes themselves (Rust's
+    /// `cfg_attr(pred, attrs)`), they are said of what those are said of,
+    /// under a condition.
+    pub attribute_lists: Vec<(u16, u16, usize, Option<usize>)>,
+    /// (nt, prod) — the import the production makes loads the library its
+    /// path names (`@loads`: Rust's `extern crate`). Made at a crate's
+    /// root, its name is one every module of the crate may use.
+    pub loads: Vec<(u16, u16)>,
 }
 
 impl BindingConfig {
@@ -302,6 +318,15 @@ pub fn compose_binding(
     }
     for &(nt, prod, ty, tr) in &guest.impls {
         out.impls.push((nt + nts, prod + prods, ty, tr));
+    }
+    for &(nt, prod, path) in &guest.attributes {
+        out.attributes.push((nt + nts, prod + prods, path));
+    }
+    for &(nt, prod, attrs, item) in &guest.attribute_lists {
+        out.attribute_lists.push((nt + nts, prod + prods, attrs, item));
+    }
+    for &(nt, prod) in &guest.loads {
+        out.loads.push((nt + nts, prod + prods));
     }
     out.unordered = host.unordered;
     out

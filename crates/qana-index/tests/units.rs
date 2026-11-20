@@ -29,7 +29,7 @@ fn private() -> Visibility {
 }
 
 fn unit(name: &str, parent: Option<u32>, inline: bool, visibility: Visibility) -> Unit {
-    Unit { name: name.into(), parent, inline, visibility }
+    Unit { name: name.into(), parent, inline, visibility, attributes: Vec::new() }
 }
 
 /// A declaration as (container, name, unit, visibility, impl block).
@@ -116,6 +116,8 @@ fn imports_are_paths_after_their_groups_prefix_and_a_public_one_is_offered() {
         name: name.map(str::to_string),
         glob,
         visibility,
+        attributes: Vec::new(),
+        loads: false,
     };
     assert_eq!(
         summary.offers().reexports(),
@@ -272,7 +274,11 @@ fn a_unit_graph_places_each_file_in_its_crates_at_its_module_path() {
         root: PathBuf::from(root),
         edition: "2021".into(),
         dependencies: Vec::new(),
+        loadable: Vec::new(),
         source: qana_index::CrateSource::Workspace,
+        preludes: Vec::new(),
+        builtins: Vec::new(),
+        closed_by: Vec::new(),
     };
     let mut graph = UnitGraph::new();
     let lib = graph.add_crate(krate("geo", "lib", "/p/src/lib.rs"));

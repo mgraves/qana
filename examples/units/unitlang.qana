@@ -7,8 +7,12 @@
 // `crate`, `::`) instead of where it stands (`@root`). Visibility says
 // who may see a declaration or an import (`@vis`, `@visibility`). `use`
 // imports one declaration, every name of a unit, or a group sharing a
-// prefix (`@import`, `@import_glob`, `@import_prefix`). An `impl` block's
-// members belong to the type it names (`@impl`).
+// prefix (`@import`, `@import_glob`, `@import_prefix`); `extern crate`
+// loads a crate (`@loads`). An `impl` block's members belong to the type
+// it names (`@impl`). Attributes (`#[a]` on an item, `#![a]` at the top
+// of a file or a module's body) are said of what the item declares, or of
+// the module (`@attribute`, `@attributes`); `when(cond, attrs)` holds its
+// attributes under a condition.
 //
 // It is the binding tier's test language for them, Rust's module system
 // in miniature, before `rust.qana` uses them. Binding within a file is
@@ -30,21 +34,38 @@ token COMMA  = "," @style(punctuation)
 token SEMI   = ";" @style(punctuation)
 token SEP    = "::" @style(punctuation)
 token STAR   = "*" @style(operator)
+token HASH_BANG = "#!" @style(punctuation)
+token HASH   = "#" @style(punctuation)
+token LBRACK = "[" @style(bracket)
+token RBRACK = "]" @style(bracket)
 
-keywords IDENT = pub crate super self in mod fn use as impl for struct "_"
+keywords IDENT = pub crate super self in mod fn use as impl for struct extern when "_"
 
 pair LPAREN RPAREN
 pair LBRACE RBRACE
+pair LBRACK RBRACK
 
 start file
 
-rule file = File: items @scope(unordered)
+rule file = File: a:inner_attrs items @scope(unordered) @attributes(a)
 
 rule items = item*
 
 rule item =
-  | Item:    item_kind
-  | PubItem: v:vis k:item_kind @visibility(v, k)
+  | Item:    a:outer_attrs k:item_kind @attributes(a, k)
+  | PubItem: a:outer_attrs v:vis k:item_kind @visibility(v, k) @attributes(a, k)
+
+rule outer_attrs = outer_attr*
+rule outer_attr = OuterAttr: "#" "[" attr "]"
+rule inner_attrs = inner_attr*
+rule inner_attr = InnerAttr: "#!" "[" attr "]"
+
+// An attribute: the path that names it, or `when(cond, attrs)`.
+rule attr =
+  | Attr: p:path @attribute(p) @ns(attribute, p)
+  | When: w:"when" "(" name "," a:attr_list ")" @attribute(w) @attributes(a)
+
+rule attr_list = attr+ % ","
 
 rule vis =
   | Pub:      "pub" @vis(public)
@@ -55,10 +76,13 @@ rule vis =
 
 rule item_kind =
   | ModDecl: "mod" n:name ";" @def(n, hoisted, open) @unit(n) @outline(n, module)
-  | ModDef:  "mod" n:name open:"{" b:items "}" @def(n, hoisted, open) @unit(n, b) @scope(unordered, barrier) @outline(n, module) @fold(block, open)
+  | ModDef:  "mod" n:name open:"{" a:inner_attrs b:items "}" @def(n, hoisted, open) @unit(n, b) @scope(unordered, barrier) @outline(n, module) @fold(block, open) @attributes(a, n)
   | Fn:      "fn" n:name "(" ")" b:block @def(n, hoisted) @scope @outline(n, function)
   | Struct:  "struct" n:name open:"{" f:fields "}" @def(n, hoisted, open) @scope @outline(n, struct) @fold(block, open)
   | Use:     "use" use_tree ";"
+  | Extern:     "extern" "crate" n:name ";" @def(n, hoisted, open) @root(global, n) @import @loads
+  | ExternAs:   "extern" "crate" n:name "as" r:name ";" @def(r, hoisted, open) @root(global, n) @import @loads
+  | ExternSelf: "extern" "crate" "self" "as" r:name ";" @def(r, hoisted, open) @root(crate) @import @loads
   | Impl:    "impl" t:path open:"{" impl_body "}" @impl(t) @scope @outline(t, class) @fold(block, open)
   | ImplFor: "impl" tr:path "for" t:path open:"{" impl_body "}" @impl(t, tr) @scope @outline(t, class) @fold(block, open)
 

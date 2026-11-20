@@ -32,7 +32,11 @@
 // context reads its own line only, so a weak keyword whose next word is on
 // the next line is a name (rustc reads past the line). `macro_rules` is a
 // name: `macro_rules! name { … }` is the macro invocation that takes a
-// name, which is how rustc parses it too.
+// name, which is how rustc parses it too. `cfg_attr` before `(` is a token
+// of its own, so that an attribute can tell a conditional attribute from
+// any other (`#[cfg_attr(test, derive(Debug))]`); anywhere else it is a
+// name (`fn cfg_attr(…)`), and so is any attribute path but the first name
+// of one.
 //
 // EXPRESSION TIERS. As in rustc, an expression is read under one of three
 // restrictions, and each is a tier of its own here:
@@ -127,6 +131,7 @@ token KW_AUTO    = /auto(?=\s+trait\s)/                                @style(ke
 token KW_DEFAULT = /default(?=\s+(fn|type|const|unsafe|async|impl|extern)\s)/ @style(keyword)
 token KW_RAW     = /raw(?=\s+(const|mut)\s)/                           @style(keyword)
 token KW_SAFE    = /safe(?=\s+(fn|static)\s)/                          @style(keyword)
+token KW_CFG_ATTR = /cfg_attr(?=\s*\()/                               @style(variable)
 
 // A raw identifier is never a keyword: `r#fn` is a name.
 token RAW_IDENT = /r#[\a_][\w_]*/ @style(variable)
@@ -278,13 +283,15 @@ start file
 
 // ---- the file ----
 
-rule file = File: inner_attrs_opt items_opt @scope(unordered)
+// A file's inner attributes are said of its module, and an item's outer
+// ones of what it declares (a module, an import).
+rule file = File: a:inner_attrs_opt items_opt @scope(unordered) @attributes(a)
 
 rule items_opt = item*
 
 rule item =
-  | Item:      outer_attrs_opt item_kind
-  | PubItem:   outer_attrs_opt v:vis k:vis_item_kind @visibility(v, k)
+  | Item:      a:outer_attrs_opt k:item_kind @attributes(a, k)
+  | PubItem:   a:outer_attrs_opt v:vis k:vis_item_kind @visibility(v, k) @attributes(a, k)
   | ImplItem:  outer_attrs_opt impl_def
 
 // An item in a block. A macro invocation there is a statement (`m! { … }`,
@@ -307,10 +314,59 @@ rule inner_attr = InnerAttr: h:HASH_BANG b:BANG o:"[" a:attr c:"]" @style(decora
 
 // What an attribute names (a built-in attribute, a derive, a procedural
 // macro) is defined in no Rust file this grammar reads: its path stands in
-// the `attribute` namespace, where nothing is defined, and escapes.
+// the `attribute` namespace, where nothing is defined, and escapes. A
+// conditional attribute (`cfg_attr(pred, attrs)`) holds its attributes
+// under its predicate, which is not decided here.
 rule attr =
-  | Attr:       p:plain_path attr_input_opt @style(inherit, p) @ns(attribute, p)
-  | UnsafeAttr: "unsafe" "(" p:plain_path attr_input_opt ")" @style(inherit, p) @ns(attribute, p)
+  | Attr:       p:attr_path attr_input_opt @style(inherit, p) @ns(attribute, p) @attribute(p)
+  | UnsafeAttr: "unsafe" "(" p:attr_path attr_input_opt ")" @style(inherit, p) @ns(attribute, p) @attribute(p)
+  | CfgAttr:    k:KW_CFG_ATTR "(" cfg_meta "," a:cfg_attrs_opt ")" @attribute(k) @attributes(a)
+
+rule cfg_attrs_opt =
+  | CfgAttrsNone:
+  | CfgAttrs:      cfg_attr_list
+  | CfgAttrsTrail: cfg_attr_list ","
+
+rule cfg_attr_list = attr+ % ","
+
+// A configuration predicate: an option (`test`), an option and its value
+// (`feature = "std"`), or a name and what it holds (`not(…)`, `all(…)`,
+// `version("1.80")`), as a meta item; or a literal (`true`).
+rule cfg_meta =
+  | CfgPred: cfg_pred
+  | CfgLit:  literal
+
+rule cfg_pred =
+  | CfgOption: name
+  | CfgValue:  name EQ literal
+  | CfgList:   name "(" cfg_metas_opt ")"
+
+rule cfg_metas_opt =
+  | CfgMetasNone:
+  | CfgMetas:      cfg_meta_list
+  | CfgMetasTrail: cfg_meta_list ","
+
+rule cfg_meta_list = cfg_meta+ % ","
+
+// An attribute's path: a plain path whose first name is not the
+// `cfg_attr` that begins a conditional attribute.
+rule attr_path =
+  | AttrPathName: p:attr_name_path @style(inherit, p)
+  | AttrPathKw:   kw_path
+
+rule attr_name_path =
+  | AttrNamePath:      t:attr_name @style(inherit, t) @ref(t, escaping)
+  | AttrNamePathMulti: m:attr_path_multi @style(inherit, m)
+
+rule attr_path_multi =
+  | AttrPathGlobal:   path_sep t:tlast @style(inherit, t) @root(global, t)
+  | AttrPathMoreName: h:attr_name path_sep t:tlast @style(inherit, t) @ref(h, escaping) @qualify(h, t)
+  | AttrPathMore:     m:attr_path_multi path_sep t:tlast @style(inherit, t) @qualify(m, t)
+  | AttrPathAfterKw:  k:kw_path path_sep t:tlast @style(inherit, t) @qualify(k, t)
+
+rule attr_name =
+  | AttrName:    t:IDENT @style(inherit, t)
+  | AttrRawName: t:RAW_IDENT @style(inherit, t)
 
 rule attr_input_opt = attr_input?
 
@@ -347,7 +403,7 @@ rule tt_token =
   | TtRaw3Open: RAW3_OPEN | TtR3Close: R3_CLOSE | TtR3Quote: R3_QUOTE
   | TtR3Text: R3_TEXT
   | TtUnion: KW_UNION | TtAuto: KW_AUTO | TtDefault: KW_DEFAULT | TtRaw: KW_RAW
-  | TtSafe: KW_SAFE
+  | TtSafe: KW_SAFE | TtCfgAttr: KW_CFG_ATTR
   | TtEqEq: EQ_EQ | TtEqArrow: EQ_ARROW | TtEq: EQ | TtBangEq: BANG_EQ
   | TtBang: BANG | TtLtShlEq: LT_SHLEQ | TtLtShl: LT_SHL | TtLtLe: LT_LE
   | TtLt: LT | TtGtShrEq: GT_SHREQ | TtGtShr: GT_SHR | TtGtGe: GT_GE | TtGt: GT
@@ -380,6 +436,7 @@ rule tt_token =
 rule name =
   | Name:    t:IDENT @style(inherit, t)
   | RawName: t:RAW_IDENT @style(inherit, t)
+  | CfgAttrName: t:KW_CFG_ATTR @style(inherit, t)
 
 rule lifetime =
   | Lifetime:    t:LIFETIME @style(inherit, t)
@@ -579,7 +636,7 @@ rule item_kind =
 rule vis_item_kind =
   | Use:          "use" use_tree ";"
   | ModDecl:      mod_head n:name ";" @outline(n, module) @def(n, hoisted, open) @unit(n)
-  | ModDef:       mod_head n:name open:"{" inner_attrs_opt b:items_opt "}" @outline(n, module) @fold(block, open) @def(n, hoisted, open) @unit(n, b) @scope(unordered, barrier)
+  | ModDef:       mod_head n:name open:"{" a:inner_attrs_opt b:items_opt "}" @outline(n, module) @fold(block, open) @def(n, hoisted, open) @unit(n, b) @scope(unordered, barrier) @attributes(a, n)
   | Fn:           fn_def
   | Struct:       struct_def
   | Enum:         "enum" n:name generics_opt where_opt open:"{" v:variants_opt "}" @outline(n, struct) @fold(block, open) @style(type, n) @def(n, hoisted, open) @module(v) @scope
@@ -589,18 +646,16 @@ rule vis_item_kind =
   | TypeAlias:    type_alias
   | Trait:        trait_head n:name generics_opt colon_bounds_opt where_opt open:"{" b:assoc_body "}" @outline(n, class) @fold(block, open) @style(type, n) @def(n, hoisted, open) @module(b) @scope
   | ExternBlock:  extern_head open:"{" inner_attrs_opt foreign_items_opt "}" @fold(block, open)
-  | ExternCrate:  "extern" "crate" n:crate_name ";" @outline(n, module) @def(n, hoisted, open) @root(global, n) @import
-  | ExternCrateAs: "extern" "crate" n:crate_name "as" r:name ";" @outline(n, module) @def(r, hoisted, open) @root(global, n) @import
-  | ExternCrateAsUnderscore: "extern" "crate" n:crate_name "as" "_" ";" @outline(n, module)
+  | ExternCrate:  "extern" "crate" n:name ";" @outline(n, module) @def(n, hoisted, open) @root(global, n) @import @loads
+  | ExternCrateAs: "extern" "crate" n:name "as" r:name ";" @outline(n, module) @def(r, hoisted, open) @root(global, n) @import @loads
+  | ExternSelfAs: "extern" "crate" "self" "as" r:name ";" @def(r, hoisted, open) @root(crate) @import @loads
+  | ExternSelf:   "extern" "crate" "self" ";"
+  | ExternCrateAsUnderscore: "extern" "crate" n:name "as" "_" ";" @outline(n, module)
+  | ExternSelfAsUnderscore: "extern" "crate" "self" "as" "_" ";"
 
 rule mod_head =
   | Mod:       "mod"
   | UnsafeMod: "unsafe" "mod"
-
-// The crate `extern crate` names: `self` names this one.
-rule crate_name =
-  | CrateName: n:name @style(inherit, n)
-  | CrateSelf: "self"
 
 rule vis_opt = vis?
 

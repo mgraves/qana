@@ -1162,6 +1162,9 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             let mut pending_glob: Option<usize> = None;
             let mut pending_prefix: Option<usize> = None;
             let mut pending_visibility: Option<usize> = None;
+            let mut pending_attribute: Option<usize> = None;
+            let mut pending_attributes: Option<usize> = None;
+            let mut pending_loads: Option<(u32, u32)> = None;
             let mut seen_root = false;
             let mut seen_vis = false;
             let mut seen_impl = false;
@@ -1525,6 +1528,34 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             error(d, a.name_span, "duplicate @visibility".into());
                         }
                     }
+                    "attribute" => {
+                        // `@attribute(path)`: the node is an attribute,
+                        // the one the path names.
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@attribute takes the label of the path that names the attribute".into());
+                        } else if pending_attribute.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @attribute".into());
+                        }
+                    }
+                    "attributes" => {
+                        // `@attributes(attrs[, item])`: the attributes in
+                        // `attrs` are said of what `item` declares, or of
+                        // the unit the node stands in.
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@attributes takes the label of the attributes and an optional label of what they are said of".into());
+                        } else if pending_attributes.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @attributes".into());
+                        }
+                    }
+                    "loads" => {
+                        // `@loads`: the import loads the library its path
+                        // names (Rust's `extern crate`).
+                        if !a.args.is_empty() {
+                            error(d, a.name_span, "@loads takes no arguments".into());
+                        } else if pending_loads.replace(a.name_span).is_some() {
+                            error(d, a.name_span, "duplicate @loads".into());
+                        }
+                    }
                     "import_glob" => {
                         // `@import_glob([path])`: every name of a unit.
                         if a.args.len() > 1 {
@@ -1729,6 +1760,19 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                     },
                 }
             }
+            if let Some(span) = pending_loads {
+                // What loads is an import of one declaration, which this
+                // alternative makes.
+                if binding.imports.iter().any(|e| e.0 == nt && e.1 == prod && !e.3) {
+                    binding.loads.push((nt, prod));
+                } else {
+                    error(
+                        d,
+                        span,
+                        "@loads says what an import loads: give the alternative @import".into(),
+                    );
+                }
+            }
             if let Some(ai) = pending_prefix {
                 let a = &alt.attrs[ai];
                 let (path, trees) = match a.args.len() {
@@ -1752,6 +1796,38 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                 let trees = rule_pos_of(d, &positions, &sg, prod, trees);
                 if let (Some(path), Some(trees)) = (path, trees) {
                     binding.prefixes.push((nt, prod, path, trees));
+                }
+            }
+            if let Some(ai) = pending_attribute {
+                let a = &alt.attrs[ai];
+                match positions.get(a.args[0].0.as_str()) {
+                    Some(&k) => binding.attributes.push((nt, prod, k)),
+                    None => error(
+                        d,
+                        a.args[0].1,
+                        format!("no symbol labeled `{}` in this alternative", a.args[0].0),
+                    ),
+                }
+            }
+            if let Some(ai) = pending_attributes {
+                let a = &alt.attrs[ai];
+                let attrs = rule_pos_of(d, &positions, &sg, prod, &a.args[0]);
+                let item = match a.args.get(1) {
+                    None => Some(None),
+                    Some(arg) => match positions.get(arg.0.as_str()) {
+                        Some(&k) => Some(Some(k)),
+                        None => {
+                            error(
+                                d,
+                                arg.1,
+                                format!("no symbol labeled `{}` in this alternative", arg.0),
+                            );
+                            None
+                        }
+                    },
+                };
+                if let (Some(attrs), Some(item)) = (attrs, item) {
+                    binding.attribute_lists.push((nt, prod, attrs, item));
                 }
             }
             if let Some(ai) = pending_visibility {

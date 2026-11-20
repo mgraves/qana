@@ -26,11 +26,32 @@ pub struct CrateInfo {
     pub root: PathBuf,
     /// The edition of its language it is written in (`2021`).
     pub edition: String,
-    /// The project's crates it may name, each by the name it names it
-    /// by: an index into [`UnitGraph::crates`].
+    /// The crates it names without loading them (Rust's extern prelude,
+    /// before its `extern crate`s), each by the name it names it by: an
+    /// index into [`UnitGraph::crates`]. A path may begin with one, from
+    /// anywhere in the crate, and `::` names one.
     pub dependencies: Vec<(String, u32)>,
+    /// The crates it may load by name, which it names only once it has
+    /// (Rust's `extern crate alloc;`): an index into
+    /// [`UnitGraph::crates`]. An import that loads one (`@loads`) made at
+    /// the crate's root adds its name to those the crate names.
+    pub loadable: Vec<(String, u32)>,
     /// Where it comes from: the project, or a library.
     pub source: CrateSource,
+    /// The modules whose names every module of the crate may use after
+    /// its own and the crates it names, each by a path from the crate's
+    /// root (Rust's standard prelude, `::std::prelude::rust_2021`): a glob
+    /// of each that nothing writes.
+    pub preludes: Vec<crate::Path>,
+    /// The names the language provides, which no source declares (Rust's
+    /// primitive types, `u8`): what a path's first name is when it is
+    /// nothing else.
+    pub builtins: Vec<String>,
+    /// The attributes that close a module, and every module inside it, to
+    /// the crates its crate names and to the preludes (Rust's
+    /// `no_implicit_prelude`): unconditional ones, said of the module.
+    /// Paths from a root (`::std`) are not closed to them.
+    pub closed_by: Vec<crate::Path>,
 }
 
 /// Where a crate comes from.

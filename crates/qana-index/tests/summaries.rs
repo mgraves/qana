@@ -3,8 +3,11 @@
 
 use std::sync::OnceLock;
 
+use qana_grammar::green::ERROR_NT;
+use qana_grammar::{GreenChild, GreenNode};
 use qana_index::{
-    summarize, summary_key, EscapingName, Impl, Import, Path, Root, Summary, Unit, Visibility,
+    summarize, summary_key, Attribute, EscapingName, Impl, Import, Path, Root, Summary, Unit,
+    Visibility,
 };
 use qana_lang::EmbeddedLang;
 
@@ -294,6 +297,7 @@ fn a_rust_files_summary_holds_its_units_imports_reexports_visibilities_and_impls
         parent,
         inline,
         visibility,
+        attributes: Vec::new(),
     };
     assert_eq!(
         offers.units(),
@@ -330,6 +334,8 @@ fn a_rust_files_summary_holds_its_units_imports_reexports_visibilities_and_impls
         name: name.map(str::to_string),
         glob,
         visibility: private(),
+        attributes: Vec::new(),
+        loads: false,
     };
     assert_eq!(
         offers.reexports(),
@@ -343,10 +349,13 @@ fn a_rust_files_summary_holds_its_units_imports_reexports_visibilities_and_impls
             import(path(Some(Root::Crate), &["shapes"]), Some("shapes"), false),
             import(path(Some(Root::Crate), &["shapes", "Circle"]), Some("Round"), false),
             import(path(Some(Root::Crate), &["shapes", "area"]), None, true),
-            import(path(Some(Root::Global), &["alloc"]), Some("alloc"), false),
+            Import {
+                loads: true,
+                ..import(path(Some(Root::Global), &["alloc"]), Some("alloc"), false)
+            },
             import(path(Some(Root::Global), &["serde", "Serialize"]), None, false),
         ],
-        "`extern crate` imports a crate"
+        "`extern crate` imports a crate, and loads it"
     );
 
     let placed = |name: &str| {
@@ -396,4 +405,130 @@ fn a_units_item_is_its_declaration_with_its_attributes_and_visibility() {
     assert_eq!(summary.offers().units()[1].name, "tests");
     assert_eq!(item(1), "#[cfg(test)]\n#[path = \"other.rs\"]\npub(crate) mod tests;");
     assert_eq!(item(0), "mod plain;");
+}
+
+/// Whether `text` parses as Rust without an error or a missing token.
+fn parses_cleanly(text: &str) -> bool {
+    fn clean(node: &GreenNode) -> bool {
+        node.nt != ERROR_NT
+            && node.children.iter().all(|c| match c {
+                GreenChild::Token(t) => !t.is_missing(),
+                GreenChild::Node(n) => clean(n),
+            })
+    }
+    let session = rust().session(text);
+    session.tree().is_some_and(|tree| clean(tree))
+}
+
+fn attribute(segments: &[&str], conditional: bool) -> Attribute {
+    Attribute { path: path(None, segments), conditional }
+}
+
+const ATTRIBUTES: &str = "//! A crate.
+#![no_std]
+#![cfg_attr(not(feature = \"std\"), no_core, allow(dead_code),)]
+#![cfg_attr(docsrs, cfg_attr(all(), feature(doc_cfg)))]
+#![doc = \"text\"]
+
+#[no_implicit_prelude]
+pub mod hygiene {
+    #![allow(unused)]
+    mod inner {}
+}
+
+#[cfg_attr(test, no_implicit_prelude)]
+mod declared;
+
+#[prelude_import]
+#[allow(unused)]
+use prelude::rust_2024::*;
+
+#[macro_use]
+extern crate alloc;
+extern crate std as realstd;
+extern crate self as core;
+pub use ::core as __core;
+
+#[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
+struct S {
+    #[cfg_attr(feature = \"serde\", serde(skip))]
+    a: u8,
+}
+
+impl S {
+    #![cfg_attr(test, allow(unused))]
+    fn cfg_attr(&self, x: u8) -> u8 {
+        x
+    }
+}
+
+fn cfg_attr(x: u8) -> u8 {
+    S { a: x }.cfg_attr(cfg_attr(x))
+}
+";
+
+#[test]
+fn a_files_inner_attributes_are_its_own_units_and_a_conditional_ones_hold_under_it() {
+    assert!(parses_cleanly(ATTRIBUTES), "`cfg_attr` names a function, a method and a call too");
+    let summary = summarize(rust(), ATTRIBUTES);
+    assert_eq!(
+        summary.offers().attributes(),
+        [
+            attribute(&["no_std"], false),
+            attribute(&["cfg_attr"], false),
+            attribute(&["no_core"], true),
+            attribute(&["allow"], true),
+            attribute(&["cfg_attr"], false),
+            attribute(&["cfg_attr"], true),
+            attribute(&["feature"], true),
+            attribute(&["doc"], false),
+        ],
+        "a struct's, a field's and an impl block's attributes are not the file's"
+    );
+}
+
+#[test]
+fn a_modules_attributes_are_its_items_then_its_bodys() {
+    let summary = summarize(rust(), ATTRIBUTES);
+    let units = summary.offers().units();
+    let of = |name: &str| units.iter().find(|u| u.name == name).map(|u| u.attributes.clone());
+    assert_eq!(
+        of("hygiene"),
+        Some(vec![attribute(&["no_implicit_prelude"], false), attribute(&["allow"], false)])
+    );
+    assert_eq!(of("inner"), Some(Vec::new()), "what a module says is not its children's");
+    assert_eq!(
+        of("declared"),
+        Some(vec![attribute(&["cfg_attr"], false), attribute(&["no_implicit_prelude"], true)])
+    );
+}
+
+#[test]
+fn an_imports_attributes_are_its_items_and_extern_crate_loads() {
+    let summary = summarize(rust(), ATTRIBUTES);
+    let imports = summary.needs().imports();
+    let glob = imports.iter().find(|i| i.glob).expect("the prelude's glob");
+    assert_eq!(glob.path, path(None, &["prelude", "rust_2024"]));
+    assert_eq!(
+        glob.attributes,
+        [attribute(&["prelude_import"], false), attribute(&["allow"], false)]
+    );
+    let named = |name: &str| imports.iter().find(|i| i.name.as_deref() == Some(name));
+    let alloc = named("alloc").expect("extern crate alloc");
+    assert_eq!(
+        (&alloc.path, alloc.loads, &alloc.attributes),
+        (&path(Some(Root::Global), &["alloc"]), true, &vec![attribute(&["macro_use"], false)])
+    );
+    let realstd = named("realstd").expect("extern crate std as realstd");
+    assert_eq!((&realstd.path, realstd.loads), (&path(Some(Root::Global), &["std"]), true));
+    let core = named("core").expect("extern crate self as core");
+    assert_eq!((&core.path, core.loads), (&path(Some(Root::Crate), &[]), true));
+    let reexport =
+        summary.offers().reexports().iter().find(|i| i.name.as_deref() == Some("__core"));
+    assert_eq!(
+        reexport.map(|i| (&i.path, i.loads)),
+        Some((&path(Some(Root::Global), &["core"]), false)),
+        "a `use` loads nothing"
+    );
 }

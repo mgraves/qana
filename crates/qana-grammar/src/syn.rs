@@ -9,26 +9,27 @@
 //! runtime nondeterminism).
 
 use crate::model::{BracketKind, TokenId};
+use serde::{Deserialize, Serialize};
 
 /// Terminal id used for end-of-input in lookaheads and ACTION tables.
 pub const EOF: TokenId = u16::MAX;
 
 pub type NtId = u16;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub enum Sym {
     T(TokenId),
     N(NtId),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Assoc {
     Left,
     Right,
     NonAssoc,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prod {
     pub lhs: NtId,
     pub rhs: Vec<Sym>,
@@ -46,7 +47,7 @@ pub struct Prod {
     pub keep_node: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SynGrammar {
     pub name: String,
     /// Terminal display names, indexed by TokenId (from the lex vocab).

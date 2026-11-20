@@ -12,9 +12,10 @@
 
 use crate::model::{BracketKind, TokenId};
 use crate::syn::{Assoc, Sym, SynGrammar, EOF};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LrAct {
     Shift(u16),
     Reduce(u16),
@@ -23,7 +24,7 @@ pub enum LrAct {
     Error,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Conflict {
     pub state: u16,
     pub lookahead: TokenId,
@@ -38,10 +39,35 @@ pub struct Conflict {
     pub prods: Vec<u16>,
 }
 
-#[derive(Debug)]
+/// Read back as written, its `kind` [`intern`](crate::serial::intern)ed:
+/// derived, `Deserialize` would take the `&'static str` to borrow from
+/// the input, which a grammar loaded from a buffer it does not keep
+/// cannot do.
+impl<'de> Deserialize<'de> for Conflict {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// [`Conflict`] with its `kind` owned.
+        #[derive(Deserialize)]
+        #[serde(rename = "Conflict")]
+        struct Owned {
+            state: u16,
+            lookahead: TokenId,
+            kind: String,
+            items: Vec<String>,
+            example: String,
+            prods: Vec<u16>,
+        }
+        let Owned { state, lookahead, kind, items, example, prods } =
+            Owned::deserialize(deserializer)?;
+        Ok(Conflict { state, lookahead, kind: crate::serial::intern(&kind), items, example, prods })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LrTables {
     /// action[state][terminal] — terminals include EOF.
+    #[serde(with = "crate::serial::sorted_maps")]
     pub action: Vec<HashMap<TokenId, LrAct>>,
+    #[serde(with = "crate::serial::sorted_maps")]
     pub goto_: Vec<HashMap<u16, u16>>,
     pub n_states: usize,
     pub conflicts: Vec<Conflict>,
@@ -57,6 +83,7 @@ pub struct LrTables {
     /// `L → L α` (nt not recurring in α, non-fragile) and one seed prod,
     /// neither keeping its node ([`crate::syn::Prod::keep_node`]).
     /// Their trees use balanced LIST/RUN nodes instead of cons spines.
+    #[serde(with = "crate::serial::sorted_map")]
     pub lists: std::collections::HashMap<u16, ListShape>,
     /// States that take every token the grammar uses but the closers of
     /// its bracket pairs: a token tree's. That a token is accepted there
@@ -76,13 +103,13 @@ pub struct LrTables {
 
 /// One symbol of a list's repetition unit, for splice-alignment checks:
 /// either the element nonterminal or a specific separator terminal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnitSym {
     Elem,
     Tok(TokenId),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ListShape {
     pub cons: u16,
     pub seed: u16,

@@ -32,11 +32,12 @@ use qana_grammar::green::{GreenChild, GreenNode, LIST_PROD, RUN_PROD};
 use qana_grammar::model::LexGrammar;
 use qana_grammar::pat::Pat;
 use qana_grammar::syn::{Assoc, Sym, SynGrammar};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// The declared macro tier. Empty vectors = no tier (open world).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MacroConfig {
     /// (nt, prod, params child index or None, body child index) —
     /// `@macro([params,] body)` on a `@def`-bearing production.
@@ -67,7 +68,7 @@ impl MacroConfig {
 /// What a reflection macro can ask about each member. Every facet is
 /// read from the type tier's declarations or computed from them —
 /// none of it is engine-invented metadata.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Facet {
     /// The member's declared name (points at the field).
     Name,

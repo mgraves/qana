@@ -15,6 +15,7 @@ use qana_grammar::syn::{Assoc, Sym, SynGrammar};
 use qana_grammar::{build_lr, CompiledLexer, GreenChild, GreenNode, GreenToken, LrTables, Vocab};
 use qana_sem::{BindingConfig, RefKind, TyTerm, TypeConfig, TypeRule};
 use qana_services::{FoldConfig, OutlineConfig, OutlineEntry, Styles, LEGEND};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Outline kinds a grammar may declare (closed set, `&'static` for the
@@ -24,7 +25,7 @@ use std::collections::HashMap;
 pub const OUTLINE_KINDS: &[&str] =
     &["variable", "constant", "function", "struct", "module", "class", "field"];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QanaDiag {
     pub span: (u32, u32),
     pub msg: String,

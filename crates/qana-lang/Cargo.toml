@@ -21,3 +21,12 @@ qana-engine.workspace = true
 qana-services.workspace = true
 qana-sem.workspace = true
 linework.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# The encoding a host keeps grammar artifacts in; the tests round-trip
+# them through it. Without its default `heapless-cas` feature: nothing
+# here uses heapless, and through it the graph would reach
+# atomic-polyfill, which is unmaintained (RUSTSEC-2023-0089, refused by
+# deny.toml).
+postcard = { version = "1", default-features = false, features = ["alloc"] }

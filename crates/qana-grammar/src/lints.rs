@@ -14,6 +14,7 @@ use crate::dfa::{ModeDfa, DEAD};
 use crate::lexer::MAX_STACK;
 use crate::model::{Action, LexGrammar};
 use crate::pat::{representative, NCOLS};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
 pub enum LintError {
@@ -57,7 +58,7 @@ impl std::fmt::Display for LintError {
 }
 
 /// Structural facts the lints certify, reported back to the author.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnvelopeReport {
     /// Static bound on the mode stack depth.
     pub stack_bound: u8,

@@ -100,6 +100,6 @@ pub mod prelude {
     #[cfg(feature = "lang")]
     pub use qana_lang::{
         compile::{certify, compile, LangDef, QanaDiag},
-        compile_source, EmbeddedLang, QanaOutcome, QanaToolchain,
+        compile_source, EmbeddedLang, GrammarArtifact, QanaOutcome, QanaToolchain,
     };
 }

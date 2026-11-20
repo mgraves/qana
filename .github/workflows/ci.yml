@@ -85,9 +85,9 @@ jobs:
         run: cargo run --release --locked --manifest-path tools/rust-fit/Cargo.toml -- compare crates tools examples
 
   # Licence / advisory / source policy over the dependency graph. qana's
-  # graph is deliberately tiny — the toolchain crates have zero external
-  # dependencies — and this is what keeps it that way rather than merely
-  # hoping. Config in deny.toml.
+  # graph is deliberately tiny — the toolchain crates have one external
+  # dependency, serde — and this is what keeps it that way rather than
+  # merely hoping. Config in deny.toml.
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

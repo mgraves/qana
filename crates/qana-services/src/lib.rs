@@ -19,6 +19,7 @@ use qana_grammar::incremental::{Repair, RepairKind};
 use qana_grammar::{
     CompiledLexer, GreenChild, GreenNode, GreenToken, LrAct, LrTables, SynGrammar, TokenId, EOF,
 };
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -97,9 +98,11 @@ const ROUTE_INHERIT: u8 = u8::MAX - 1;
 /// A language's styles: the class each kind of token is painted
 /// (`@style` on a token), the classes its syntax gives (`@style` on an
 /// alternative), and the legend both index into.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Styles {
+    #[serde(with = "qana_grammar::serial::static_strs")]
     pub legend: Vec<&'static str>,
+    #[serde(with = "qana_grammar::serial::sorted_map")]
     map: HashMap<TokenId, u32>,
     /// By production, by symbol position: the class an alternative gives
     /// the symbol (an index into the legend), [`ROUTE_INHERIT`] for the
@@ -109,6 +112,7 @@ pub struct Styles {
     /// By class: its LSP token type (an index into `lsp_types`) and its
     /// modifier bits.
     lsp: Vec<(u32, u32)>,
+    #[serde(with = "qana_grammar::serial::static_strs")]
     lsp_types: Vec<&'static str>,
 }
 
@@ -425,7 +429,7 @@ impl SemanticTokens {
 
 /// What folds in a language's documents: the constructs its grammar
 /// declares foldable (`@fold`) and its comments.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FoldConfig {
     /// By production index: the fold its constructs make, if any.
     pub by_prod: Vec<Option<FoldEntry>>,
@@ -445,7 +449,7 @@ pub struct FoldConfig {
 }
 
 /// The fold a foldable construct makes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FoldEntry {
     pub category: u8,
     /// The symbol position the fold begins at (a construct's body, its
@@ -910,7 +914,7 @@ pub struct Symbol {
 /// borrows its answer. A child with no definition in it names its
 /// construct by what it says: a Rust function's `name`, an impl's type
 /// (`Point<T>`).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OutlineConfig {
     pub entries: Vec<OutlineEntry>,
     /// The binding tier's def sites, (nt, prod, symbol-child of the
@@ -919,12 +923,32 @@ pub struct OutlineConfig {
     pub defs: Vec<(u16, u16, usize)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct OutlineEntry {
     pub nt: u16,
     pub prod: u16,
     pub name_child: usize,
     pub kind: &'static str,
+}
+
+/// Read back as written, its `kind`
+/// [`intern`](qana_grammar::serial::intern)ed: derived, `Deserialize`
+/// would take the `&'static str` to borrow from the input, which a
+/// grammar loaded from a buffer it does not keep cannot do.
+impl<'de> Deserialize<'de> for OutlineEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// [`OutlineEntry`] with its `kind` owned.
+        #[derive(Deserialize)]
+        #[serde(rename = "OutlineEntry")]
+        struct Owned {
+            nt: u16,
+            prod: u16,
+            name_child: usize,
+            kind: String,
+        }
+        let Owned { nt, prod, name_child, kind } = Owned::deserialize(deserializer)?;
+        Ok(OutlineEntry { nt, prod, name_child, kind: qana_grammar::serial::intern(&kind) })
+    }
 }
 
 /// The first `@def` name inside `n`'s subtree, pre-order: the

@@ -45,7 +45,8 @@ The file extensions that are this language's, without the dot:
 language for a file by them, so it needs no table of its own. They are
 read when the grammar compiles (`compile_source(..).def.extensions`),
 which does not certify it, and a certified `EmbeddedLang` carries them
-with its `name`. Words and quoted strings are both accepted, as in
+with its `name`, as does the `GrammarArtifact` it is loaded from
+(`extensions()`, `name()`). Words and quoted strings are both accepted, as in
 `keywords`; quote one that starts with a digit or is a `.qana` keyword.
 An extension written with its dot (`".rs"`), an empty one, one with a
 dot, slash or space in it, one listed twice (case aside) and a second

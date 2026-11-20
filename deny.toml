@@ -7,9 +7,11 @@
 # Four checks: advisories, licenses, bans, sources.
 #
 # qana's dependency graph is deliberately tiny — the toolchain crates carry
-# ZERO external dependencies, and `serde_json` in qana-lsp is the only one in
-# the whole workspace. That is a property worth keeping, and this file is
-# where it is enforced rather than merely hoped for.
+# ONE external dependency, `serde` (a certified grammar is an artifact that
+# serializes), and `serde_json` in qana-lsp is the only other in the whole
+# workspace; qana-lang's tests decode artifacts with `postcard`, a
+# dev-dependency. That is a property worth keeping, and this file is where
+# it is enforced rather than merely hoped for.
 
 [graph]
 all-features = true

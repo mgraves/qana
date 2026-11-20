@@ -23,6 +23,7 @@ pub mod lr;
 pub mod model;
 pub mod parse;
 pub mod pat;
+pub mod serial;
 pub mod syn;
 pub mod typed;
 

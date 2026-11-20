@@ -7,6 +7,7 @@ use crate::dfa::{build_mode_dfa, CompileError, ModeDfa, DEAD, NO_ROW};
 use crate::lints::{check_envelope, EnvelopeReport, LintError};
 use crate::model::{Action, LexGrammar, TokenId, Vocab};
 use crate::pat::classify;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Engine capacity for the mode stack. Grammar bounds are L2-checked
@@ -86,7 +87,7 @@ impl std::fmt::Display for BuildError {
 }
 
 /// A grammar compiled to runnable tables + its envelope certification.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CompiledLexer {
     pub vocab: Vocab,
     pub report: EnvelopeReport,
@@ -96,6 +97,7 @@ pub struct CompiledLexer {
     specialize: Vec<bool>,
     continues: Vec<bool>,
     eol_pop: Vec<bool>,
+    #[serde(with = "crate::serial::sorted_map")]
     keywords: HashMap<(TokenId, String), TokenId>,
     stack_bound: u8,
     unknown: TokenId,

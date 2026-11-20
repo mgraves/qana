@@ -442,6 +442,32 @@ the tree. `lang.styles`, `lang.outline`, `lang.folds` and `lang.binding`
 drive highlighting, outline, folding and navigation exactly as they do
 over LSP.
 
+Certifying a large grammar takes time: about two seconds for Rust's in a
+release build, many more in a debug one. `from_qana_source` is two steps,
+and a host can take them apart. `GrammarArtifact::certify` compiles and
+certifies the grammar into an owned value that serializes with serde, so
+it can run in a worker thread, or in an earlier run, and cross as bytes;
+`EmbeddedLang::from_artifact` loads it (Rust's, 400 KB with `postcard`,
+decodes and loads in about a millisecond), and the language it serves is
+the one certifying made:
+
+```rust
+use qana_lang::{EmbeddedLang, GrammarArtifact};
+
+// Where certifying is cheap to wait for (a worker, a build step):
+let artifact = GrammarArtifact::certify(include_str!("mylang.qana"))?;
+let bytes = postcard::to_allocvec(&artifact)?;
+
+// Where the language is used:
+let artifact: GrammarArtifact = postcard::from_bytes(&bytes)?;
+let lang = EmbeddedLang::from_artifact(artifact);
+```
+
+The bytes are the encoding of this version of qana's types, and say
+nothing of which version that was: a cache of artifacts keys each one by
+qana's version as well as by its grammar's text. `artifact.name()` and
+`artifact.extensions()` say which language it is without loading it.
+
 A worked integration lives outside this repo: `synkro_qana` in the
 Synkro workspace implements that GUI framework's `TokenProvider` and
 `CreaseProvider` over `EmbeddedLang`, giving its `CodeArea` widget

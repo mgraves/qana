@@ -22,6 +22,7 @@ use crate::key::NodeKey;
 use crate::SemDb;
 use qana_grammar::green::ERROR_NT;
 use qana_grammar::{GreenChild, GreenNode};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Index into [`TypeConfig::atoms`].
@@ -29,14 +30,14 @@ pub type TypeId = u16;
 
 /// One term of a signature: a grammar-declared atom, or a variable
 /// local to that one annotation (unified per node instance).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TyTerm {
     Atom(TypeId),
     Var(u8),
 }
 
 /// How one production types, declared in the grammar:
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypeRule {
     /// `@type(Atom)` — nodes of this production have this atomic type.
     Const(TypeId),
@@ -99,7 +100,7 @@ pub enum TypeRule {
 
 /// The whole declared tier: a vocabulary and per-production rules.
 /// Empty config ⇒ empty tier ⇒ every query answers "nothing".
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeConfig {
     /// The grammar's invented type vocabulary, in declaration order.
     pub atoms: Vec<String>,

@@ -11,4 +11,8 @@ keywords = ["parser", "grammar", "lr", "dfa", "lexer"]
 categories = ["parsing", "development-tools"]
 
 [dependencies]
-# Zero dependencies, deliberately.
+# One dependency, deliberately: serde. A certified grammar is an artifact
+# — certified once (in a worker, in an earlier run) and loaded from bytes
+# wherever it is used — and serde is how its values say what they are
+# made of, in whatever encoding the host chooses. Nothing else.
+serde = { version = "1", features = ["derive"] }

@@ -20,6 +20,7 @@
 
 use crate::model::{LexGrammar, TokenId};
 use crate::pat::{ClassSet, ContextError, Pat, NCOLS};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -338,7 +339,7 @@ pub const NO_ROW: u32 = u32::MAX;
 /// One way a state may accept: `token`, if `context` (an index into
 /// [`ModeDfa::contexts`]) holds on the rest of the line. `None` is
 /// unconditional.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConditionalAccept {
     pub token: TokenId,
     pub context: Option<u16>,
@@ -346,11 +347,12 @@ pub struct ConditionalAccept {
 
 /// A trailing context, compiled: does the rest of the line begin with a
 /// match of its pattern?
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextDfa {
     /// A negated context holds when the pattern does NOT match.
     pub negated: bool,
     /// trans[state][col] → state or DEAD; state 0 is the start.
+    #[serde(with = "crate::serial::rows")]
     trans: Vec<[u16; NCOLS]>,
     accepting: Vec<bool>,
 }
@@ -379,10 +381,11 @@ impl ContextDfa {
 }
 
 /// DFA for one lexer mode.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModeDfa {
     pub start: u16,
     /// trans[state][col] → state or DEAD
+    #[serde(with = "crate::serial::rows")]
     pub trans: Vec<[u16; NCOLS]>,
     /// accept[state] → the token this state accepts whatever follows, if
     /// that token outranks every conditional one here. `None` for a state

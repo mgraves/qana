@@ -41,6 +41,7 @@
 use crate::key::NodeKey;
 use qana_grammar::green::{ERROR_NT, LIST_PROD, RUN_PROD};
 use qana_grammar::{GreenChild, GreenNode, SynGrammar};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -53,7 +54,7 @@ pub use types::{compose_types, TypeConfig, TypeDiag, TypeId, TypeReport, TypeRul
 // Binding configuration (the @def/@ref/@scope annotations, as data)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefKind {
     /// A variable read — unresolved ones are diagnosed.
     Var,
@@ -81,7 +82,7 @@ pub enum RefKind {
     Escaping,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BindingConfig {
     /// (nt, prod, symbol-child index of the name token).
     pub defs: Vec<(u16, u16, usize)>,

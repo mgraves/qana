@@ -6,12 +6,13 @@
 //! other macros manipulate exactly this type.
 
 use crate::pat::Pat;
+use serde::{Deserialize, Serialize};
 
 /// Shared token identity across the toolchain: index into the grammar's
 /// token-def list; synthetic ids (Unknown) come after.
 pub type TokenId = u16;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum BracketKind {
     Paren,
     Bracket,
@@ -19,7 +20,7 @@ pub enum BracketKind {
 }
 
 /// Lexer command attached to a token.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Action {
     None,
     /// Push the given mode. Saturates silently at the grammar's stack
@@ -164,7 +165,7 @@ impl LexGrammar {
 
 /// Downstream-facing token metadata (what the incremental engine and the
 /// services layer consult). Derived from a grammar; independent of it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Vocab {
     pub names: Vec<String>,
     pub trivia: Vec<bool>,

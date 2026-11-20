@@ -20,6 +20,7 @@ use compile::{compile, QanaDiag};
 use qana_engine::IncSession;
 use qana_grammar::incremental::Repair;
 use qana_grammar::{build_lr, CompiledLexer, GreenNode, LrTables, SynGrammar};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// The bootstrap toolchain for `.qana` files themselves: certified lexer,
@@ -59,6 +60,80 @@ pub struct QanaOutcome {
     pub diags: Vec<QanaDiag>,
 }
 
+/// A certified grammar as one owned value: everything an [`EmbeddedLang`]
+/// serves its language from, before any of it is made `'static`.
+///
+/// It serializes (serde), and that is what it is for. Certifying a large
+/// grammar takes seconds; with the artifact it can happen where that
+/// costs nothing — in a worker, in an earlier run — and the result cross
+/// to where the language is used as bytes, to be loaded there with
+/// [`EmbeddedLang::from_artifact`]. A loaded artifact serves its language
+/// exactly as the freshly certified one did.
+///
+/// The bytes are these types' own encoding in this version of qana, and
+/// nothing in them says which version that was: a cache of artifacts
+/// keys each by qana's version as well as by its grammar's text.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GrammarArtifact {
+    // Each is the `EmbeddedLang` field of the same name, owned.
+    name: String,
+    extensions: Vec<String>,
+    lexer: CompiledLexer,
+    sg: SynGrammar,
+    tables: LrTables,
+    styles: qana_services::Styles,
+    outline: qana_services::OutlineConfig,
+    folds: qana_services::FoldConfig,
+    binding: qana_sem::BindingConfig,
+    types: qana_sem::TypeConfig,
+    macros: qana_sem::macros::MacroConfig,
+}
+
+impl GrammarArtifact {
+    /// Compile + certify a `.qana` grammar source. Refusals come back as
+    /// span-carrying diagnostics against the grammar text.
+    pub fn certify(src: &str) -> Result<GrammarArtifact, Vec<QanaDiag>> {
+        let tc = QanaToolchain::new();
+        let out = compile_source(&tc, src);
+        let mut diags = out.diags.clone();
+        if !out.repairs.is_empty() {
+            diags.push(QanaDiag {
+                span: (0, 1),
+                msg: format!("{} parse repair(s) in the grammar source", out.repairs.len()),
+                severity: 1,
+            });
+        }
+        if !diags.is_empty() {
+            return Err(diags);
+        }
+        let (lexer, tables) = compile::certify(&out.def)?;
+        Ok(GrammarArtifact {
+            name: out.def.lex.name.clone(),
+            extensions: out.def.extensions.clone(),
+            lexer,
+            sg: out.def.sg,
+            tables,
+            styles: out.def.styles,
+            outline: out.def.outline,
+            folds: out.def.folds,
+            binding: out.def.binding,
+            types: out.def.types,
+            macros: out.def.macros,
+        })
+    }
+
+    /// The language's name, as its `language` declaration gives it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The file extensions it declares as its own (`extensions "rs"`),
+    /// without the dot. Empty when it declares none.
+    pub fn extensions(&self) -> &[String] {
+        &self.extensions
+    }
+}
+
 /// An embeddable language pipeline for GUI/editor hosts: everything a
 /// text widget needs to serve a `.qana`-defined language IN PROCESS — no
 /// LSP hop. Owns its certified pipeline with `'static` lifetimes (one
@@ -89,34 +164,44 @@ pub struct EmbeddedLang {
 impl EmbeddedLang {
     /// Compile + certify a `.qana` grammar source. Refusals come back as
     /// span-carrying diagnostics against the grammar text.
+    ///
+    /// It is [`GrammarArtifact::certify`] and then
+    /// [`EmbeddedLang::from_artifact`]: a language certified here and one
+    /// loaded from an artifact are made the same way.
     pub fn from_qana_source(src: &str) -> Result<Self, Vec<QanaDiag>> {
-        let tc = QanaToolchain::new();
-        let out = compile_source(&tc, src);
-        let mut diags = out.diags.clone();
-        if !out.repairs.is_empty() {
-            diags.push(QanaDiag {
-                span: (0, 1),
-                msg: format!("{} parse repair(s) in the grammar source", out.repairs.len()),
-                severity: 1,
-            });
-        }
-        if !diags.is_empty() {
-            return Err(diags);
-        }
-        let (lexer, tables) = compile::certify(&out.def)?;
-        Ok(EmbeddedLang {
-            name: out.def.lex.name.clone(),
-            extensions: out.def.extensions.clone(),
+        GrammarArtifact::certify(src).map(EmbeddedLang::from_artifact)
+    }
+
+    /// The language `artifact` holds, ready to serve. Its lexer, syntax
+    /// grammar and LR tables are leaked to `'static` (the one bounded
+    /// leak per grammar load described above); the rest moves in.
+    pub fn from_artifact(artifact: GrammarArtifact) -> EmbeddedLang {
+        let GrammarArtifact {
+            name,
+            extensions,
+            lexer,
+            sg,
+            tables,
+            styles,
+            outline,
+            folds,
+            binding,
+            types,
+            macros,
+        } = artifact;
+        EmbeddedLang {
+            name,
+            extensions,
             lexer: Box::leak(Box::new(lexer)),
-            sg: Box::leak(Box::new(out.def.sg)),
+            sg: Box::leak(Box::new(sg)),
             tables: Box::leak(Box::new(tables)),
-            styles: out.def.styles,
-            outline: out.def.outline,
-            folds: out.def.folds,
-            binding: out.def.binding,
-            types: out.def.types,
-            macros: out.def.macros,
-        })
+            styles,
+            outline,
+            folds,
+            binding,
+            types,
+            macros,
+        }
     }
 
     /// Open an incremental session over a document (total under errors).

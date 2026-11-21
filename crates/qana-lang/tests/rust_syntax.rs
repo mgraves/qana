@@ -275,6 +275,8 @@ fn const_traits_as_stds_own_source_writes_them() {
     ] {
         parses(src);
     }
+    // A `try` block, as std's own source writes one.
+    parses("fn f() { let x = try { g()? }; }");
     // The items `const` begins, told apart by the token after it.
     for src in ["const X: u8 = 1;", "const fn f() {}", "fn f() { const { 1 }; }"] {
         parses(src);

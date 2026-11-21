@@ -100,11 +100,17 @@ token BLOCK_OPEN     = "/*"                             @trivia @push(BLOCK) @st
 // longer than the identifier it starts with, so longest match takes it.
 // Raw strings close on a quote and the same number of `#`: one mode per
 // count, up to three.
-token RAW3_OPEN = /(b|c)?r###"/ @push(RAW3) @style(string)
-token RAW2_OPEN = /(b|c)?r##"/  @push(RAW2) @style(string)
-token RAW1_OPEN = /(b|c)?r#"/   @push(RAW1) @style(string)
-token RAW0_OPEN = /(b|c)?r"/    @push(RAW0) @style(string)
-token STR_OPEN  = /(b|c)?"/     @push(STR)  @style(string)
+token RAW3_OPEN = /r###"/ @push(RAW3) @style(string)
+token RAW2_OPEN = /r##"/  @push(RAW2) @style(string)
+token RAW1_OPEN = /r#"/   @push(RAW1) @style(string)
+token RAW0_OPEN = /r"/    @push(RAW0) @style(string)
+token STR_OPEN  = /"/     @push(STR)  @style(string)
+// A byte string or a C string opens on its own token: it is no `str`.
+token PRAW3_OPEN = /(b|c)r###"/ @push(RAW3) @style(string)
+token PRAW2_OPEN = /(b|c)r##"/  @push(RAW2) @style(string)
+token PRAW1_OPEN = /(b|c)r#"/   @push(RAW1) @style(string)
+token PRAW0_OPEN = /(b|c)r"/    @push(RAW0) @style(string)
+token PSTR_OPEN  = /(b|c)"/     @push(STR)  @style(string)
 
 // `b'…'`: one symbol, or anything up to the closing quote (escapes are
 // pairs); rustc_lexer stops an unclosed one at a `/` or the line's end.
@@ -415,14 +421,14 @@ rule tt_token =
   | TtRawLifetime: RAW_LIFETIME | TtInt: INT | TtFloat: FLOAT | TtFloatDot: FLOAT_DOT
   | TtChar: CHAR
   | TtByte: BYTE
-  | TtStrOpen: STR_OPEN | TtSClose: S_CLOSE | TtSEsc: S_ESC
+  | TtStrOpen: STR_OPEN | TtPStrOpen: PSTR_OPEN | TtSClose: S_CLOSE | TtSEsc: S_ESC
   | TtSBackslash: S_BACKSLASH | TtSText: S_TEXT
-  | TtRaw0Open: RAW0_OPEN | TtR0Close: R0_CLOSE | TtR0Text: R0_TEXT
-  | TtRaw1Open: RAW1_OPEN | TtR1Close: R1_CLOSE | TtR1Quote: R1_QUOTE
+  | TtRaw0Open: RAW0_OPEN | TtPRaw0Open: PRAW0_OPEN | TtR0Close: R0_CLOSE | TtR0Text: R0_TEXT
+  | TtRaw1Open: RAW1_OPEN | TtPRaw1Open: PRAW1_OPEN | TtR1Close: R1_CLOSE | TtR1Quote: R1_QUOTE
   | TtR1Text: R1_TEXT
-  | TtRaw2Open: RAW2_OPEN | TtR2Close: R2_CLOSE | TtR2Quote: R2_QUOTE
+  | TtRaw2Open: RAW2_OPEN | TtPRaw2Open: PRAW2_OPEN | TtR2Close: R2_CLOSE | TtR2Quote: R2_QUOTE
   | TtR2Text: R2_TEXT
-  | TtRaw3Open: RAW3_OPEN | TtR3Close: R3_CLOSE | TtR3Quote: R3_QUOTE
+  | TtRaw3Open: RAW3_OPEN | TtPRaw3Open: PRAW3_OPEN | TtR3Close: R3_CLOSE | TtR3Quote: R3_QUOTE
   | TtR3Text: R3_TEXT
   | TtUnion: KW_UNION | TtAuto: KW_AUTO | TtDefault: KW_DEFAULT | TtRaw: KW_RAW
   | TtSafe: KW_SAFE | TtCfgAttr: KW_CFG_ATTR | TtDerive: KW_DERIVE
@@ -1247,18 +1253,23 @@ rule literal =
   | IntLit:   INT
   | FloatLit: FLOAT
   | FloatDotLit: FLOAT_DOT
-  | CharLit:  CHAR
-  | ByteLit:  BYTE
+  | CharLit:  CHAR @value(builtin, char)
+  | ByteLit:  BYTE @value(builtin, u8)
   | StrLit:   str_lit
-  | True:     "true"
-  | False:    "false"
+  | True:     "true" @value(builtin, bool)
+  | False:    "false" @value(builtin, bool)
 
 rule str_lit =
-  | Str:  STR_OPEN str_parts S_CLOSE @fold(string)
-  | Raw0: RAW0_OPEN raw0_parts R0_CLOSE @fold(string)
-  | Raw1: RAW1_OPEN raw1_parts R1_CLOSE @fold(string)
-  | Raw2: RAW2_OPEN raw2_parts R2_CLOSE @fold(string)
-  | Raw3: RAW3_OPEN raw3_parts R3_CLOSE @fold(string)
+  | Str:  STR_OPEN str_parts S_CLOSE @fold(string) @value(builtin, str)
+  | Raw0: RAW0_OPEN raw0_parts R0_CLOSE @fold(string) @value(builtin, str)
+  | Raw1: RAW1_OPEN raw1_parts R1_CLOSE @fold(string) @value(builtin, str)
+  | Raw2: RAW2_OPEN raw2_parts R2_CLOSE @fold(string) @value(builtin, str)
+  | Raw3: RAW3_OPEN raw3_parts R3_CLOSE @fold(string) @value(builtin, str)
+  | PrefixedStr:  PSTR_OPEN str_parts S_CLOSE @fold(string)
+  | PrefixedRaw0: PRAW0_OPEN raw0_parts R0_CLOSE @fold(string)
+  | PrefixedRaw1: PRAW1_OPEN raw1_parts R1_CLOSE @fold(string)
+  | PrefixedRaw2: PRAW2_OPEN raw2_parts R2_CLOSE @fold(string)
+  | PrefixedRaw3: PRAW3_OPEN raw3_parts R3_CLOSE @fold(string)
 
 rule str_parts = str_part*
 rule str_part = | StrText: S_TEXT | StrEsc: S_ESC | StrBackslash: S_BACKSLASH
@@ -1309,6 +1320,7 @@ rule block_like =
   | UnsafeBlock:    "unsafe" block
   | AsyncBlock:     "async" block
   | AsyncMoveBlock: "async" "move" block
+  | TryBlock:       "try" block
   | ConstBlock:     "const" block
   | LabeledBlock:   label block @scope
   | If:             if_expr
@@ -1455,7 +1467,7 @@ rule expr =
   | SplitMember: b:expr DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
   | Call:        c:expr open:"(" args_opt ")" @fold(list, open) @style(function, c) @value(call, c)
   | Index:       expr open:"[" expr "]" @fold(list, open)
-  | Try:         expr QMARK
+  | Try:         e:expr QMARK @value(try, e)
   | Neg:         MINUS expr @precedence(BANG)
   | Not:         BANG expr
   | Deref:       STAR e:expr @precedence(BANG) @value(same, e)
@@ -1524,7 +1536,7 @@ rule cond =
   | CSplitMember: b:cond DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
   | CCall:        c:cond open:"(" args_opt ")" @fold(list, open) @style(function, c) @value(call, c)
   | CIndex:       cond open:"[" expr "]" @fold(list, open)
-  | CTry:         cond QMARK
+  | CTry:         e:cond QMARK @value(try, e)
   | CNeg:         MINUS cond @precedence(BANG)
   | CNot:         BANG cond
   | CDeref:       STAR e:cond @precedence(BANG) @value(same, e)
@@ -1576,7 +1588,7 @@ rule stmt_expr =
   | SStructExpr:  struct_lit
   | SBlockMember: b:block_like DOT m:member @precedence(DOT) @value(member, b, m)
   | SBlockSplitMember: b:block_like DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
-  | SBlockTry:    block_like QMARK
+  | SBlockTry:    e:block_like QMARK @value(try, e)
   | SClosure:     closure_head expr @precedence("return") @scope
   | SClosureRet:  closure_head MINUS_ARROW GT type_nb block @scope
   | SReturn:      "return" @precedence("return")
@@ -1589,7 +1601,7 @@ rule stmt_expr =
   | SSplitMember: b:stmt_expr DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
   | SCall:        c:stmt_expr open:"(" args_opt ")" @fold(list, open) @style(function, c) @value(call, c)
   | SIndex:       stmt_expr open:"[" expr "]" @fold(list, open)
-  | STry:         stmt_expr QMARK
+  | STry:         e:stmt_expr QMARK @value(try, e)
   | SNeg:         MINUS expr @precedence(BANG)
   | SNot:         BANG expr
   | SDeref:       STAR e:expr @precedence(BANG) @value(same, e)

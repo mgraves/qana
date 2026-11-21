@@ -80,6 +80,13 @@ fn colour_classes(colour: &CompiledLexer, measured: &CompiledLexer) -> Vec<Class
                 "D_CLOSE" => by_name["B_CLOSE"],
                 "D_CONTENT" => by_name["B_CONTENT"],
                 "D_MISC" => by_name["B_MISC"],
+                // A byte string's or a C string's opening, a token of its
+                // own here: a string's, as rustc_lexer has it.
+                "PSTR_OPEN" => by_name["STR_OPEN"],
+                "PRAW0_OPEN" => by_name["RAW0_OPEN"],
+                "PRAW1_OPEN" => by_name["RAW1_OPEN"],
+                "PRAW2_OPEN" => by_name["RAW2_OPEN"],
+                "PRAW3_OPEN" => by_name["RAW3_OPEN"],
                 other => *by_name.get(other).unwrap_or_else(|| {
                     panic!("rust.qana has a token rust_lex.qana does not, with no class: {other}")
                 }),

@@ -84,6 +84,9 @@ pub(crate) struct Roles {
     pub(crate) inits: Option<(usize, usize)>,
     /// `@self_value`: what it defines is the value a method is called on.
     pub(crate) self_value: bool,
+    /// `@value(builtin, name)`: a value of the type the language provides
+    /// under that name.
+    pub(crate) builtin: Option<String>,
 }
 
 fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Roles> {
@@ -159,6 +162,9 @@ fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Ro
     }
     for &(nt, prod) in &cfg.self_values {
         map.entry((nt, prod)).or_default().self_value = true;
+    }
+    for (nt, prod, name) in &cfg.value_builtins {
+        map.entry((*nt, *prod)).or_default().builtin = Some(name.clone());
     }
     for &(nt, prod, ty, tr) in &cfg.impls {
         map.entry((nt, prod)).or_default().implementation = Some((ty, tr));

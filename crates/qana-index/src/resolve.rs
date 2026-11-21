@@ -30,6 +30,10 @@
 //!   each were globbed into every module;
 //! - the names the language provides (builtins), which no source declares:
 //!   a path that is one names it, and one that goes on escapes after it.
+//!   A path that goes on past a builtin's name that names a module alone,
+//!   and fails, escapes after it too, as rustc reads it (`use std::u8;
+//!   u8::max_value()`); a type the project writes with such a name (`use
+//!   crate::str::{self, …}; … -> &str`) is the builtin.
 //!
 //! A module with an attribute that closes it ([`CrateInfo::closed_by`],
 //! said unconditionally of it or of a module it is inside) has neither the
@@ -157,6 +161,27 @@ pub struct Resolver {
     /// The traits each module brings into scope without a name (`use a::T
     /// as _;`), its globs' and preludes' among them, once found.
     unnamed: RefCell<HashMap<Module, Declarations>>,
+    /// The impl blocks of each type the language provides, by its name,
+    /// once found.
+    builtin_blocks: RefCell<HashMap<String, ImplBlocks>>,
+    /// The traits that give what an operator gives in each crate (its
+    /// `Deref`, its `Try`), once found: by crate and operator.
+    operators: RefCell<HashMap<(u32, u8), Declarations>>,
+    /// How deeply typing is nested now (see `types`).
+    typing: Cell<usize>,
+    /// The impl blocks whose traits are being found.
+    impl_traits_finding: RefCell<std::collections::HashSet<(u32, u32)>>,
+    /// Each file's impl blocks' items, as indexes into its declarations, by
+    /// the block's index; once read.
+    block_items: RefCell<HashMap<u32, BlockItems>>,
+    /// Each file's declarations made inside another (not in an impl
+    /// block), as indexes, by their container; once read.
+    inside: RefCell<HashMap<u32, Inside>>,
+    /// The names of each trait's items and its supertraits', once found.
+    trait_names: RefCell<HashMap<Declared, Names>>,
+    /// The blanket impl blocks by the names they may answer for (see
+    /// `types`), once found.
+    blankets_named: RefCell<Option<BlanketsByName>>,
 }
 
 /// A unit in a crate: a file's own (`unit` `None`), or one with its body in
@@ -225,6 +250,24 @@ type Declarations = Rc<Vec<(u32, u32)>>;
 /// A declaration, by (file, declaration index).
 type Declared = (u32, u32);
 
+/// A blanket impl block, with a trait it implements.
+type Blanket = ((u32, u32), Declared);
+
+/// Blanket impl blocks, each with a trait it implements, by each name it may
+/// answer a member for.
+type BlanketsByName = Rc<HashMap<String, Vec<Blanket>>>;
+
+/// A file's impl blocks' items, as indexes into its declarations, by the
+/// block's index.
+type BlockItems = Rc<HashMap<u32, Rc<[u32]>>>;
+
+/// A file's declarations made inside another (not in an impl block), as
+/// indexes into its declarations, by their container.
+type Inside = Rc<HashMap<Vec<String>, Vec<u32>>>;
+
+/// Names, once each.
+type Names = Rc<std::collections::HashSet<String>>;
+
 /// Where a type's impl blocks may be: each impl block (file, impl index) by
 /// the last name of its type's path, which is the type's own name or a
 /// name an import gives it (`use a::Cell as Grid; impl Grid {}`); and, by
@@ -234,6 +277,20 @@ type Declared = (u32, u32);
 struct ImplNames {
     by_name: HashMap<String, Vec<(u32, u32)>>,
     renames: HashMap<String, Vec<String>>,
+    /// The aliases of a type by the last name of the path each writes
+    /// (`type Splitter = Grid<…>;`: `Grid` gives `Splitter`): an impl
+    /// block of an alias is one of the type it stands for.
+    aliases: HashMap<String, Vec<String>>,
+    /// The impl blocks of trait objects (`impl dyn Any + Send`), by the
+    /// last name of each of their traits' paths.
+    objects: HashMap<String, Vec<(u32, u32)>>,
+    /// The impl blocks of slices (`impl<T> [T]`), and of arrays.
+    slices: Vec<(u32, u32)>,
+    arrays: Vec<(u32, u32)>,
+    /// The impl blocks of any type: of one of their own generic
+    /// parameters, or a reference to one (`impl<T: Display> ToString for
+    /// T`, `impl<T> Clone for &T`).
+    blankets: Vec<(u32, u32)>,
 }
 
 impl Resolver {
@@ -275,6 +332,14 @@ impl Resolver {
             impl_traits: RefCell::default(),
             in_scope: RefCell::default(),
             unnamed: RefCell::default(),
+            builtin_blocks: RefCell::default(),
+            operators: RefCell::default(),
+            typing: Cell::new(0),
+            impl_traits_finding: RefCell::default(),
+            block_items: RefCell::default(),
+            inside: RefCell::default(),
+            trait_names: RefCell::default(),
+            blankets_named: RefCell::default(),
         }
     }
 
@@ -317,12 +382,19 @@ impl Resolver {
             }
         }
         if declarations.is_empty() && modules.is_empty() {
-            // A first name that is nothing else may be the language's.
-            let first = path.segments.first().filter(|_| path.root.is_none() && furthest == 0);
+            // A first name that is nothing else may be the language's; so
+            // may one that is a module alone, where the path goes on past
+            // it and fails: rustc reads `u8::max_value()` under `use
+            // std::u8;` as the type's, past a module that lacks it.
+            let first = path.segments.first().filter(|_| path.root.is_none());
             let builtin = first.is_some_and(|name| {
-                self.graph.places(file).iter().any(|&(krate, _)| {
+                let provided = self.graph.places(file).iter().any(|&(krate, _)| {
                     self.graph.crates()[krate as usize].builtins.iter().any(|b| b == name)
-                })
+                });
+                provided
+                    && (furthest == 0
+                        || (path.segments.len() > 1
+                            && failed.iter().all(|&(at, _)| self.modules_alone(at, name))))
             });
             return match (builtin, path.segments.len()) {
                 (true, 1) => Resolution::Builtin,
@@ -345,6 +417,16 @@ impl Resolver {
         modules.sort();
         modules.dedup();
         Resolution::Found { declarations, modules }
+    }
+
+    /// Whether `name`, the first segment of a path in module `at`, names
+    /// modules alone, or nothing.
+    fn modules_alone(&self, at: Module, name: &str) -> bool {
+        let head = Path { root: None, segments: vec![name.to_string()] };
+        match self.walk(at, &head) {
+            Ok(targets) => targets.iter().all(|t| t.module.is_some()),
+            Err(_) => true,
+        }
     }
 
     /// What a target is, said as a resolution says it: a module with a
@@ -410,9 +492,13 @@ impl Resolver {
             Some(Root::Global) => {
                 let name = path.segments.first().ok_or(0usize)?;
                 // From the crate's root (Rust 2015), what its root names
-                // first: its `extern crate`s are there.
+                // first: its `extern crate`s are there. An import that
+                // loads names a crate, never what the root declares
+                // (`extern crate core as real;` beside `mod core`).
                 let mut found: Vec<Target> = Vec::new();
-                if self.graph.crates()[at.krate as usize].imports_from_root {
+                if self.graph.crates()[at.krate as usize].imports_from_root
+                    && from != Start::Loading
+                {
                     if let Some(root) = self.crate_root(at.krate).module {
                         found = self.names_of(root, name).iter().map(|b| b.target).collect();
                     }
@@ -427,8 +513,13 @@ impl Resolver {
             }
             None => {
                 let name = path.segments.first().ok_or(0usize)?;
-                let mut found: Vec<Target> =
-                    self.names_of(at, name).iter().map(|b| b.target).collect();
+                // An import that loads names a crate, never what the module
+                // declares (`extern crate core as real;` beside `mod core`).
+                let mut found: Vec<Target> = if from == Start::Loading {
+                    Vec::new()
+                } else {
+                    self.names_of(at, name).iter().map(|b| b.target).collect()
+                };
                 if found.is_empty() && !self.closed(at) {
                     found = self.named_crates(at.krate, name, from == Start::Loading);
                     if found.is_empty() && from == Start::Anywhere {
@@ -644,17 +735,25 @@ impl Resolver {
         if let Some(module) = target.module {
             return self.names_of(module, name).iter().map(|b| b.target).collect();
         }
-        let Some((file, index)) = target.declaration else {
+        let Some(declaration) = target.declaration else {
             return Vec::new();
         };
-        let found = self.declared_inside(file, index, name);
-        if !found.is_empty() {
-            return found;
+        // An alias's members are those of the type it stands for
+        // (`Splitter::new`, `Alias::Variant`).
+        let mut found = Vec::new();
+        for (file, index) in self.unaliased(declaration) {
+            let inside = self.declared_inside(file, index, name);
+            if !inside.is_empty() {
+                found.extend(inside);
+                continue;
+            }
+            found.extend(
+                self.items_named(at, (file, index), name)
+                    .into_iter()
+                    .map(|d| Target { declaration: Some(d), module: None }),
+            );
         }
-        self.impl_members(at, (file, index), name, None)
-            .into_iter()
-            .map(|d| Target { declaration: Some(d), module: None })
-            .collect()
+        found
     }
 
     /// The declarations named `name` made inside declaration `index` of
@@ -662,15 +761,35 @@ impl Resolver {
     /// in an impl block.
     fn declared_inside(&self, file: u32, index: u32, name: &str) -> Vec<Target> {
         let declarations = self.summaries[file as usize].offers().declarations();
+        self.items_inside(file, index)
+            .into_iter()
+            .filter(|&i| declarations[i as usize].name == name)
+            .map(|i| Target { declaration: Some((file, i)), module: None })
+            .collect()
+    }
+
+    /// The declarations made inside declaration `index` of `file`, not in an
+    /// impl block, as indexes into the file's declarations.
+    fn items_inside(&self, file: u32, index: u32) -> Vec<u32> {
+        let declarations = self.summaries[file as usize].offers().declarations();
         let owner = &declarations[index as usize];
         let mut container = owner.container.clone();
         container.push(owner.name.clone());
-        declarations
-            .iter()
-            .enumerate()
-            .filter(|(_, d)| d.impl_block.is_none() && d.name == name && d.container == container)
-            .map(|(i, _)| Target { declaration: Some((file, i as u32)), module: None })
-            .collect()
+        let inside = self.inside.borrow().get(&file).cloned();
+        let inside = inside.unwrap_or_else(|| {
+            // The file's declarations not in an impl block, by their
+            // container.
+            let mut by_container: HashMap<Vec<String>, Vec<u32>> = HashMap::new();
+            for (i, d) in declarations.iter().enumerate() {
+                if d.impl_block.is_none() && !d.container.is_empty() {
+                    by_container.entry(d.container.clone()).or_default().push(i as u32);
+                }
+            }
+            let by_container = Rc::new(by_container);
+            self.inside.borrow_mut().insert(file, by_container.clone());
+            by_container
+        });
+        inside.get(&container).cloned().unwrap_or_default()
     }
 
     // ------------------------------------------------------------------
@@ -1130,9 +1249,9 @@ impl Resolver {
     }
 
     /// The declarations impl block `block`'s type resolves to, from where
-    /// the block is, in each crate its file is in; and whether that is kept
-    /// (it met no lookup's answer so far). Called while impls are being
-    /// found.
+    /// the block is, in each crate its file is in, an alias as the type it
+    /// stands for; and whether that is kept (it met no lookup's answer so
+    /// far). Called while impls are being found.
     fn impl_type(&self, block: (u32, u32)) -> (Declarations, bool) {
         if let Some(types) = self.impl_types.borrow().get(&block) {
             return (types.clone(), true);
@@ -1150,8 +1269,10 @@ impl Resolver {
                 let Ok(targets) = self.walk(at, self_type) else { continue };
                 for target in targets {
                     if let (Some(declaration), None) = (target.declaration, target.module) {
-                        if !types.contains(&declaration) {
-                            types.push(declaration);
+                        for d in self.unaliased(declaration) {
+                            if !types.contains(&d) {
+                                types.push(d);
+                            }
                         }
                     }
                 }
@@ -1167,19 +1288,19 @@ impl Resolver {
         (types, kept)
     }
 
-    /// Each impl block by the last name of its type's path, and the names
-    /// imports give what their paths name, by the last name of the path:
-    /// gathered once.
-    /// `name`, and the names imports give what is named `name` (`use a::Cell
-    /// as Grid;`), and those imports give those, as far as they go.
+    /// `name`, the names imports give what is named `name` (`use a::Cell
+    /// as Grid;`), the aliases written of what is named `name` (`type
+    /// Splitter = Grid<…>;`), and those of those, as far as they go.
     fn called(&self, name: &str) -> Vec<String> {
         let names = self.impl_names();
         let mut called = vec![name.to_string()];
         let mut at = 0;
         while at < called.len() {
-            for rename in names.renames.get(&called[at]).into_iter().flatten() {
-                if !called.contains(rename) {
-                    called.push(rename.clone());
+            let renames = names.renames.get(&called[at]).into_iter().flatten();
+            let aliases = names.aliases.get(&called[at]).into_iter().flatten();
+            for other in renames.chain(aliases) {
+                if !called.contains(other) {
+                    called.push(other.clone());
                 }
             }
             at += 1;
@@ -1187,6 +1308,9 @@ impl Resolver {
         called
     }
 
+    /// Each impl block by the last name of its type's path, the names
+    /// imports give what their paths name, and the aliases of a type, by
+    /// the last name of the path: gathered once.
     fn impl_names(&self) -> Rc<ImplNames> {
         if let Some(names) = self.impl_names.borrow().as_ref() {
             return names.clone();
@@ -1194,9 +1318,44 @@ impl Resolver {
         let mut names = ImplNames::default();
         for (file, summary) in self.summaries.iter().enumerate() {
             for (i, block) in summary.offers().impls().iter().enumerate() {
+                let at = (file as u32, i as u32);
                 let named = block.self_type.as_ref().and_then(TypeRef::path);
                 if let Some(last) = named.and_then(|t| t.segments.last()) {
-                    names.by_name.entry(last.clone()).or_default().push((file as u32, i as u32));
+                    names.by_name.entry(last.clone()).or_default().push(at);
+                }
+                let parameter = |t: &TypeRef| {
+                    t.path().is_some_and(|p| {
+                        p.root.is_none()
+                            && p.segments.len() == 1
+                            && block.generics.contains(&p.segments[0])
+                    })
+                };
+                match &block.self_type {
+                    Some(TypeRef::Dyn(traits)) => {
+                        for t in traits {
+                            if let Some(last) = t.path().and_then(|p| p.segments.last()) {
+                                names.objects.entry(last.clone()).or_default().push(at);
+                            }
+                        }
+                    }
+                    Some(TypeRef::Slice(_)) => names.slices.push(at),
+                    Some(TypeRef::Array(_)) => names.arrays.push(at),
+                    Some(TypeRef::Ref(inner)) if parameter(inner) => names.blankets.push(at),
+                    Some(t) if parameter(t) => names.blankets.push(at),
+                    _ => {}
+                }
+            }
+            for d in summary.offers().declarations() {
+                // An alias: a type declaration writing the type it is
+                // (an impl block's associated type is no alias).
+                let written =
+                    d.ty.as_ref().filter(|_| d.kind == "struct" && d.impl_block.is_none());
+                if let Some(last) = written.and_then(TypeRef::path).and_then(|p| p.segments.last())
+                {
+                    let aliases = names.aliases.entry(last.clone()).or_default();
+                    if !aliases.contains(&d.name) {
+                        aliases.push(d.name.clone());
+                    }
                 }
             }
             let imports = summary.offers().reexports().iter().chain(summary.needs().imports());

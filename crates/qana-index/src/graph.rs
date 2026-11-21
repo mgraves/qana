@@ -65,6 +65,21 @@ pub struct CrateInfo {
     /// dependencies for another target, or behind a feature it was not
     /// built with): a path that begins with one escapes.
     pub unindexed: Vec<String>,
+    /// The trait a member access reaches through a value of a type that
+    /// implements it to another value, and its associated type that names
+    /// that value's type (Rust's `Deref` and `Target`): the trait's path,
+    /// and the associated type's name. `None` where the language has none.
+    ///
+    /// The path is read from the crate's root; one from the crates
+    /// themselves (`::core::ops::Deref`) has a crate the crate names (a
+    /// dependency, or one its root loads) as its first segment, never what
+    /// the root declares, since the trait is the one that crate declares
+    /// whatever else the crate calls by its name (a module `core`).
+    pub deref_trait: Option<(crate::Path, String)>,
+    /// The trait whose associated type names what a value gives up when it
+    /// holds one (Rust's `Try` and `Output`, what `x?` gives): its path,
+    /// read as [`Self::deref_trait`]'s is, and the associated type's name.
+    pub try_trait: Option<(crate::Path, String)>,
 }
 
 /// Where a crate comes from.

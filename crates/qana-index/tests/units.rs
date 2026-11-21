@@ -299,6 +299,8 @@ fn a_unit_graph_places_each_file_in_its_crates_at_its_module_path() {
         inert: Vec::new(),
         imports_from_root: false,
         unindexed: Vec::new(),
+        deref_trait: None,
+        try_trait: None,
     };
     let mut graph = UnitGraph::new();
     let lib = graph.add_crate(krate("geo", "lib", "/p/src/lib.rs"));

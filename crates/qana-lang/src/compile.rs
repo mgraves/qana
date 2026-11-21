@@ -1696,6 +1696,16 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             Some("same") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Same),
                             Some("typed") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Typed),
                             Some("struct") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Struct),
+                            Some("try") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Try),
+                            Some("builtin") if arity(2) => {
+                                // A type's name, not a label.
+                                if std::mem::replace(&mut seen_value, true) {
+                                    error(d, a.name_span, "duplicate @value".into());
+                                } else {
+                                    binding.value_builtins.push((nt, prod, a.args[1].0.clone()));
+                                }
+                                continue;
+                            }
                             Some("member") if arity(3) => match (label(d, 1), label(d, 2)) {
                                 (Some(base), Some(member)) => {
                                     Some(qana_sem::ValueForm::Member { base, position: None, member })
@@ -1709,7 +1719,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                                 _ => None,
                             },
                             _ => {
-                                error(d, a.name_span, "@value takes `path`, `call`, `same`, `typed` or `struct` and a label; or `member` and the labels of the value, the positional field if one is given, and the member".into());
+                                error(d, a.name_span, "@value takes `path`, `call`, `same`, `typed`, `struct` or `try` and a label; `builtin` and a type's name; or `member` and the labels of the value, the positional field if one is given, and the member".into());
                                 None
                             }
                         };

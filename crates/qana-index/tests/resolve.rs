@@ -100,6 +100,8 @@ fn project() -> Resolver {
         inert: Vec::new(),
         imports_from_root: false,
         unindexed: Vec::new(),
+        deref_trait: None,
+        try_trait: None,
     };
     let mut graph = UnitGraph::new();
     let geo = graph.add_crate(krate("geo", "/p/src/lib.ul", Vec::new()));
@@ -352,6 +354,8 @@ fn one_file(text: &str) -> Resolver {
         inert: Vec::new(),
         imports_from_root: false,
         unindexed: Vec::new(),
+        deref_trait: None,
+        try_trait: None,
     });
     Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
 }
@@ -483,6 +487,12 @@ pub mod own {
     pub struct Vec {}
 }
 
+pub mod legacy {
+    pub mod u8 {
+        pub struct Here {}
+    }
+}
+
 #[no_implicit_prelude]
 pub mod hygiene {
     pub mod deeper {}
@@ -536,6 +546,8 @@ fn with_preludes() -> Resolver {
             inert: vec![path(None, &["no_implicit_prelude"])],
             imports_from_root: false,
             unindexed: Vec::new(),
+            deref_trait: None,
+            try_trait: None,
         };
     let std_prelude = path(Some(Root::Global), &["std", "prelude", "rust_2021"]);
     let mut graph = UnitGraph::new();
@@ -691,6 +703,27 @@ fn a_builtin_is_what_a_first_name_is_when_it_is_nothing_else() {
     );
 }
 
+#[test]
+fn a_path_past_a_builtins_name_that_names_a_module_alone_is_the_builtins() {
+    let r = with_preludes();
+    let legacy = &["legacy"][..];
+    assert_eq!(
+        named(&r, "/w/lib.ul", legacy, &path(None, &["u8", "Here"])),
+        Ok(vec!["/w/lib.ul:Here".into()]),
+        "the module, where it has the name"
+    );
+    assert_eq!(
+        named(&r, "/w/lib.ul", legacy, &path(None, &["u8", "MAX"])),
+        Err("escapes at 1".into()),
+        "rustc reads `u8::MAX` past a module `u8` that lacks it as the builtin's"
+    );
+    assert_eq!(
+        named(&r, "/w/lib.ul", &[], &path(None, &["own", "MAX"])),
+        Err("unresolved at 1".into()),
+        "a module that is no builtin's name names nothing more"
+    );
+}
+
 /// The names of what `path` names in the one file of [`one_file`]`(text)`.
 fn one_file_names(text: &str, path: &Path) -> Result<Vec<String>, usize> {
     let r = one_file(text);
@@ -805,6 +838,8 @@ fn one_file_inert(text: &str) -> Resolver {
         inert: vec![path(None, &["allow"])],
         imports_from_root: false,
         unindexed: vec!["web_sys".to_string()],
+        deref_trait: None,
+        try_trait: None,
     });
     Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
 }

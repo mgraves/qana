@@ -270,6 +270,10 @@ pub struct BindingConfig {
     /// called on (`@self_value`): of the type of the impl block the method
     /// is in, or of a type with the trait it is in.
     pub self_values: Vec<(u16, u16)>,
+    /// (nt, prod, name) — the production is a value of the type the
+    /// language provides under `name` (`@value(builtin, name)`: a string
+    /// literal's `str`).
+    pub value_builtins: Vec<(u16, u16, String)>,
 }
 
 /// What an expression's syntax is (`@value(form, …)`), each child by its
@@ -295,6 +299,10 @@ pub enum ValueForm {
     /// `@value(struct, p)`: a value of the type the path at `p` names (a
     /// struct literal's).
     Struct(usize),
+    /// `@value(try, e)`: what the value at `e` gives up when it holds one
+    /// (Rust's `e?`: the `Output` of its `Try`), as the project model names
+    /// the trait.
+    Try(usize),
 }
 
 /// What a member access names (`@member(form, …)`). See
@@ -488,6 +496,9 @@ pub fn compose_binding(
     }
     for &(nt, prod) in &guest.self_values {
         out.self_values.push((nt + nts, prod + prods));
+    }
+    for (nt, prod, name) in &guest.value_builtins {
+        out.value_builtins.push((nt + nts, prod + prods, name.clone()));
     }
     out.unordered = host.unordered;
     out

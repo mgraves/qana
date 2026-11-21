@@ -176,7 +176,15 @@ fn a_members_receiver_is_what_the_file_writes_of_its_value() {
 
     let unknown = accesses(&all, "unknown");
     assert_eq!(unknown[0].receiver, Receiver::Unknown, "a closure's parameter");
-    assert_eq!(unknown[1].receiver, Receiver::Unknown, "`?`");
+    assert_eq!(
+        unknown[1].receiver,
+        Receiver::Try(Box::new(member(
+            member(Receiver::Typed(grid.clone()), "cells", MemberKind::Field),
+            "first",
+            MemberKind::Method
+        ))),
+        "`?`: what the value gives up"
+    );
 
     assert_eq!(
         accesses(&all, "area")[0].receiver,
@@ -209,6 +217,10 @@ fn the_member_at_an_offset_and_a_path_from_self() {
 const LIB: &str = "mod cell;
 mod grid;
 mod shapes;
+mod deref;
+
+/// A module of the crate's own, named like a crate the crate names.
+mod core {}
 ";
 
 const CELL: &str = "#[derive(Clone)]
@@ -339,10 +351,27 @@ const SHAPES: &str = "use crate::cell::{Cell, Hidden as _};
 fn f(c: Cell) {
     c.secret();
 }
+
+/// Its impl block's trait's path walks through it: finding the trait asks
+/// for its members, which ask for the trait.
+#[allow(non_camel_case_types)]
+pub struct hash;
+
+impl hash::Hash for hash {
+    fn digest(&self) {}
+}
+
+fn g(h: hash) {
+    h.digest();
+}
 ";
 
 const CORE: &str = "pub mod prelude {
     pub use crate::clone::Clone;
+    pub use crate::default::Default;
+    pub use crate::iter::Iterator;
+    pub use crate::option::Option;
+    pub use crate::string::ToString;
 }
 
 pub mod clone {
@@ -350,10 +379,265 @@ pub mod clone {
         fn clone(&self) -> Self;
     }
 }
+
+pub mod default {
+    pub trait Default {
+        fn default() -> Self;
+    }
+}
+
+pub mod marker {
+    pub unsafe auto trait Send {}
+}
+
+pub mod any {
+    pub trait Any {}
+
+    impl dyn Any {
+        pub fn is(&self) -> bool {
+            todo!()
+        }
+    }
+
+    impl dyn Any + crate::marker::Send {
+        pub fn downcast_ref(&self) -> bool {
+            todo!()
+        }
+    }
+}
+
+pub mod ops {
+    pub trait Deref {
+        type Target;
+        fn deref(&self) -> &Self::Target;
+    }
+
+    pub trait Try {
+        type Output;
+    }
+}
+
+pub mod option {
+    pub enum Option<T> {
+        None,
+        Some(T),
+    }
+
+    impl<T> Option<T> {
+        pub fn unwrap(self) -> T {
+            todo!()
+        }
+    }
+
+    impl<T> crate::ops::Try for Option<T> {
+        type Output = T;
+    }
+}
+
+pub mod rc {
+    pub struct Rc<T>(T);
+
+    impl<T> crate::ops::Deref for Rc<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            &self.0
+        }
+    }
+}
+
+pub mod cell {
+    pub struct RefCell<T>(T);
+
+    pub struct Ref<'b, T> {
+        value: &'b T,
+    }
+
+    impl<T> RefCell<T> {
+        pub fn borrow(&self) -> Ref<'_, T> {
+            todo!()
+        }
+    }
+
+    impl<'b, T> crate::ops::Deref for Ref<'b, T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            self.value
+        }
+    }
+}
+
+pub mod boxed {
+    pub struct Box<T>(T);
+
+    impl<T> crate::ops::Deref for Box<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            &self.0
+        }
+    }
+}
+
+pub mod vec {
+    pub struct Vec<T> {
+        first: T,
+    }
+
+    impl<T> crate::ops::Deref for Vec<T> {
+        type Target = [T];
+        fn deref(&self) -> &[T] {
+            todo!()
+        }
+    }
+}
+
+pub mod slice {
+    pub struct Iter<'a, T> {
+        rest: &'a [T],
+    }
+
+    impl<T> [T] {
+        pub fn first(&self) -> crate::option::Option<&T> {
+            todo!()
+        }
+
+        pub fn iter(&self) -> Iter<'_, T> {
+            todo!()
+        }
+    }
+
+    impl<'a, T> crate::iter::Iterator for Iter<'a, T> {
+        type Item = &'a T;
+        fn next(&mut self) -> crate::option::Option<&'a T> {
+            todo!()
+        }
+    }
+}
+
+pub mod iter {
+    pub trait Iterator {
+        type Item;
+        fn next(&mut self) -> crate::option::Option<Self::Item>;
+    }
+}
+
+pub mod fmt {
+    pub trait Display {}
+}
+
+pub mod string {
+    /// A module named like a type the language provides.
+    use crate::str;
+
+    pub struct String;
+
+    impl crate::ops::Deref for String {
+        type Target = str;
+        fn deref(&self) -> &str {
+            todo!()
+        }
+    }
+
+    pub trait ToString {
+        fn to_string(&self) -> String;
+    }
+
+    impl<T: crate::fmt::Display> ToString for T {
+        fn to_string(&self) -> String {
+            String
+        }
+    }
+}
+
+pub mod str {
+    impl str {
+        pub fn len(&self) -> usize {
+            0
+        }
+    }
+}
 ";
 
-const FILES: [(&str, &str); 5] = [
+/// A type's members through what it dereferences to, its arguments, its
+/// associated types, and the types the language provides.
+const DEREF: &str = "use crate::cell::Cell;
+use core::any::Any;
+use core::boxed::Box;
+use core::cell::RefCell;
+use core::marker::Send;
+use core::rc::Rc;
+use core::string::String;
+use core::vec::Vec;
+
+pub struct Grid<T> {
+    cells: Vec<T>,
+}
+
+pub struct Walk;
+
+#[derive(Default)]
+pub struct Tally {
+    count: Cell,
+}
+
+pub struct Panel<H, B> {
+    h: H,
+    b: B,
+}
+
+pub struct Wide;
+
+/// An alias whose impl block is its type's, its parameter one of its
+/// type's arguments.
+pub type Split<H> = Panel<H, Wide>;
+
+impl<H> Split<H> {
+    pub fn left(&self) -> H {
+        todo!()
+    }
+
+    pub fn new() -> Self {
+        todo!()
+    }
+}
+
+pub type Main = Split<Cell>;
+
+impl Iterator for Walk {
+    type Item = Cell;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
+    }
+}
+
+fn reach(v: Vec<Cell>, b: Box<Cell>, g: Grid<Cell>, mut w: Walk, a: [Cell; 2], mut it: Box<dyn Iterator<Item = Cell>>, s: String, p: Main, any: Box<dyn Any + Send>, plain: &dyn Any, shared: Rc<RefCell<Cell>>) -> Option<f32> {
+    v.first().unwrap().width();
+    v.iter().next().unwrap().width();
+    b.width();
+    g.cells.first().unwrap().width();
+    w.next().unwrap().width();
+    a.first().unwrap().width();
+    it.next().unwrap().width();
+    \"x\".len();
+    s.len();
+    \"x\".to_string();
+    let found = v.first()?;
+    found.width();
+    p.left().width();
+    Main::new().left().width();
+    Tally::default().count.width();
+    any.downcast_ref();
+    any.is();
+    plain.is();
+    plain.downcast_ref();
+    shared.borrow().width();
+    todo!()
+}
+";
+
+const FILES: [(&str, &str); 6] = [
     ("/p/src/lib.rs", LIB),
+    ("/p/src/deref.rs", DEREF),
     ("/p/src/cell.rs", CELL),
     ("/p/src/grid.rs", GRID_RS),
     ("/p/src/shapes.rs", SHAPES),
@@ -381,11 +665,13 @@ fn project() -> qana_index::Resolver {
         loadable: Vec::new(),
         source: CrateSource::Workspace,
         preludes,
-        builtins: Vec::new(),
+        builtins: ["str", "u8", "usize", "bool", "char", "f32"].map(String::from).to_vec(),
         closed_by: Vec::new(),
         inert: Vec::new(),
         imports_from_root: false,
         unindexed: Vec::new(),
+        deref_trait: Some((core_ops(name, "Deref"), "Target".to_string())),
+        try_trait: Some((core_ops(name, "Try"), "Output".to_string())),
     };
     let mut graph = UnitGraph::new();
     let core = graph.add_crate(krate("core", "/core/lib.rs", Vec::new(), Vec::new()));
@@ -393,10 +679,10 @@ fn project() -> qana_index::Resolver {
         "geo",
         "/p/src/lib.rs",
         vec![("core".into(), core)],
-        vec![named(&["core", "prelude"])],
+        vec![global(&["core", "prelude"])],
     ));
     let lib = &summaries[0].1;
-    for name in ["cell", "grid", "shapes"] {
+    for name in ["cell", "grid", "shapes", "deref"] {
         let unit = lib.offers().units().iter().position(|u| u.name == name).unwrap() as u32;
         graph.add_body(
             geo,
@@ -411,6 +697,20 @@ fn project() -> qana_index::Resolver {
 
 /// A declaration: its file's name, its container, its name and its kind.
 type Named = (String, String, String, String);
+
+/// The path of core's `ops::item` for crate `name`: from its root in core
+/// itself, from the crates themselves in any other (`::core::ops::item`).
+fn core_ops(name: &str, item: &str) -> Path {
+    match name {
+        "core" => Path { root: Some(Root::Crate), segments: vec!["ops".into(), item.into()] },
+        _ => global(&["core", "ops", item]),
+    }
+}
+
+/// A path from the crates themselves (`::a::b`).
+fn global(segments: &[&str]) -> Path {
+    Path { root: Some(Root::Global), ..named(segments) }
+}
 
 /// What the `nth` access named `name` in `file` names, each declaration
 /// said as [`Named`], or the segment it escaped at.
@@ -505,6 +805,11 @@ fn a_traits_method_is_found_where_the_trait_is_in_scope() {
         "brought into scope without a name"
     );
     assert_eq!(
+        typed_member(&r, "/p/src/shapes.rs", "digest", 0),
+        Ok(vec![at("shapes.rs", "hash", "digest")]),
+        "a trait path that leads back to its own block ends, the trait not held"
+    );
+    assert_eq!(
         typed_member(&r, grid, "area", 0),
         Ok(vec![at("cell.rs", "Shape", "area")]),
         "a trait object's trait's"
@@ -560,4 +865,151 @@ fn a_paths_member_of_a_type_is_a_traits_where_the_trait_is_in_scope() {
         Ok(vec![at("cell.rs", "Draw", "redraw")]),
         "a provided method, the trait's"
     );
+}
+
+#[test]
+fn a_member_is_found_through_arguments_associated_types_and_derefs() {
+    let r = project();
+    let deref = "/p/src/deref.rs";
+    let width = |nth| typed_member(&r, deref, "width", nth);
+    let cell_width = Ok(vec![at("cell.rs", "Cell", "width")]);
+    assert_eq!(width(0), cell_width, "Vec<Cell> to [Cell]; first gives Option<&T>, T as Cell");
+    assert_eq!(width(1), cell_width, "an iterator's Item, `&'a T` with T as Cell");
+    assert_eq!(width(2), cell_width, "through Box's Deref, Target = T");
+    assert_eq!(width(3), cell_width, "a field of a Grid<Cell>: Vec<T> as Vec<Cell>");
+    assert_eq!(width(4), cell_width, "Option<Self::Item>, Item = Cell");
+    assert_eq!(width(5), cell_width, "an array, unsized to a slice");
+    assert_eq!(width(6), cell_width, "dyn Iterator<Item = Cell>, through a Box");
+    assert_eq!(width(7), cell_width, "`v.first()?`: Option's Try Output");
+    assert_eq!(width(8), cell_width, "an alias's impl block's method, its H the alias's argument");
+    assert_eq!(width(9), cell_width, "`Main::new()`: Self is the path's alias, with its arguments");
+    assert_eq!(
+        width(10),
+        cell_width,
+        "`Tally::default()`: Self is Tally, though `default` is Default's"
+    );
+    assert_eq!(
+        width(11),
+        cell_width,
+        "Rc's Deref to RefCell, its borrow's Ref, Ref's Deref to Cell"
+    );
+    assert_eq!(
+        typed_member(&r, deref, "first", 0),
+        Ok(vec![at("lib.rs", "slice::[T]", "first")]),
+        "a slice's impl block, reached from a Vec"
+    );
+    assert_eq!(
+        typed_member(&r, deref, "len", 0),
+        Ok(vec![at("lib.rs", "str::str", "len")]),
+        "a string literal's str"
+    );
+    assert_eq!(
+        typed_member(&r, deref, "len", 1),
+        Ok(vec![at("lib.rs", "str::str", "len")]),
+        "String's Target is the language's str, though its module imports a module `str`, \
+         and Deref is core's, though geo's root declares a module `core`"
+    );
+    assert_eq!(
+        typed_member(&r, deref, "to_string", 0),
+        Ok(vec![at("lib.rs", "string::T", "to_string")]),
+        "a blanket impl, of a trait in scope by the prelude"
+    );
+    let object = |name: &str, nth| typed_member(&r, deref, name, nth);
+    assert_eq!(
+        object("downcast_ref", 0),
+        Ok(vec![at("lib.rs", "any::dyn Any + crate::marker::Send", "downcast_ref")]),
+        "through Box, an impl block of the trait object of exactly its traits"
+    );
+    assert_eq!(object("is", 1), Ok(vec![at("lib.rs", "any::dyn Any", "is")]));
+    assert_eq!(object("is", 0), Err(1), "`impl dyn Any`'s type is not `dyn Any + Send`");
+    assert_eq!(object("downcast_ref", 1), Err(1), "nor the other way about");
+    let path = named(&["Main", "new"]);
+    assert!(
+        matches!(
+            r.resolve(std::path::Path::new(deref), &[], &path, None),
+            qana_index::Resolution::Found { declarations, .. }
+                if declarations.len() == 1 && declarations[0].0.ends_with("deref.rs")
+        ),
+        "a path through an alias names its type's member"
+    );
+}
+
+/// A Rust 2015 crate: a path from `::` starts at its root, which declares a
+/// module `core` and loads the crate core under another name.
+const OLD: &str = "extern crate core as real;
+
+mod core {}
+
+use real::boxed::Box;
+
+pub struct Cell;
+
+impl Cell {
+    pub fn width(&self) -> f32 {
+        0.0
+    }
+}
+
+fn f(b: Box<Cell>) {
+    b.width();
+}
+";
+
+#[test]
+fn a_lang_trait_is_its_crates_whatever_the_root_calls_by_its_name() {
+    use std::path::{Path as FilePath, PathBuf};
+    use std::rc::Rc;
+
+    use qana_index::{summarize, CrateInfo, CrateSource, Resolution, Resolver, UnitGraph};
+
+    let krate =
+        |name: &str, root: &str, edition: &str, dependencies: Vec<(String, u32)>| CrateInfo {
+            name: name.into(),
+            kind: "lib".into(),
+            root: root.into(),
+            edition: edition.into(),
+            dependencies,
+            loadable: Vec::new(),
+            source: CrateSource::Workspace,
+            preludes: Vec::new(),
+            builtins: Vec::new(),
+            closed_by: Vec::new(),
+            inert: Vec::new(),
+            imports_from_root: edition == "2015",
+            unindexed: Vec::new(),
+            deref_trait: Some((core_ops(name, "Deref"), "Target".to_string())),
+            try_trait: Some((core_ops(name, "Try"), "Output".to_string())),
+        };
+    let mut graph = UnitGraph::new();
+    let core = graph.add_crate(krate("core", "/core/lib.rs", "2021", Vec::new()));
+    graph.add_crate(krate("old", "/old/lib.rs", "2015", vec![("core".into(), core)]));
+    let summaries: Vec<(PathBuf, Rc<qana_index::Summary>)> =
+        [("/core/lib.rs", CORE), ("/old/lib.rs", OLD)]
+            .iter()
+            .map(|(path, text)| (PathBuf::from(path), Rc::new(summarize(rust(), text))))
+            .collect();
+    let r = Resolver::new(Rc::new(graph), summaries);
+
+    let all = members(rust(), OLD);
+    let access = accesses(&all, "width")[0];
+    let file = FilePath::new("/old/lib.rs");
+    assert_eq!(
+        r.resolve(file, &[], &named(&["real"]), None),
+        Resolution::Found {
+            declarations: Vec::new(),
+            modules: vec![PathBuf::from("/core/lib.rs")]
+        },
+        "`extern crate core as real;` loads the crate, not the root's module `core`"
+    );
+    assert_eq!(
+        r.resolve(file, &[], &global(&["core", "ops", "Deref"]), None),
+        Resolution::Unresolved { segment: 1 },
+        "written in this crate, `::core` is its root's module"
+    );
+    let Resolution::Found { declarations, .. } = r.member(file, access) else {
+        panic!("Box<Cell> dereferences to Cell by core's Deref, not by the root's `core`");
+    };
+    let declared = summarize(rust(), OLD);
+    let width = declared.offers().declarations().iter().position(|d| d.name == "width").unwrap();
+    assert_eq!(declarations, vec![(PathBuf::from("/old/lib.rs"), width as u32)]);
 }

@@ -15,12 +15,15 @@
 //!   gives (a function, a tuple struct);
 //! - a member of a value, called or read, and a positional field (`.0`);
 //! - a cast's type, a struct literal's;
+//! - a literal of a type the language provides (`"x"`'s `str`);
+//! - what a value gives up when it holds one (`x?`);
 //! - a value through a reference to it, or what it refers to (`&x`, `*x`,
 //!   `(x)`): a member access reaches through references.
 //!
 //! Anything else is not read: a closure's parameter, a `for` or `match`
-//! binding, `x?`, `a[i]`, an arithmetic operator's result, a block's
-//! value. Those take inference, which a project index does not do.
+//! binding, `a[i]`, a number (its type is inferred), an arithmetic
+//! operator's result, a block's value. Those take inference, which a
+//! project index does not do.
 //!
 //! `Self` (a path whose root is [`Root::SelfType`]) is what the file says
 //! where it stands: the type of the impl block around it, or the trait
@@ -86,6 +89,11 @@ pub enum Receiver {
     Member { of: Box<Receiver>, name: String, kind: MemberKind },
     /// A positional field of a value (`.0`).
     Position { of: Box<Receiver>, index: u32 },
+    /// A value of a type the language provides, by its name (a string
+    /// literal's `str`).
+    Builtin(String),
+    /// What a value gives up when it holds one (Rust's `x?`).
+    Try(Box<Receiver>),
     /// A value whose type the file does not write.
     Unknown,
 }
@@ -370,6 +378,9 @@ impl<'a> Reader<'a> {
     /// inside its own.
     fn value(&self, n: &GreenNode, base: u32, cx: &Cx, visiting: &mut Vec<(u32, u32)>) -> Receiver {
         let child = |k: usize| symbol_child_at(n, k, base);
+        if let Some(name) = self.g.roles_of(n).and_then(|r| r.builtin.as_ref()) {
+            return Receiver::Builtin(name.clone());
+        }
         let Some(form) = self.g.roles_of(n).and_then(|r| r.value) else {
             // A node that only wraps another is the value it wraps.
             return match only_node(n, base) {
@@ -424,6 +435,10 @@ impl<'a> Reader<'a> {
             }
             ValueForm::Same(e) => match child(e) {
                 Some((m, at)) => self.value(m, at, cx, visiting),
+                None => Receiver::Unknown,
+            },
+            ValueForm::Try(e) => match child(e) {
+                Some((m, at)) => Receiver::Try(Box::new(self.value(m, at, cx, visiting))),
                 None => Receiver::Unknown,
             },
             ValueForm::Typed(t) => match self.g.type_in(n, t) {

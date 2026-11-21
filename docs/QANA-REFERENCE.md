@@ -27,6 +27,8 @@ pair OPEN CLOSE
 prec left|right …
 
 start rule_name        // syntax layer
+entry rule_name        // the other rules it parses from
+fragment name = rule   // a macro's fragment kinds, and their rules
 rule … = …
 ```
 
@@ -301,6 +303,30 @@ The start symbol.
 
 ---
 
+## `entry rule_name`
+
+A rule the grammar can be parsed from besides the start symbol: the
+tables get a start state for it, and a text can be parsed as that rule
+alone (`EmbeddedLang::parse_at`). Rust's are what a macro's expansion is
+parsed as by where it stands: a module's items, an impl block's, a
+block's statements. An entry must certify as the start rule does: its
+start state adds no conflict.
+
+---
+
+## `fragment name = rule_name`
+
+A fragment kind the language's macros match (`$e:expr`), and the rule
+that parses it: `fragment expr = attrs_expr`. The rule is an entry
+(declaring it a fragment is enough). A fragment is read greedily, as
+rustc reads one: tokens are taken while the rule can go on, and where
+the next one cannot continue it, the rule must end there, with no
+shorter reading to fall back to (`qana_grammar::parse_prefix`). Two
+fragments may name one rule (`expr_2021` and `expr`); what tells them
+apart is the macro engine's (`qana-mbe`), not the grammar's.
+
+---
+
 ## Rules
 
 ```
@@ -397,6 +423,7 @@ Attributes attach to a **labelled alternative**, after its symbols.
 | `@ns(name)` | This alternative's `@def`/`@ref` live in the NAMED namespace `name`: refs only bind same-namespace defs, and named namespaces resolve hoisted (order-free) in every scope — per-namespace ordering (C struct tags are forward-declarable while values stay define-before-use) |
 | `@ns(name, label…)` | The subtrees at the labels stand in namespace `name`: every def and ref inside them without a namespace of its own takes it. One path rule serves values, types and macros, each use giving it its namespace (`MacUse: p:path "!" … @ns(macro, p)`). It places only the labelled children: an alternative whose own `@def` stands in the namespace too says `@ns(name)` as well, and one whose children stand in different namespaces gives several, each child in one |
 | `@macro([params,] body)` | The meta tier: this alternative's `@def` introduces a MACRO whose parameters are the defs inside the `params` child and whose template is the `body` child — real syntax, parsed and bound at the definition. Substitution is binding-guided: body refs that resolve to a parameter get the corresponding argument's text. It is also SHAPE-PRESERVING: the expander compares the declared `prec` strengths of the argument, the hole, the body, and the use site, and where splicing would regroup them it wraps the text in the rule's own grouping production (`Paren: "(" expr ")"` — discovered by shape, whatever the delimiters are). A body with no declared shape (C's `pp_tokens`) splices textually, and a rule with no grouping production yields a diagnostic rather than a silent regrouping |
+| `@expansion(rule)` / `@expansion(rule, child)` | A macro invocation here expands to text parsed as `rule`, an entry (see **`entry rule_name`**): the node itself is the invocation, or with `child`, the invocation the `child` holds, through nodes that hold only it. Where several apply, the outer wins: Rust's `m!(…);` in a block (`ExprStmt: … e:stmt_expr ";" @expansion(block_stmts, e)`) expands to statements, while `m!(…)` anywhere else is an expression (`MacroCall: … @expansion(attrs_expr)`). An expression statement whose expression is no invocation is no expansion |
 | `@splice(name[, args])` | Expansion may happen HERE: when `name`'s `@ref` resolves to a macro, this node is replaced by the substituted body (`args` is the argument-list child for parameterized macros). Refs without `@splice` never expand — C's `#ifdef X` stays closed while `return X;` opens. Run `qana expand` to materialize (deterministic `<stem>.exp.<ext>` + provenance sidecar, write-if-changed, `--check` = the read-only drift gate). Expansion is HYGIENIC: every reference that survives must resolve to the same definition afterwards as where it was written, and where it would not, the expander renames the binder that swallowed it (reported as a note) — falling back to a diagnostic when no name the grammar admits is available |
 | `@reflect(ty[, "sep"[, facet…]])` | REFLECTION, on a `@splice` alternative: the macro's parameters bind PER MEMBER of the type `ty` resolves to — one body per member, joined by `sep`. The parameters take the declared FACETS in order (default `name, type`; available: `name`, `type`, `owner`, `index`, `count`), and a facet/parameter count mismatch is diagnosed. `name`/`type`/`owner` are copies of the declaration, so provenance points at the field or the struct; `index`/`count` are computed. The member map is the type tier's own `deftype`/`def` declarations, in whichever file declared them: a type resolving into a sibling reflects its members from there. Macro bodies are type-EXEMPT at the definition (templates type per instantiation, in the materialized output) |
 

@@ -18,7 +18,7 @@ use qana_grammar::Vocab;
 /// style class of the same name in attribute arguments.)
 pub const RG_KEYWORDS: &[&str] = &[
     "language", "max_stack", "keywords", "token", "mode", "pair", "prec", "left", "right",
-    "nonassoc", "start", "rule", "extensions",
+    "nonassoc", "start", "rule", "extensions", "entry", "fragment",
 ];
 
 pub struct QanaIds {
@@ -199,6 +199,8 @@ pub struct QanaProds {
     pub bracket_decl: usize,
     pub prec_decl: usize,
     pub start_decl: usize,
+    pub entry_decl: usize,
+    pub fragment_decl: usize,
     pub rule_decl: usize,
     pub rule_decl_bar: usize,
     pub token_def: usize,
@@ -286,6 +288,12 @@ pub fn qana_syn_grammar(ids: &QanaIds, vocab: &Vocab) -> (SynGrammar, QanaProds)
         sg.prod_named(decl, "PairDecl", vec![k("pair"), n(tok_ref), n(tok_ref)]);
     let p_prec_decl = sg.prod_named(decl, "PrecDecl", vec![k("prec"), n(assoc), n(prec_ops)]);
     let p_start_decl = sg.prod_named(decl, "StartDecl", vec![k("start"), t(ids.name)]);
+    let p_entry_decl = sg.prod_named(decl, "EntryDecl", vec![k("entry"), t(ids.name)]);
+    let p_fragment_decl = sg.prod_named(
+        decl,
+        "FragmentDecl",
+        vec![k("fragment"), t(ids.name), t(ids.eq), t(ids.name)],
+    );
     let p_rule_decl =
         sg.prod_named(decl, "RuleDecl", vec![k("rule"), t(ids.name), t(ids.eq), n(alt_list)]);
     let p_rule_decl_bar = sg.prod_named(
@@ -390,6 +398,8 @@ pub fn qana_syn_grammar(ids: &QanaIds, vocab: &Vocab) -> (SynGrammar, QanaProds)
         bracket_decl: p_bracket_decl,
         prec_decl: p_prec_decl,
         start_decl: p_start_decl,
+        entry_decl: p_entry_decl,
+        fragment_decl: p_fragment_decl,
         rule_decl: p_rule_decl,
         rule_decl_bar: p_rule_decl_bar,
         token_def: p_token_def,

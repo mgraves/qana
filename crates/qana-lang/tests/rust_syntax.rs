@@ -282,3 +282,54 @@ fn const_traits_as_stds_own_source_writes_them() {
         parses(src);
     }
 }
+
+/// How many of `text`'s tokens fragment kind `kind` takes, read greedily
+/// as a `macro_rules!` matcher reads it, or where it stops that it cannot
+/// end (see `qana_grammar::parse_prefix`).
+fn fragment(kind: &str, text: &str) -> Result<usize, usize> {
+    let lang = lang();
+    let nt = lang.sg.fragment(kind).unwrap_or_else(|| panic!("fragment {kind}"));
+    let start = lang.sg.start_state(lang.tables, nt).expect("a fragment's rule is an entry");
+    let ids: Vec<u16> = lang.tokens(text).iter().filter(|t| !t.trivia).map(|t| t.id).collect();
+    qana_grammar::parse_prefix(lang.sg, lang.tables, start, &ids)
+}
+
+#[test]
+fn an_entry_parses_its_rule_alone() {
+    let lang = lang();
+    for (rule, text) in [
+        ("attrs_expr", "#[allow(unused)] a + b * c"),
+        ("type", "Vec<Vec<u8>>"),
+        ("pat", "Some(x) | None"),
+        ("items_opt", "fn f() {} struct S;"),
+        ("assoc_items_opt", "fn new() -> Self { todo!() } const N: u8 = 1;"),
+        ("block_stmts", "let x = 1; f(x); x + 1"),
+    ] {
+        let (tree, repairs) =
+            lang.parse_at(rule, text).unwrap_or_else(|| panic!("{rule} is an entry"));
+        assert!(repairs.is_empty(), "{rule}: {text} parses cleanly: {repairs:?}");
+        assert_eq!(lang.sg.nt_names[tree.nt as usize], rule, "the root is the rule's node");
+    }
+    assert!(lang.parse_at("name", "x").is_none(), "a rule that is no entry");
+    assert_eq!(lang.entry_state("file"), Some(0), "the start rule's");
+}
+
+#[test]
+fn a_fragment_is_read_greedily_and_ends_where_its_rule_cannot_go_on() {
+    assert_eq!(fragment("expr", "a + b * c => x"), Ok(5), "up to `=>`");
+    assert_eq!(fragment("expr", "a +"), Err(2), "an expression cut short is no expression");
+    assert_eq!(fragment("ty", "Vec<Vec<u8>>, y"), Ok(7), "`>>` is two `>`s, both the type's");
+    assert_eq!(fragment("pat", "Some(x) | None => 1"), Ok(6), "a pattern takes a top-level `|`");
+    assert_eq!(fragment("pat_param", "Some(x) | None"), Ok(4), "a parameter's pattern does not");
+    assert_eq!(fragment("ident", "self"), Ok(1), "a keyword is an identifier here");
+    assert_eq!(fragment("ident", "_"), Err(0), "`_` is not");
+    assert_eq!(fragment("literal", "-1"), Ok(2));
+    assert_eq!(fragment("literal", "x"), Err(0));
+    assert_eq!(fragment("stmt", "let x = 1;"), Ok(4), "a statement without its `;`");
+    assert_eq!(fragment("path", "a::b::<T>::c ="), Ok(12), "a path, `::` two tokens each");
+    assert_eq!(fragment("vis", "fn"), Ok(0), "a visibility may be none");
+    assert_eq!(fragment("lifetime", "'a"), Ok(1));
+    assert_eq!(fragment("block", "{ x } y"), Ok(3));
+    assert_eq!(fragment("item", "struct S; x"), Ok(3));
+    assert_eq!(fragment("meta", "derive(Debug)"), Ok(4));
+}

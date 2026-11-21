@@ -293,6 +293,37 @@ prec left LPAREN LBRACK
 
 start file
 
+// ---- entries: what a macro's fragments and expansions are parsed as ----
+
+// What a `macro_rules!` matcher reads at each fragment kind (`$e:expr`),
+// as the Reference has them; `tt` is the engine's own. `expr_2021`, and
+// `expr` in a macro of an edition before 2024, refuse a leading `_` or
+// `const`, and `pat` in one before 2021 reads as `pat_param`: those are
+// the engine's, by the macro's edition.
+fragment block = block
+fragment expr = attrs_expr
+fragment expr_2021 = attrs_expr
+fragment ident = ident_fragment
+fragment item = item
+fragment lifetime = lifetime
+fragment literal = literal_fragment
+fragment meta = attr
+fragment pat = pat
+fragment pat_param = pat_no_alt
+fragment path = type_path
+fragment stmt = stmt_fragment
+fragment ty = type
+fragment vis = vis_opt
+
+// What an invocation's expansion is parsed as, by where it stands
+// (`@expansion`): a module's items, an impl block's or a trait's, an
+// extern block's, a block's statements; an expression, a pattern and a
+// type are fragments' entries already.
+entry items_opt
+entry assoc_items_opt
+entry foreign_items_opt
+entry block_stmts
+
 // ---- the file ----
 
 // A file's inner attributes are said of its module, and an item's outer
@@ -466,6 +497,30 @@ rule name =
   | RawName: t:RAW_IDENT @style(inherit, t)
   | CfgAttrName: t:KW_CFG_ATTR @style(inherit, t)
   | DeriveName: t:KW_DERIVE @style(inherit, t)
+
+// What `$i:ident` matches: an identifier or a keyword, `_` aside.
+rule ident_fragment =
+  | IdentFragment: IDENT | RawIdentFragment: RAW_IDENT
+  | UnionFragment: KW_UNION | AutoFragment: KW_AUTO | DefaultFragment: KW_DEFAULT
+  | RawFragment: KW_RAW | SafeFragment: KW_SAFE | CfgAttrFragment: KW_CFG_ATTR
+  | DeriveFragment: KW_DERIVE
+  | AsFragment: "as" | BreakFragment: "break" | ConstFragment: "const"
+  | ContinueFragment: "continue" | CrateFragment: "crate" | ElseFragment: "else"
+  | EnumFragment: "enum" | ExternFragment: "extern" | FalseFragment: "false"
+  | FnFragment: "fn" | ForFragment: "for" | IfFragment: "if" | ImplFragment: "impl"
+  | InFragment: "in" | LetFragment: "let" | LoopFragment: "loop"
+  | MatchFragment: "match" | ModFragment: "mod" | MoveFragment: "move"
+  | MutFragment: "mut" | PubFragment: "pub" | RefFragment: "ref"
+  | ReturnFragment: "return" | SelfValueFragment: "self" | SelfTypeFragment: "Self"
+  | StaticFragment: "static" | StructFragment: "struct" | SuperFragment: "super"
+  | TraitFragment: "trait" | TrueFragment: "true" | TypeFragment: "type"
+  | UnsafeFragment: "unsafe" | UseFragment: "use" | WhereFragment: "where"
+  | WhileFragment: "while" | AsyncFragment: "async" | AwaitFragment: "await"
+  | DynFragment: "dyn" | AbstractFragment: "abstract" | BecomeFragment: "become"
+  | BoxFragment: "box" | DoFragment: "do" | FinalFragment: "final"
+  | MacroFragment: "macro" | OverrideFragment: "override" | PrivFragment: "priv"
+  | TryFragment: "try" | TypeofFragment: "typeof" | UnsizedFragment: "unsized"
+  | VirtualFragment: "virtual" | YieldFragment: "yield"
 
 rule lifetime =
   | Lifetime:    t:LIFETIME @style(inherit, t)
@@ -663,7 +718,7 @@ rule generic_arg =
 // either one of these, or a visibility then one of those that take it.
 rule item_kind =
   | Plain:        vis_item_kind
-  | ItemMacro:    item_macro
+  | ItemMacro:    m:item_macro @expansion(items_opt, m)
   | ItemMacroDef: macro_def
 
 rule vis_item_kind =
@@ -936,7 +991,7 @@ rule assoc_items_opt = assoc_item*
 rule assoc_item =
   | AssocItem:    outer_attrs_opt assoc_vis_kind
   | PubAssocItem: outer_attrs_opt v:vis k:assoc_vis_kind @visibility(v, k)
-  | AssocMacro:   outer_attrs_opt item_macro
+  | AssocMacro:   outer_attrs_opt m:item_macro @expansion(assoc_items_opt, m)
   | AssocMacroDef: outer_attrs_opt macro_def
 
 rule assoc_vis_kind =
@@ -954,7 +1009,7 @@ rule foreign_items_opt = foreign_item*
 rule foreign_item =
   | ForeignItem:    outer_attrs_opt foreign_vis_kind
   | PubForeignItem: outer_attrs_opt v:vis k:foreign_vis_kind @visibility(v, k)
-  | ForeignMacro:   outer_attrs_opt item_macro
+  | ForeignMacro:   outer_attrs_opt m:item_macro @expansion(foreign_items_opt, m)
 
 rule foreign_vis_kind =
   | ForeignFn:      fn_def
@@ -1089,7 +1144,7 @@ rule type_np_core =
   | ImplType:    "impl" bound @type_ref(impl)
   | DynType:     "dyn" bound @type_ref(dyn)
   | FnPtrType:   fn_ptr @type_ref(other)
-  | MacroType:   p:plain_path b:BANG delim_tt @style(macro, p, b) @ns(macro, p) @type_ref(other)
+  | MacroType:   p:plain_path b:BANG delim_tt @style(macro, p, b) @ns(macro, p) @type_ref(other) @expansion(type)
   | InferType:   "_" @type_ref(other)
 
 // The type an `impl` without generics is for: not a qualified path, since
@@ -1200,7 +1255,7 @@ rule pat_nr_nomut =
   | SlicePat:       "[" pats_opt "]" @fold(list)
   | RefPat:         amp pat_nr_nomut
   | RefMutPat:      amp "mut" pat_nr
-  | MacroPat:       p:plain_path b:BANG delim_tt @style(macro, p, b) @ns(macro, p) @expands
+  | MacroPat:       p:plain_path b:BANG delim_tt @style(macro, p, b) @ns(macro, p) @expands @expansion(pat)
 
 // A path in a pattern: one name is an identifier pattern, so a path is
 // more than one segment, `Self`, qualified, or with generic arguments.
@@ -1249,6 +1304,11 @@ rule pat_field =
 
 // ---- literals ----
 
+// What `$l:literal` matches: a literal, negated or not.
+rule literal_fragment =
+  | LiteralFragment:    literal
+  | NegLiteralFragment: MINUS literal
+
 rule literal =
   | IntLit:   INT
   | FloatLit: FLOAT
@@ -1293,6 +1353,30 @@ rule stmts_opt = stmt*
 
 rule tail_opt = tail?
 
+// A statement position's expansion (`m!(…);`, `m! { … }` in a block): its
+// statements, and the expression it may end with. An invocation it ends
+// with is a statement too, as rustc reads one before the expansion's end
+// (where in a block, before `}`, it is the block's expression).
+rule block_stmts = BlockStmts: stmts_opt stmts_tail_opt
+
+rule stmts_tail_opt = stmts_tail?
+
+rule stmts_tail = StmtsTail: outer_attrs_opt e:stmt_expr @expansion(block_stmts, e)
+
+// An expression with outer attributes before it, as rustc's parser reads an
+// expression fragment (`$e:expr`) and an expression macro's expansion
+// (`#[allow(…)] unsafe { … }`).
+rule attrs_expr = AttrsExpr: outer_attrs_opt expr
+
+// What `$s:stmt` matches: a statement without its trailing `;`, or a `;`
+// alone (an empty statement).
+rule stmt_fragment =
+  | EmptyStmtFragment: ";"
+  | ItemStmtFragment:  stmt_item
+  | LetStmtFragment:   outer_attrs_opt "let" pat_no_alt type_ann_opt let_init_opt
+  | ExprStmtFragment:  outer_attrs_opt stmt_expr
+  | BlockStmtFragment: outer_attrs_opt block_like
+
 // The expression a block ends with, without `;`.
 rule tail = Tail: outer_attrs_opt stmt_expr
 
@@ -1300,8 +1384,8 @@ rule stmt =
   | EmptyStmt:  ";"
   | ItemStmt:   stmt_item
   | LetStmt:    outer_attrs_opt "let" p:pat_no_alt a:type_ann_opt i:let_init_opt ";" @defer(p) @typed(p, a) @inits(p, i)
-  | ExprStmt:   outer_attrs_opt stmt_expr ";"
-  | BlockStmt:  outer_attrs_opt block_like
+  | ExprStmt:   outer_attrs_opt e:stmt_expr ";" @expansion(block_stmts, e)
+  | BlockStmt:  outer_attrs_opt b:block_like @expansion(block_stmts, b)
 
 rule type_ann_opt = type_ann?
 
@@ -1331,7 +1415,7 @@ rule block_like =
   | LabeledWhile:   label "while" cond block @scope
   | For:            "for" p:pat "in" c:cond block @defer(p, c) @scope
   | LabeledFor:     label "for" p:pat "in" c:cond block @defer(p, c) @scope
-  | BraceMacro:     p:plain_path b:BANG open:"{" tts "}" @fold(block, open) @style(macro, p, b) @ns(macro, p) @expands
+  | BraceMacro:     p:plain_path b:BANG open:"{" tts "}" @fold(block, open) @style(macro, p, b) @ns(macro, p) @expands @expansion(attrs_expr)
 
 rule label = Label: l:lifetime COLON @style(label, l) @def(l) @ns(label)
 
@@ -1372,8 +1456,8 @@ rule guard = Guard: "if" expr
 rule atom =
   | Lit:        literal
   | PathExpr:   p:expr_path @style(inherit, p) @value(path, p)
-  | MacroCall:  p:plain_path b:BANG open:"(" tts ")" @fold(list, open) @style(macro, p, b) @ns(macro, p) @expands
-  | MacroIndex: p:plain_path b:BANG open:"[" tts "]" @fold(list, open) @style(macro, p, b) @ns(macro, p) @expands
+  | MacroCall:  p:plain_path b:BANG open:"(" tts ")" @fold(list, open) @style(macro, p, b) @ns(macro, p) @expands @expansion(attrs_expr)
+  | MacroIndex: p:plain_path b:BANG open:"[" tts "]" @fold(list, open) @style(macro, p, b) @ns(macro, p) @expands @expansion(attrs_expr)
   | Unit:       "(" ")" @fold(list)
   | Paren:      "(" e:elem ")" @fold(list) @value(same, e)
   | TupleOne:   "(" elem "," ")" @fold(list)

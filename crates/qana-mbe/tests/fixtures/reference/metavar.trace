@@ -1,0 +1,15 @@
+// rustc +nightly (1.94.0-nightly f52090008 2025-12-10) -Ztrace-macros --edition 2021 metavar.rs:
+// its notes, the excerpts of the source between them left out.
+  = note: expanding `counts! { a, b, c }`
+  = note: to `const N : usize = 3; const C_a : usize = 0; const C_b : usize = 1; const C_c :
+          usize = 2;`
+   = note: expanding `lens! { p q }`
+   = note: to `const p_LEN : usize = 2; const q_LEN : usize = 2;`
+   = note: expanding `nested_count! { a b; c }`
+   = note: to `const NC0 : usize = 3; const NC1 : usize = 2;`
+   = note: expanding `from_literal! { 5 }`
+   = note: to `const V5 : u8 = 0;`
+   = note: expanding `from_literal! { "x" }`
+   = note: to `const Vx : u8 = 0;`
+   = note: expanding `dollar_dollar! {  }`
+   = note: to `macro_rules! made { ($x : ident) => { $x } }`

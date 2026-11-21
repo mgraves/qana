@@ -1,0 +1,89 @@
+// rustc +nightly (1.94.0-nightly f52090008 2025-12-10) -Ztrace-macros --edition 2021 reference.rs:
+// its notes, the excerpts of the source between them left out.
+   = note: expanding `s_tail! { 1 + 1 }`
+   = note: to `fn s_tail() -> i32 { 1 + 1 }`
+   = note: expanding `s_let_end! { let _x = 1 }`
+   = note: to `fn s_let_end() { let _x = 1 }`
+   = note: expanding `s_then! { let _x = 1 }`
+   = note: to `fn s_then() { let _x = 1 let _y = 2; }`
+   = note: expanding `s_empty! { ; }`
+   = note: to `fn s_empty() { ; }`
+   = note: expanding `k_item! { struct FromItem; }`
+   = note: to `struct FromItem;`
+   = note: expanding `k_block! { { let _ = 1; } }`
+   = note: to `fn from_block() { let _ = 1; }`
+   = note: expanding `k_stmt! { let _x = 3 }`
+   = note: to `fn from_stmt() { let _x = 3; }`
+   = note: expanding `k_pat! { Some(1 | 2) | None }`
+   = note: to `fn from_pat(x : Option < u8 >) { if let Some(1 | 2) | None = x {} }`
+   = note: expanding `k_pat_param! { 1 | 2 }`
+   = note: to `fn from_pat_param(x : u8) { match x { 1 | 2 => {} _ => {} } }`
+   = note: expanding `k_expr! { 1 + 1 }`
+   = note: to `const FROM_EXPR : i32 = 1 + 1 * 2;`
+   = note: expanding `k_ty! { Vec<Vec<u8>> }`
+   = note: to `type FromTy = Vec<Vec<u8>>;`
+   = note: expanding `k_ident! { from_ident }`
+   = note: to `fn from_ident () {}`
+   = note: expanding `k_path! { std::collections::HashMap<u8, u8> }`
+   = note: to `type FromPath = std::collections::HashMap<u8, u8>;`
+   = note: expanding `k_tt! { fn from_tt() -> u8 { 1 } }`
+   = note: to `fn from_tt() -> u8 { 1 }`
+   = note: expanding `k_meta! { inline(always) }`
+   = note: to `#[inline(always)] fn from_meta() {}`
+   = note: expanding `k_lifetime! { 'a }`
+   = note: to `fn from_lifetime < 'a > (x : & 'a u8) -> & 'a u8 { x }`
+   = note: expanding `k_vis! { pub(crate) from_vis }`
+   = note: to `pub(crate) fn from_vis () {}`
+   = note: expanding `k_vis! { no_vis }`
+   = note: to ` fn no_vis () {}`
+   = note: expanding `k_literal! { -1 }`
+   = note: to `const FROM_LITERAL : i32 = -1;`
+   = note: expanding `reps! { A = 1, B = 2; c1 c2; # 3 }`
+   = note: to `const A : i32 = 1; const B : i32 = 2; fn c1 () {}fn c2 () {}const D : i32 = 3;`
+   = note: expanding `reps! { ; c3; }`
+   = note: to `fn c3 () {}`
+   = note: expanding `nested! { N1: 1, 2; N2: ; N3: 4 }`
+   = note: to `const N1 : & [i32] = & [1, 2]; const N2 : & [i32] = & []; const N3 : & [i32] =
+           & [4];`
+   = note: expanding `sep_arrow! { s1 => s2 => s3 }`
+   = note: to `fn s1 () {}fn s2 () {}fn s3 () {}`
+   = note: expanding `ty_then_gt! { Vec<u8>> }`
+   = note: to `type Split = Vec<u8>;`
+   = note: expanding `make! { seven }`
+   = note: to `macro_rules! seven { () => { 7 } }`
+    = note: expanding `docs! { /// One.
+            /** Two. */
+             fn documented }`
+    = note: to `#[doc = r" One."] #[doc = r" Two. "] fn documented () {}`
+    = note: expanding `doc_in_matcher! { undocumented }`
+    = note: to `fn undocumented () {}`
+    = note: expanding `with_crate! {  }`
+    = note: to `$crate :: helper()`
+    = note: expanding `dollar_kept! { x }`
+    = note: to `stringify! ($y x)`
+    = note: expanding `outer_expr! { 3 }`
+    = note: to `inner_lit! (3)`
+    = note: expanding `inner_lit! { 3 }`
+    = note: to `3`
+    = note: expanding `outer_tt! { 3 }`
+    = note: to `inner_three! (3)`
+    = note: expanding `inner_three! { 3 }`
+    = note: to `3`
+    = note: expanding `double! { 1 + 1 }`
+    = note: to `1 + 1 * 2`
+    = note: expanding `lt3! { x as u8 }`
+    = note: to `x as u8 < 3`
+    = note: expanding `fwd_lt! { x as u8 }`
+    = note: to `take! (x as u8 < 3)`
+    = note: expanding `take! { x as u8 < 3 }`
+    = note: to `x as u8 < 3`
+    = note: expanding `count! { a b c }`
+    = note: to `1usize + count! (b c)`
+    = note: expanding `count! { b c }`
+    = note: to `1usize + count! (c)`
+    = note: expanding `count! { c }`
+    = note: to `1usize + count! ()`
+    = note: expanding `count! {  }`
+    = note: to `0usize`
+    = note: expanding `seven! {  }`
+    = note: to `7`

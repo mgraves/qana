@@ -1453,10 +1453,22 @@ fn next_terminal(input: &VecDeque<Item>) -> TokenId {
 pub fn incremental_parse(
     g: &SynGrammar,
     t: &LrTables,
+    input: VecDeque<Item>,
+) -> Result<(Arc<GreenNode>, ReuseStats, Vec<Repair>), IncParseError> {
+    incremental_parse_from(g, t, 0, input)
+}
+
+/// [`incremental_parse`] from start state `start`: state 0 parses the
+/// start rule, an entry's state its rule
+/// ([`LrTables::entry_states`]), and the tree's root is that rule's node.
+pub fn incremental_parse_from(
+    g: &SynGrammar,
+    t: &LrTables,
+    start: u16,
     mut input: VecDeque<Item>,
 ) -> Result<(Arc<GreenNode>, ReuseStats, Vec<Repair>), IncParseError> {
     let mut stats = ReuseStats::default();
-    let mut states: Vec<u16> = vec![0];
+    let mut states: Vec<u16> = vec![start];
     let mut stack: Vec<Entry> = Vec::new();
     let mut pending: Vec<GreenChild> = Vec::new();
     let mut consumed_terms = 0usize;
@@ -2329,6 +2341,18 @@ pub fn batch_parse_green(
 ) -> Result<Arc<GreenNode>, IncParseError> {
     let input: VecDeque<Item> = all.iter().cloned().map(Item::Fresh).collect();
     incremental_parse(g, t, input).map(|(tree, _, _)| tree)
+}
+
+/// Batch parse from start state `start` (an entry's: see
+/// [`incremental_parse_from`]), returning repairs as well.
+pub fn batch_parse_from(
+    g: &SynGrammar,
+    t: &LrTables,
+    start: u16,
+    all: &[TokWithText],
+) -> Result<(Arc<GreenNode>, ReuseStats, Vec<Repair>), IncParseError> {
+    let input: VecDeque<Item> = all.iter().cloned().map(Item::Fresh).collect();
+    incremental_parse_from(g, t, start, input)
 }
 
 /// Batch parse returning repairs as well (the session's fallback path

@@ -10,6 +10,7 @@ members = [
     "crates/qana-sem",
     "crates/qana-lang",
     "crates/qana-index",
+    "crates/qana-mbe",
     "crates/qana",
     "crates/qana-cli",
 ]

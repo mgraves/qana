@@ -140,6 +140,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "qana-mbe"
+version = "0.0.1"
+dependencies = [
+ "qana-grammar",
+ "qana-lang",
+]
+
+[[package]]
 name = "qana-sem"
 version = "0.0.3"
 dependencies = [

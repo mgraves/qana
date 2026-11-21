@@ -1,0 +1,14 @@
+[package]
+name = "qana-mbe"
+version = "0.0.1"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust's macros by example (`macro_rules!` and `macro`), as rustc expands them: definitions read from their tokens, invocations matched and transcribed, each token keeping where it was written, expansions parsed where they stand"
+keywords = ["rust", "macro", "macro_rules", "expansion", "editor"]
+categories = ["parsing", "development-tools"]
+
+[dependencies]
+qana-grammar.workspace = true
+qana-lang.workspace = true

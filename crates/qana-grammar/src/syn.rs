@@ -55,6 +55,17 @@ pub struct SynGrammar {
     pub nt_names: Vec<String>,
     pub prods: Vec<Prod>,
     pub start: NtId,
+    /// The rules the grammar can be parsed from besides `start` (`entry`
+    /// declarations): what a macro's fragment or an expansion's context
+    /// is, each with a start state of its own in the tables
+    /// ([`crate::lr::LrTables::entry_states`]).
+    #[serde(default)]
+    pub entries: Vec<NtId>,
+    /// The fragment kinds the grammar's macros match (`fragment`
+    /// declarations: Rust's `expr`, `ty`, `ident`), each with the rule it
+    /// parses at: the start rule, or one of `entries`.
+    #[serde(default)]
+    pub fragments: Vec<(String, NtId)>,
     /// Token precedence: (level, assoc). Higher level binds tighter.
     pub token_prec: Vec<Option<(u8, Assoc)>>,
     /// Each token's declared bracket role, indexed by TokenId: its kind,
@@ -91,9 +102,27 @@ impl SynGrammar {
             nt_names: Vec::new(),
             prods: Vec::new(),
             start: 0,
+            entries: Vec::new(),
+            fragments: Vec::new(),
             token_prec: vec![None; n],
             brackets: Vec::new(),
         }
+    }
+
+    /// The start state rule `nt` is parsed from: 0 for the start rule, or
+    /// its entry's ([`crate::lr::LrTables::entry_states`]); `None` for a
+    /// rule that is neither.
+    pub fn start_state(&self, t: &crate::lr::LrTables, nt: NtId) -> Option<u16> {
+        if nt == self.start {
+            return Some(0);
+        }
+        t.entry_states.iter().find(|&&(e, _)| e == nt).map(|&(_, state)| state)
+    }
+
+    /// The rule the fragment kind `name` parses at, if the grammar names
+    /// it.
+    pub fn fragment(&self, name: &str) -> Option<NtId> {
+        self.fragments.iter().find(|(n, _)| n == name).map(|&(_, nt)| nt)
     }
 
     /// Take `vocab`'s bracket pairs as this grammar's.

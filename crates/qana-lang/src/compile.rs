@@ -229,6 +229,10 @@ struct FileIr {
     /// (assoc, ops) in declaration order — level = position + 1.
     precs: Vec<(Assoc, Vec<TokRefIr>)>,
     start: Option<(String, (u32, u32))>,
+    /// `entry` declarations: the rule, where.
+    entries: Vec<(String, (u32, u32))>,
+    /// `fragment` declarations: the kind, the rule, where.
+    fragments: Vec<(String, String, (u32, u32))>,
     rules: Vec<RuleIr>,
 }
 
@@ -472,6 +476,14 @@ fn lower(tree: &GreenNode, p: &QanaProds, diags: &mut Vec<QanaDiag>) -> FileIr {
                 } else {
                     ir.start = Some((t.text.clone(), s));
                 }
+            }
+        } else if prod == p.entry_decl {
+            if let Some((t, s)) = d.tok(1) {
+                ir.entries.push((t.text.clone(), s));
+            }
+        } else if prod == p.fragment_decl {
+            if let (Some((kind, s)), Some((rule, _))) = (d.tok(1), d.tok(3)) {
+                ir.fragments.push((kind.text.clone(), rule.text.clone(), s));
             }
         } else if prod == p.rule_decl || prod == p.rule_decl_bar {
             let Some((name, name_span)) = d.tok(1) else { continue };
@@ -979,6 +991,9 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
     }
 
     let mut binding = BindingConfig::default();
+    // Each `@expansion`'s rule, and where it is named: checked to be an
+    // entry once entries are read.
+    let mut expansion_rules: Vec<(u16, (u32, u32))> = Vec::new();
     let mut macros = qana_sem::macros::MacroConfig::default();
     let mut type_cfg = TypeConfig::default();
     let mut outline = OutlineConfig::default();
@@ -1166,6 +1181,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             let mut pending_attributes: Option<usize> = None;
             let mut pending_loads: Option<(u32, u32)> = None;
             let mut seen_expands = false;
+            let mut seen_expansion = false;
             let mut seen_type_ref = false;
             let mut seen_typed = false;
             let mut seen_returns = false;
@@ -1793,6 +1809,32 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             match positions.get(a.args[0].0.as_str()) {
                                 Some(&k) => binding.positional.push((nt, prod, k)),
                                 None => error(d, a.args[0].1, format!("no symbol labeled `{}` in this alternative", a.args[0].0)),
+                            }
+                        }
+                    }
+                    "expansion" => {
+                        // `@expansion(rule[, child])`: an invocation here,
+                        // or the one child `child` holds, expands to the
+                        // text of `rule`, an entry.
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@expansion takes an entry rule, then the label of the child an invocation is".into());
+                        } else if std::mem::replace(&mut seen_expansion, true) {
+                            error(d, a.name_span, "duplicate @expansion".into());
+                        } else {
+                            let child = match a.args.get(1) {
+                                None => Ok(None),
+                                Some((label, span, _)) => match positions.get(label.as_str()) {
+                                    Some(&k) => Ok(Some(k)),
+                                    None => Err((*span, format!("no symbol labeled `{label}` in this alternative"))),
+                                },
+                            };
+                            match (nt_ids.get(a.args[0].0.as_str()), child) {
+                                (None, _) => error(d, a.args[0].1, format!("cannot find rule `{}`", a.args[0].0)),
+                                (_, Err((span, msg))) => error(d, span, msg),
+                                (Some(&entry), Ok(child)) => {
+                                    binding.expansions.push((nt, prod, entry, child));
+                                    expansion_rules.push((entry, a.args[0].1));
+                                }
                             }
                         }
                     }
@@ -2597,6 +2639,35 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             None => error(d, *span, format!("cannot find rule `{name}`")),
         },
         None => sg.start = 0,
+    }
+    // ---- entries, and the fragments that parse at them ----
+    // A rule named as an entry, or as what a fragment parses at, is an
+    // entry: the start rule is one already.
+    let named_entries = ir.entries.iter().map(|(rule, span)| (None, rule, span));
+    let fragment_rules = ir.fragments.iter().map(|(kind, rule, span)| (Some(kind), rule, span));
+    for (kind, rule, span) in named_entries.chain(fragment_rules) {
+        if let Some(kind) = kind {
+            if sg.fragments.iter().any(|(k, _)| k == kind) {
+                error(d, *span, format!("duplicate `fragment {kind}`"));
+                continue;
+            }
+        }
+        let Some(&nt) = nt_ids.get(rule) else {
+            error(d, *span, format!("cannot find rule `{rule}`"));
+            continue;
+        };
+        if nt != sg.start && !sg.entries.contains(&nt) {
+            sg.entries.push(nt);
+        }
+        if let Some(kind) = kind {
+            sg.fragments.push((kind.clone(), nt));
+        }
+    }
+    for (entry, span) in &expansion_rules {
+        if *entry != sg.start && !sg.entries.contains(entry) {
+            let name = &sg.nt_names[*entry as usize];
+            error(d, *span, format!("`{name}` is no entry: declare `entry {name}`"));
+        }
     }
     if ir.rules.is_empty() {
         error(d, (0, 0), "a grammar needs at least one rule".into());

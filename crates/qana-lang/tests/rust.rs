@@ -169,6 +169,11 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
     for entry in entries {
         let path = entry.expect("a directory entry").path();
+        // A test's fixtures are other code's Rust (std's, copied), which
+        // may be what this grammar leaves out (`macro` items).
+        if path.is_dir() && path.file_name().is_some_and(|n| n == "fixtures") {
+            continue;
+        }
         if path.is_dir() {
             rust_files(&path, out);
         } else if path.extension().is_some_and(|ext| ext == "rs") {

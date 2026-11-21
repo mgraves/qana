@@ -30,13 +30,14 @@ pub mod typed;
 pub use compose::{compose, ComposeMap, IslandSpec};
 pub use green::{build_green, GreenChild, GreenNode, GreenToken, LrEnds, TokWithText, NEWLINE};
 pub use incremental::{
-    batch_parse_full, batch_parse_green, incremental_parse, salvage, FreshRegion, IncParseError,
-    Item, Recovery, Repair, RepairKind, ReuseStats,
+    batch_parse_from, batch_parse_full, batch_parse_green, incremental_parse,
+    incremental_parse_from, salvage, FreshRegion, IncParseError, Item, Recovery, Repair,
+    RepairKind, ReuseStats,
 };
 pub use lexer::{CompiledLexer, MStack, Token, MAX_STACK};
 pub use lr::{build_lr, LrAct, LrTables};
 pub use model::{Action, BracketKind, LexGrammar, TokenDef, TokenId, Vocab};
-pub use parse::{parse, sexpr, PNode, TermTok};
+pub use parse::{parse, parse_prefix, sexpr, PNode, TermTok};
 pub use pat::{ClassSet, Pat};
 pub use syn::{Assoc, NtId, Sym, SynGrammar, EOF};
 pub use typed::{AstNode, NodeRef, SymbolChild, TokenRef};

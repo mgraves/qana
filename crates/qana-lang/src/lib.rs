@@ -229,6 +229,32 @@ impl EmbeddedLang {
     pub fn session(&self, text: &str) -> IncSession<'static> {
         IncSession::new(self.lexer, self.sg, self.tables, text).expect("total parsing")
     }
+
+    /// The start state rule `rule` is parsed from: the start rule's, 0, or
+    /// an entry's (`entry` and `fragment` declarations); `None` for any
+    /// other rule.
+    pub fn entry_state(&self, rule: &str) -> Option<u16> {
+        let nt = self.sg.nt_names.iter().position(|n| n == rule)? as u16;
+        self.sg.start_state(self.tables, nt)
+    }
+
+    /// The tokens of `text`, trivia among them, as this language lexes it:
+    /// their texts make the text up.
+    pub fn tokens(&self, text: &str) -> Vec<qana_grammar::TokWithText> {
+        qana_engine::full_tokens(self.lexer, &qana_engine::LexedBuffer::new(self.lexer, text))
+    }
+
+    /// `text` parsed as rule `rule` (an entry, or the start rule), total
+    /// under errors as a document's parse is: the tree, rooted at `rule`'s
+    /// node, and the repairs that say what was wrong. `None` for a rule that
+    /// is no entry.
+    pub fn parse_at(&self, rule: &str, text: &str) -> Option<(Arc<GreenNode>, Vec<Repair>)> {
+        let start = self.entry_state(rule)?;
+        let tokens = self.tokens(text);
+        let (tree, _, repairs) =
+            qana_grammar::batch_parse_from(self.sg, self.tables, start, &tokens).ok()?;
+        Some((tree, repairs))
+    }
 }
 
 /// Parse + compile a `.qana` source. Total: broken sources still yield a
@@ -416,7 +442,12 @@ pub fn qana_binding_config(sg: &SynGrammar) -> qana_sem::BindingConfig {
             "RuleDecl" | "RuleDeclBar" | "RuleStar" | "RulePlus" | "RuleOpt" | "TokenDef" => {
                 cfg.defs.push((nt, prod, 1))
             }
-            "KwDecl" | "StartDecl" => cfg.refs.push((nt, prod, 1, qana_sem::RefKind::Var)),
+            "KwDecl" | "StartDecl" | "EntryDecl" => {
+                cfg.refs.push((nt, prod, 1, qana_sem::RefKind::Var))
+            }
+            // `fragment name = rule`: the rule is referenced; the fragment's
+            // name is the language's macros', no rule.
+            "FragmentDecl" => cfg.refs.push((nt, prod, 3, qana_sem::RefKind::Var)),
             "TokName" | "SymName" | "SymNameOpt" | "SymNameStar" | "SymNamePlus" | "ElemName" => {
                 cfg.refs.push((nt, prod, 0, qana_sem::RefKind::Var))
             }

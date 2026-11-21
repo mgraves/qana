@@ -1,0 +1,210 @@
+// rustc +nightly (1.94.0-nightly f52090008 2025-12-10) -Ztrace-macros --edition 2021 probe_std.rs:
+// its notes, the excerpts of the source between them left out.
+  = note: expanding `thread_local! { /// The count.
+          static COUNT: Cell<u32> = Cell::new(0); #[allow(unused)] pub static NAME:
+          RefCell<String> = const { RefCell::new(String::new()) }; pub(crate) static
+          LIST: RefCell<Vec<u8>> = RefCell::new(vec![1, 2]); }`
+  = note: to `$crate :: thread :: local_impl :: thread_local_process_attrs!
+          ([] []; #[doc = r" The count."] static COUNT: Cell<u32> = Cell::new(0);
+          #[allow(unused)] pub static NAME: RefCell<String> = const
+          { RefCell::new(String::new()) }; pub(crate) static LIST: RefCell<Vec<u8>> =
+          RefCell::new(vec![1, 2]););`
+  = note: expanding `thread_local_process_attrs! { [] []; #[doc = r" The count."] static COUNT: Cell<u32> = Cell::new(0);
+          #[allow(unused)] pub static NAME: RefCell<String> = const
+          { RefCell::new(String::new()) }; pub(crate) static LIST: RefCell<Vec<u8>> =
+          RefCell::new(vec![1, 2]); }`
+  = note: to `$crate :: thread :: local_impl :: thread_local_process_attrs!
+          ([] [#[doc = r" The count."]];  static COUNT: Cell<u32> = Cell::new(0);
+          #[allow(unused)] pub static NAME: RefCell<String> = const
+          { RefCell::new(String::new()) }; pub(crate) static LIST: RefCell<Vec<u8>> =
+          RefCell::new(vec![1, 2]););`
+  = note: expanding `thread_local_process_attrs! { [] [#[doc = r" The count."]];  static COUNT: Cell<u32> = Cell::new(0);
+          #[allow(unused)] pub static NAME: RefCell<String> = const
+          { RefCell::new(String::new()) }; pub(crate) static LIST: RefCell<Vec<u8>> =
+          RefCell::new(vec![1, 2]); }`
+  = note: to `#[doc = r" The count."]  const COUNT : $crate :: thread :: LocalKey <
+          Cell<u32> > = $crate :: thread :: local_impl :: thread_local_inner!
+          (@ key Cell<u32>, , Cell::new(0)); $crate :: thread :: local_impl ::
+          thread_local_process_attrs!
+          ([] []; #[allow(unused)] pub static NAME: RefCell<String> = const
+          { RefCell::new(String::new()) }; pub(crate) static LIST: RefCell<Vec<u8>> =
+          RefCell::new(vec![1, 2]););`
+  = note: expanding `thread_local_inner! { @ key Cell<u32>, , Cell::new(0) }`
+  = note: to `{
+              #[inline] fn __rust_std_internal_init_fn() -> Cell<u32> { Cell::new(0) }
+              unsafe
+              {
+                  $crate :: thread :: LocalKey ::
+                  new(const
+                  {
+                      if $crate :: mem :: needs_drop :: < Cell<u32> > ()
+                      {
+                          | __rust_std_internal_init |
+                          {
+                              #[thread_local] static __RUST_STD_INTERNAL_VAL : $crate ::
+                              thread :: local_impl :: LazyStorage < Cell<u32>, ()> =
+                              $crate :: thread :: local_impl :: LazyStorage :: new();
+                              __RUST_STD_INTERNAL_VAL.get_or_init(__rust_std_internal_init,
+                              __rust_std_internal_init_fn)
+                          }
+                      } else
+                      {
+                          | __rust_std_internal_init |
+                          {
+                              #[thread_local] static __RUST_STD_INTERNAL_VAL : $crate ::
+                              thread :: local_impl :: LazyStorage < Cell<u32>, ! > =
+                              $crate :: thread :: local_impl :: LazyStorage :: new();
+                              __RUST_STD_INTERNAL_VAL.get_or_init(__rust_std_internal_init,
+                              __rust_std_internal_init_fn)
+                          }
+                      }
+                  })
+              }
+          }`
+  = note: expanding `thread_local_process_attrs! { [] []; #[allow(unused)] pub static NAME: RefCell<String> = const
+          { RefCell::new(String::new()) }; pub(crate) static LIST: RefCell<Vec<u8>> =
+          RefCell::new(vec![1, 2]); }`
+  = note: to `$crate :: thread :: local_impl :: thread_local_process_attrs!
+          ([] [#[allow(unused)]]; pub static NAME: RefCell<String> = const
+          { RefCell::new(String::new()) }; pub(crate) static LIST: RefCell<Vec<u8>> =
+          RefCell::new(vec![1, 2]););`
+  = note: expanding `thread_local_process_attrs! { [] [#[allow(unused)]]; pub static NAME: RefCell<String> = const
+          { RefCell::new(String::new()) }; pub(crate) static LIST: RefCell<Vec<u8>> =
+          RefCell::new(vec![1, 2]); }`
+  = note: to `#[allow(unused)] pub const NAME : $crate :: thread :: LocalKey <
+          RefCell<String> > = $crate :: thread :: local_impl :: thread_local_inner!
+          (@ key RefCell<String>, , const { RefCell::new(String::new()) }); $crate ::
+          thread :: local_impl :: thread_local_process_attrs!
+          ([] []; pub(crate) static LIST: RefCell<Vec<u8>> = RefCell::new(vec![1, 2]););`
+  = note: expanding `thread_local_inner! { @ key RefCell<String>, , const { RefCell::new(String::new()) } }`
+  = note: to `{
+              const __RUST_STD_INTERNAL_INIT : RefCell<String> =
+              { RefCell::new(String::new()) }; unsafe
+              {
+                  $crate :: thread :: LocalKey ::
+                  new(const
+                  {
+                      if $crate :: mem :: needs_drop :: < RefCell<String> > ()
+                      {
+                          | _ |
+                          {
+                              #[thread_local] static __RUST_STD_INTERNAL_VAL : $crate ::
+                              thread :: local_impl :: EagerStorage < RefCell<String> > =
+                              $crate :: thread :: local_impl :: EagerStorage ::
+                              new(__RUST_STD_INTERNAL_INIT); __RUST_STD_INTERNAL_VAL.get()
+                          }
+                      } else
+                      {
+                          | _ |
+                          {
+                              #[thread_local] static __RUST_STD_INTERNAL_VAL :
+                              RefCell<String> = __RUST_STD_INTERNAL_INIT; &
+                              __RUST_STD_INTERNAL_VAL
+                          }
+                      }
+                  })
+              }
+          }`
+  = note: expanding `thread_local_process_attrs! { [] []; pub(crate) static LIST: RefCell<Vec<u8>> = RefCell::new(vec![1, 2]); }`
+  = note: to `pub(crate) const LIST : $crate :: thread :: LocalKey < RefCell<Vec<u8>> > =
+          $crate :: thread :: local_impl :: thread_local_inner!
+          (@ key RefCell<Vec<u8>>, , RefCell::new(vec![1, 2]));`
+  = note: expanding `thread_local_inner! { @ key RefCell<Vec<u8>>, , RefCell::new(vec![1, 2]) }`
+  = note: to `{
+              #[inline] fn __rust_std_internal_init_fn() -> RefCell<Vec<u8>>
+              { RefCell::new(vec![1, 2]) } unsafe
+              {
+                  $crate :: thread :: LocalKey ::
+                  new(const
+                  {
+                      if $crate :: mem :: needs_drop :: < RefCell<Vec<u8>> > ()
+                      {
+                          | __rust_std_internal_init |
+                          {
+                              #[thread_local] static __RUST_STD_INTERNAL_VAL : $crate ::
+                              thread :: local_impl :: LazyStorage < RefCell<Vec<u8>>, ()>
+                              = $crate :: thread :: local_impl :: LazyStorage :: new();
+                              __RUST_STD_INTERNAL_VAL.get_or_init(__rust_std_internal_init,
+                              __rust_std_internal_init_fn)
+                          }
+                      } else
+                      {
+                          | __rust_std_internal_init |
+                          {
+                              #[thread_local] static __RUST_STD_INTERNAL_VAL : $crate ::
+                              thread :: local_impl :: LazyStorage < RefCell<Vec<u8>>, ! >
+                              = $crate :: thread :: local_impl :: LazyStorage :: new();
+                              __RUST_STD_INTERNAL_VAL.get_or_init(__rust_std_internal_init,
+                              __rust_std_internal_init_fn)
+                          }
+                      }
+                  })
+              }
+          }`
+  = note: expanding `vec! { 1, 2 }`
+  = note: to `< [_] > :: into_vec($crate :: boxed :: box_new([1, 2]))`
+   = note: expanding `vec! { 1, 2, 3 }`
+   = note: to `< [_] > :: into_vec($crate :: boxed :: box_new([1, 2, 3]))`
+   = note: expanding `vec! { 0u8; 4 }`
+   = note: to `$crate :: vec :: from_elem(0u8, 4)`
+   = note: expanding `vec! {  }`
+   = note: to `$crate :: vec :: Vec :: new()`
+   = note: expanding `vec! { (1, "a"), (2, "b"), }`
+   = note: to `< [_] > :: into_vec($crate :: boxed :: box_new([(1, "a"), (2, "b")]))`
+   = note: expanding `assert_eq! { v.len(), 3 }`
+   = note: to `match (& v.len(), & 3)
+           {
+               (left_val, right_val) =>
+               {
+                   if ! (* left_val == * right_val)
+                   {
+                       let kind = $crate :: panicking :: AssertKind :: Eq; $crate ::
+                       panicking ::
+                       assert_failed(kind, & * left_val, & * right_val, $crate :: option
+                       :: Option :: None);
+                   }
+               }
+           }`
+   = note: expanding `assert_eq! { w.len(), 4, "w has {} items", w.len() }`
+   = note: to `match (& w.len(), & 4)
+           {
+               (left_val, right_val) =>
+               {
+                   if ! (* left_val == * right_val)
+                   {
+                       let kind = $crate :: panicking :: AssertKind :: Eq; $crate ::
+                       panicking ::
+                       assert_failed(kind, & * left_val, & * right_val, $crate :: option
+                       :: Option ::
+                       Some($crate :: format_args! ("w has {} items", w.len())));
+                   }
+               }
+           }`
+   = note: expanding `assert_eq! { e.len() + 1, 1, }`
+   = note: to `match (& e.len() + 1, & 1)
+           {
+               (left_val, right_val) =>
+               {
+                   if ! (* left_val == * right_val)
+                   {
+                       let kind = $crate :: panicking :: AssertKind :: Eq; $crate ::
+                       panicking ::
+                       assert_failed(kind, & * left_val, & * right_val, $crate :: option
+                       :: Option :: None);
+                   }
+               }
+           }`
+   = note: expanding `assert_eq! { t[0].0, 1, "{:?}", t }`
+   = note: to `match (& t[0].0, & 1)
+           {
+               (left_val, right_val) =>
+               {
+                   if ! (* left_val == * right_val)
+                   {
+                       let kind = $crate :: panicking :: AssertKind :: Eq; $crate ::
+                       panicking ::
+                       assert_failed(kind, & * left_val, & * right_val, $crate :: option
+                       :: Option :: Some($crate :: format_args! ("{:?}", t)));
+                   }
+               }
+           }`

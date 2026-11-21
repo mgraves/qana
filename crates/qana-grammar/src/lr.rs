@@ -99,6 +99,12 @@ pub struct LrTables {
     /// recovery needs to know before it protects a token as wanted by an
     /// enclosing construct.
     pub opens: Vec<Option<BracketKind>>,
+    /// The start state of each of the grammar's entries
+    /// ([`crate::syn::SynGrammar::entries`]), by its rule: a parse from it
+    /// accepts that rule's text, and ends at EOF as one from state 0, the
+    /// start rule's, does.
+    #[serde(default)]
+    pub entry_states: Vec<(u16, u16)>,
 }
 
 /// One symbol of a list's repetition unit, for splice-alignment checks:
@@ -267,11 +273,18 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
     for p in &g.prods {
         aug.push((p.lhs, p.rhs.clone()));
     }
+    // Each entry's synthetic start, after the user's productions:
+    // `<start> → entry`, accepted at EOF as production 0 is.
+    let n_user = g.prods.len();
+    for &entry in &g.entries {
+        aug.push((u16::MAX, vec![Sym::N(entry)]));
+    }
+    let synthetic = |p: u16| p == 0 || p as usize > n_user;
     let n_nts = g.nt_names.len();
 
     // prods_of[nt] = augmented production indices with that lhs
     let mut prods_of: Vec<Vec<u16>> = vec![Vec::new(); n_nts];
-    for (i, (lhs, _)) in aug.iter().enumerate().skip(1) {
+    for (i, (lhs, _)) in aug.iter().enumerate().filter(|(_, (lhs, _))| *lhs != u16::MAX) {
         prods_of[*lhs as usize].push(i as u16);
     }
 
@@ -280,7 +293,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
     let mut first: Vec<BTreeSet<TokenId>> = vec![BTreeSet::new(); n_nts];
     loop {
         let mut changed = false;
-        for (lhs, rhs) in aug.iter().skip(1) {
+        for (lhs, rhs) in aug.iter().filter(|(lhs, _)| *lhs != u16::MAX) {
             let l = *lhs as usize;
             let mut all_nullable = true;
             for s in rhs {
@@ -376,12 +389,20 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
     // surface a merge-induced conflict, certification REPORTS it with a
     // counterexample rather than misparsing — the envelope stays honest.
     type Kernel = std::collections::BTreeMap<(u16, u16), BTreeSet<TokenId>>;
-    let mut start_kernel: Kernel = Kernel::new();
-    start_kernel.insert((0, 0), [EOF].into_iter().collect());
-    let mut kernels: Vec<Kernel> = vec![start_kernel];
+    // State 0 starts the start rule; states 1.. the entries, in order.
+    let starts: Vec<u16> = std::iter::once(0u16)
+        .chain((0..g.entries.len()).map(|k| (n_user + 1 + k) as u16))
+        .collect();
+    let mut kernels: Vec<Kernel> = Vec::new();
     let mut core_index: HashMap<Vec<(u16, u16)>, Vec<u16>> = HashMap::new();
-    core_index.insert(vec![(0, 0)], vec![0]);
-    let mut transitions: Vec<HashMap<Sym, u16>> = vec![HashMap::new()];
+    let mut transitions: Vec<HashMap<Sym, u16>> = Vec::new();
+    for (state, &p) in starts.iter().enumerate() {
+        let mut kernel: Kernel = Kernel::new();
+        kernel.insert((p, 0), [EOF].into_iter().collect());
+        kernels.push(kernel);
+        core_index.insert(vec![(p, 0)], vec![state as u16]);
+        transitions.push(HashMap::new());
+    }
 
     let weakly_compatible = |k: &Kernel, l: &Kernel| -> bool {
         let ks: Vec<&BTreeSet<TokenId>> = k.values().collect();
@@ -397,9 +418,9 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
         true
     };
 
-    let mut queue: VecDeque<u16> = VecDeque::from([0]);
-    let mut in_queue = vec![true];
-    let mut processed = vec![false];
+    let mut queue: VecDeque<u16> = (0..starts.len() as u16).collect();
+    let mut in_queue = vec![true; starts.len()];
+    let mut processed = vec![false; starts.len()];
     while let Some(s) = queue.pop_front() {
         in_queue[s as usize] = false;
         // Expand this state's kernel to full LR(1) items.
@@ -522,7 +543,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
         let mut y: Vec<Option<Vec<TokenId>>> = vec![None; n_nts];
         loop {
             let mut changed = false;
-            for (lhs, rhs) in aug.iter().skip(1) {
+            for (lhs, rhs) in aug.iter().filter(|(lhs, _)| *lhs != u16::MAX) {
                 let mut acc: Vec<TokenId> = Vec::new();
                 let mut ok = true;
                 for s in rhs {
@@ -587,7 +608,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
             if (dot as usize) != rhs.len() {
                 continue;
             }
-            if p == 0 {
+            if synthetic(p) {
                 action[si].insert(EOF, LrAct::Accept);
                 continue;
             }
@@ -636,7 +657,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
                                     (d as usize) < r.len() && r[d as usize] == Sym::T(la);
                                 if reduce_side || shift_side {
                                     item_set.insert(item_display(g, &aug, it));
-                                    if q > 0 {
+                                    if !synthetic(q) {
                                         prod_set.insert(q - 1);
                                     }
                                 }
@@ -681,6 +702,7 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
     let lists = detect_lists(g, &fragile);
     let permissive = permissive_states(g, &action);
     let opens = opening_states(g, &action);
+    let entry_states = g.entries.iter().enumerate().map(|(k, &nt)| (nt, (k + 1) as u16)).collect();
     LrTables {
         action,
         goto_,
@@ -691,5 +713,6 @@ pub fn build_lr(g: &SynGrammar) -> LrTables {
         lists,
         permissive,
         opens,
+        entry_states,
     }
 }

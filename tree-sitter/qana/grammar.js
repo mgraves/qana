@@ -11,7 +11,7 @@ module.exports = grammar({
   rules: {
     file: $ => optional($.decls),
     decls: $ => repeat1($.decl),
-    decl: $ => choice(seq('language', $.name), seq('max_stack', $.num), seq('extensions', $.kw_list), seq('keywords', $.name, '=', $.kw_list), $.token_def, seq('mode', $.name, '{', optional($.token_defs), '}'), seq('pair', $.tok_ref, $.tok_ref), seq('prec', $.assoc, $.prec_ops), seq('start', $.name), seq('rule', field("name", $.name), '=', $.alt_list), seq('rule', field("name", $.name), '=', '|', $.alt_list), seq('rule', field("name", $.name), '=', $.elem, '*', optional($.rep_sep)), seq('rule', field("name", $.name), '=', $.elem, '+', optional($.rep_sep)), seq('rule', field("name", $.name), '=', $.elem, '?')),
+    decl: $ => choice(seq('language', $.name), seq('max_stack', $.num), seq('extensions', $.kw_list), seq('keywords', $.name, '=', $.kw_list), $.token_def, seq('mode', $.name, '{', optional($.token_defs), '}'), seq('pair', $.tok_ref, $.tok_ref), seq('prec', $.assoc, $.prec_ops), seq('start', $.name), seq('entry', $.name), seq('fragment', $.name, '=', $.name), seq('rule', field("name", $.name), '=', $.alt_list), seq('rule', field("name", $.name), '=', '|', $.alt_list), seq('rule', field("name", $.name), '=', $.elem, '*', optional($.rep_sep)), seq('rule', field("name", $.name), '=', $.elem, '+', optional($.rep_sep)), seq('rule', field("name", $.name), '=', $.elem, '?')),
     token_def: $ => seq('token', field("name", $.name), '=', $.tok_pat, optional($.attrs)),
     token_defs: $ => repeat1($.token_def),
     kw_list: $ => repeat1($.kw_item),

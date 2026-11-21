@@ -227,6 +227,13 @@ pub struct BindingConfig {
     /// invocations), which no summary sees: a unit with one among its
     /// items is open, and so is a block with one in it.
     pub expands: Vec<(u16, u16)>,
+    /// (nt, prod, entry, child) — a macro invocation here expands to the
+    /// text of rule `entry`, one the grammar parses from (`@expansion(rule[,
+    /// child])`): the node itself, where it is an invocation, or the one its
+    /// child `child` holds, through nodes that hold only it (Rust's `m!();`
+    /// in a block expands to statements, `m!()` elsewhere to an
+    /// expression).
+    pub expansions: Vec<(u16, u16, u16, Option<usize>)>,
     /// (nt, prod, form) — the production is a type as written
     /// (`@type_ref(form, …)`), for a project index reading declared types;
     /// nothing checks it.
@@ -499,6 +506,9 @@ pub fn compose_binding(
     }
     for (nt, prod, name) in &guest.value_builtins {
         out.value_builtins.push((nt + nts, prod + prods, name.clone()));
+    }
+    for &(nt, prod, entry, child) in &guest.expansions {
+        out.expansions.push((nt + nts, prod + prods, entry + nts, child));
     }
     out.unordered = host.unordered;
     out

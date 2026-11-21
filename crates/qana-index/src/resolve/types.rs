@@ -175,7 +175,9 @@ impl Resolver {
             return Resolution::Escapes { segment: 0 };
         };
         let mut declarations: Vec<(PathBuf, u32)> = Vec::new();
-        let mut typed = false;
+        // Whether the receiver is typed, and every type it is, and every
+        // step down from each, known: then no summary holds the member.
+        let (mut typed, mut known) = (false, true);
         for (krate, _) in self.graph.places(file) {
             let at = Module { krate, file: id, unit: self.unit_named(id, &access.units) };
             let generics = access.generics.iter().map(|g| (g.clone(), Vec::new())).collect();
@@ -183,18 +185,44 @@ impl Resolver {
             let types = self.value_types(&scope, &access.receiver, 0);
             typed |= !types.is_empty();
             for ty in &types {
-                for found in self.members_through(at, ty, &access.name, access.kind, 0) {
+                let (found, unknown) =
+                    self.members_through_known(at, ty, &access.name, access.kind, 0);
+                known &= !unknown;
+                for found in found {
                     let (file, index) = found.declaration;
                     declarations.push((self.files[file as usize].clone(), index));
                 }
             }
         }
         if declarations.is_empty() {
-            return Resolution::Escapes { segment: usize::from(typed) };
+            return Resolution::Escapes { segment: usize::from(typed && known) };
         }
         declarations.sort();
         declarations.dedup();
         Resolution::Found { declarations, modules: Vec::new() }
+    }
+
+    /// Whether a member access can name the `declaration`th declaration of
+    /// `file`, which [`member`](Self::member) would then find: a field, or
+    /// a function of an impl block or of a trait.
+    pub fn is_member(&self, file: &FilePath, declaration: u32) -> bool {
+        let Some(&id) = self.ids.get(file) else {
+            return false;
+        };
+        let declarations = self.summaries[id as usize].offers().declarations();
+        let Some(declared) = declarations.get(declaration as usize) else {
+            return false;
+        };
+        match declared.kind.as_str() {
+            FIELD => true,
+            FUNCTION => {
+                declared.impl_block.is_some()
+                    || self
+                        .owner_of((id, declaration))
+                        .is_some_and(|owner| self.declaration(owner).kind == CLASS)
+            }
+            _ => false,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -528,32 +556,65 @@ impl Resolver {
         kind: MemberKind,
         depth: usize,
     ) -> Vec<Found> {
-        let Some(_nested) = self.nest() else { return Vec::new() };
+        self.members_through_known(at, ty, name, kind, depth).0
+    }
+
+    /// [`Self::members_through`]'s members, and, where there are none,
+    /// whether the walk down stopped at a type it does not know: a step's
+    /// `Deref` impl whose target types to nothing (an `Rc<T>` whose `T` a
+    /// call infers), or more steps than it takes.
+    fn members_through_known(
+        &self,
+        at: Module,
+        ty: &Ty,
+        name: &str,
+        kind: MemberKind,
+        depth: usize,
+    ) -> (Vec<Found>, bool) {
+        let Some(_nested) = self.nest() else { return (Vec::new(), true) };
         let mut step = vec![ty.clone()];
         let mut seen: Vec<Ty> = Vec::new();
         for _ in 0..DEREFS {
             let found: Vec<Found> =
                 step.iter().flat_map(|t| self.members_on(at, t, name, kind, depth)).collect();
             if !found.is_empty() {
-                return found;
+                return (found, false);
             }
             seen.extend(step.iter().cloned());
-            step = self.next_step(at, &step, &seen, depth);
+            let (next, unknown) = self.next_step_known(at, &step, &seen, depth);
+            if unknown {
+                return (Vec::new(), true);
+            }
+            step = next;
             if step.is_empty() {
-                break;
+                return (Vec::new(), false);
             }
         }
-        Vec::new()
+        (Vec::new(), true)
     }
 
     /// What the types of `step` dereference to, but those already `seen`.
     fn next_step(&self, at: Module, step: &[Ty], seen: &[Ty], depth: usize) -> Vec<Ty> {
-        let next: Vec<Ty> = step
-            .iter()
-            .flat_map(|t| self.derefs(at, t, depth + 1))
-            .filter(|t| !seen.contains(t))
-            .collect();
-        dedup(next)
+        self.next_step_known(at, step, seen, depth).0
+    }
+
+    /// [`Self::next_step`]'s types, and whether one of `step`'s types
+    /// dereferences to a type not known.
+    fn next_step_known(
+        &self,
+        at: Module,
+        step: &[Ty],
+        seen: &[Ty],
+        depth: usize,
+    ) -> (Vec<Ty>, bool) {
+        let mut next = Vec::new();
+        let mut unknown = false;
+        for t in step {
+            let (types, held) = self.derefs_known(at, t, depth + 1);
+            unknown |= held && types.is_empty();
+            next.extend(types.into_iter().filter(|t| !seen.contains(t)));
+        }
+        (dedup(next), unknown)
     }
 
     /// The members named `name` of a value of type `ty` itself.
@@ -904,43 +965,60 @@ impl Resolver {
     // What a type dereferences to, and what it gives up
     // ------------------------------------------------------------------
 
-    /// The types a value of type `ty` dereferences to, for a member access:
-    /// its `Deref` impl's target; an array's slice.
-    fn derefs(&self, at: Module, ty: &Ty, depth: usize) -> Vec<Ty> {
+    /// The types a value of type `ty` dereferences to, for a member access
+    /// (its `Deref` impl's target; an array's slice), and whether a `Deref`
+    /// impl of `ty` holds (where none of its targets is known, what it
+    /// dereferences to is not).
+    fn derefs_known(&self, at: Module, ty: &Ty, depth: usize) -> (Vec<Ty>, bool) {
         let mut types = Vec::new();
         if let Ty::Array(elements) = ty {
             types.push(Ty::Slice(elements.clone()));
         }
-        types.extend(self.output_of(at, ty, Operator::Deref, depth));
-        types
+        let (output, held) = self.output_held(at, ty, Operator::Deref, depth);
+        types.extend(output);
+        (types, held)
     }
 
     /// What `operator` gives of a value of type `ty`: the associated type
     /// its impl block of the trait the crate of `at` names for it writes
     /// (`impl Deref for String { type Target = str; }`).
     fn output_of(&self, at: Module, ty: &Ty, operator: Operator, depth: usize) -> Vec<Ty> {
+        self.output_held(at, ty, operator, depth).0
+    }
+
+    /// [`Self::output_of`]'s types, and whether an impl block of `ty` of
+    /// the operator's trait holds, whatever its output types to.
+    fn output_held(
+        &self,
+        at: Module,
+        ty: &Ty,
+        operator: Operator,
+        depth: usize,
+    ) -> (Vec<Ty>, bool) {
         if depth > DEPTH {
-            return Vec::new();
+            return (Vec::new(), false);
         }
-        let Some(_nested) = self.nest() else { return Vec::new() };
+        let Some(_nested) = self.nest() else { return (Vec::new(), false) };
         let info = &self.graph.crates()[at.krate as usize];
         let Some((_, output)) = (match operator {
             Operator::Deref => &info.deref_trait,
             Operator::Try => &info.try_trait,
         }) else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
         let traits = self.operator_traits(at.krate, operator);
         if traits.is_empty() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         let mut types = Vec::new();
+        let mut held = false;
         for &block in self.blocks_of(ty).iter() {
             if self.impl_traits(block).iter().any(|t| traits.contains(t)) {
+                held = true;
                 types.extend(self.block_associated(block, ty, output, depth + 1));
             }
         }
-        dedup(types)
+        (dedup(types), held)
     }
 
     /// The traits the crate `krate` names for `operator`, its path read

@@ -606,6 +606,11 @@ impl<H> Split<H> {
 
 pub type Main = Split<Cell>;
 
+/// An `Rc` of what the call infers.
+fn fresh<T>() -> Rc<T> {
+    todo!()
+}
+
 impl Iterator for Walk {
     type Item = Cell;
 
@@ -635,6 +640,8 @@ fn reach(v: Vec<Cell>, b: Box<Cell>, g: Grid<Cell>, mut w: Walk, a: [Cell; 2], m
     plain.is();
     plain.downcast_ref();
     shared.borrow().width();
+    fresh().width();
+    b.missing();
     todo!()
 }
 ";
@@ -911,6 +918,16 @@ fn a_member_is_found_through_arguments_associated_types_and_derefs() {
         "Rc's Deref to RefCell, its borrow's Ref, Ref's Deref to Cell"
     );
     assert_eq!(
+        width(12),
+        Err(0),
+        "an Rc whose T a call infers: what it dereferences to is not known"
+    );
+    assert_eq!(
+        typed_member(&r, deref, "missing", 0),
+        Err(1),
+        "Box<Cell> and the Cell it dereferences to known, and neither holds it"
+    );
+    assert_eq!(
         typed_member(&r, deref, "first", 0),
         Ok(vec![at("lib.rs", "slice::[T]", "first")]),
         "a slice's impl block, reached from a Vec"
@@ -1087,6 +1104,30 @@ fn implemented(
             }
         })
         .collect()
+}
+
+#[test]
+fn a_member_access_can_name_a_field_or_a_method_and_nothing_else() {
+    use qana_index::summarize;
+
+    let r = project();
+    let member = |file: &str, container: &str, name: &str, kind: &str| {
+        let text = FILES.iter().find(|(p, _)| *p == file).unwrap().1;
+        let summary = summarize(rust(), text);
+        let index = summary
+            .offers()
+            .declarations()
+            .iter()
+            .position(|d| d.container.join("::") == container && d.name == name && d.kind == kind)
+            .unwrap_or_else(|| panic!("{container}::{name}"));
+        r.is_member(std::path::Path::new(file), index as u32)
+    };
+    let (cell, deref) = ("/p/src/cell.rs", "/p/src/deref.rs");
+    assert!(member(cell, "Cell", "width", "field"), "a field");
+    assert!(member(cell, "Cell", "width", "function"), "an impl block's function");
+    assert!(member(cell, "Draw", "draw", "function"), "a trait's");
+    assert!(!member(deref, "", "fresh", "function"), "a free function");
+    assert!(!member(cell, "", "Cell", "struct"), "a type");
 }
 
 #[test]

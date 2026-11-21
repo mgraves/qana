@@ -224,6 +224,19 @@ fn resolver() -> Resolver {
 /// the same file (`here`, with the line it is on), declarations elsewhere
 /// (file and name), or nothing.
 fn named(resolver: &Resolver, file: &str, name: &str, nth: usize) -> Vec<String> {
+    let (units, path, seen) = asked(file, name, nth);
+    said(file, resolver.resolve_macro(FilePath::new(file), &units, &path, "macro", &seen))
+}
+
+/// [`named`], the first answer alone ([`Resolver::first_macro`]).
+fn first(resolver: &Resolver, file: &str, name: &str, nth: usize) -> Vec<String> {
+    let (units, path, seen) = asked(file, name, nth);
+    said(file, resolver.first_macro(FilePath::new(file), &units, &path, "macro", &seen))
+}
+
+/// What the `nth` invocation of `name!` in `file` asks: the units around
+/// it, its path, and what it sees by textual scope.
+fn asked(file: &str, name: &str, nth: usize) -> (Vec<String>, Path, Vec<qana_index::Seen>) {
     let text = FILES.iter().find(|(f, _)| *f == file).unwrap().1;
     let call = format!("{name}!");
     let at = text.match_indices(&call).nth(nth).expect("the invocation").0;
@@ -232,7 +245,13 @@ fn named(resolver: &Resolver, file: &str, name: &str, nth: usize) -> Vec<String>
     let mut doc = LiveDoc::open(Arc::new(rust().clone()), file, text);
     let (units, path, _) = path_at(&mut doc, offset).expect("a path");
     let seen = textual_at(&mut doc, offset, "macro").expect("a textual name");
-    match resolver.resolve_macro(FilePath::new(file), &units, &path, "macro", &seen) {
+    (units, path, seen)
+}
+
+/// `resolution`, of a name in `file`, as [`named`] says it.
+fn said(file: &str, resolution: MacroResolution) -> Vec<String> {
+    let text = FILES.iter().find(|(f, _)| *f == file).unwrap().1;
+    match resolution {
         MacroResolution::Here((start, _)) => {
             let line = text[..start as usize].lines().count();
             vec![format!("here, line {line}")]
@@ -492,4 +511,36 @@ fn a_definition_under_a_condition_does_not_hide_an_earlier_one() {
         [line("macro_rules! tested { () => {} }\n}"), line("macro_rules! tested")],
         "out of a module under a condition"
     );
+}
+
+#[test]
+fn an_invocations_first_answer_is_the_nearest_and_its_macro_in_the_crate_that_defines_it() {
+    let r = resolver();
+    let lib = "/p/src/lib.rs";
+    let line = |found: &str| {
+        let at = LIB.find(found).expect("in the file");
+        format!("here, line {}", LIB[..at].matches('\n').count() + 1)
+    };
+    assert_eq!(
+        first(&r, lib, "either", 0),
+        [line("macro_rules! either { () => {} }\nfn")],
+        "of two under `#[cfg]`s, the nearer"
+    );
+    assert_eq!(
+        first(&r, lib, "sure", 0),
+        [line("macro_rules! sure { () => {} }\nfn")],
+        "the one under `#[cfg(test)]`, though one surely is before it"
+    );
+    let a = "/p/src/a.rs";
+    assert_eq!(
+        first(&r, a, "vec", 0),
+        ["/s/alloc/macros.rs: vec"],
+        "elsewhere: the one declaration"
+    );
+    assert_eq!(first(&r, a, "dep_mac", 0), ["/d/lib.rs: dep_mac"], "by a path");
+    assert_eq!(first(&r, a, "late", 0), ["Escapes { segment: 0 }"], "none");
+    let (dep, app) = (2, 3);
+    assert_eq!(r.macro_crate(FilePath::new("/d/lib.rs"), app), Some(dep), "dep's, from the app");
+    assert_eq!(r.macro_crate(FilePath::new("/p/src/macros.rs"), app), Some(app));
+    assert_eq!(r.macro_crate(FilePath::new("/nowhere.rs"), app), None);
 }

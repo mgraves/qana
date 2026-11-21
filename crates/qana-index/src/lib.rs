@@ -52,6 +52,9 @@ pub use expand::{
     expand, BuiltinMacro, ExpandRequest, ExpansionSummary, MacroSource, MacroTable,
     NestedExpansion, SitePlace,
 };
+pub use expanded::{
+    expand_text, expanded_file, invocations, ExpandedFile, ExpandedText, InvocationAt,
+};
 pub use graph::{CrateInfo, CrateSource, UnitGraph};
 pub use members::{member_at, members, path_at, MemberAccess, MemberKind, Receiver};
 pub use merge::{merge, Expansions};
@@ -62,6 +65,7 @@ pub use resolve::{Implementation, MacroResolution, Resolution, Resolver, RootMac
 pub use textual::{is_textual, seen_here, textual_at, Seen, TextualLink};
 
 mod expand;
+mod expanded;
 mod graph;
 mod members;
 mod merge;

@@ -196,7 +196,11 @@ fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Ro
     // a definition in such a namespace is a macro's.
     let mut invoked = HashSet::new();
     for (nt, prod, child, ns) in &cfg.child_namespaces {
-        if cfg.expands.contains(&(*nt, *prod)) {
+        // An invocation that may declare names, or one that is its own
+        // expansion's site (a type's, `@expansion(type)`).
+        let own_site =
+            cfg.expansions.iter().any(|&(n, p, _, c)| (n, p) == (*nt, *prod) && c.is_none());
+        if cfg.expands.contains(&(*nt, *prod)) || own_site {
             let roles = map.entry((*nt, *prod)).or_default();
             if roles.invocation_path.is_none() {
                 roles.invocation_path = Some((*child, ns.clone()));
@@ -288,6 +292,22 @@ pub(crate) enum TextualEvent {
     Invocation { index: u32, at: u32 },
 }
 
+/// An invocation wherever it stands: among items, as a statement, an
+/// expression, a type or a pattern.
+#[derive(Clone, Debug)]
+pub(crate) struct AnyInvocation {
+    /// The entry its expansion is parsed at, by its nonterminal.
+    pub entry: u16,
+    /// The macro's path, and the namespace it names a macro in.
+    pub path: Option<Path>,
+    pub namespace: String,
+    /// Its span (from its path to its end), and its path's.
+    pub span: Span,
+    pub path_span: Option<Span>,
+    /// Whether it stands among items, as one the summary records.
+    pub among_items: bool,
+}
+
 /// An invocation among a unit's items or an impl block's or a trait's,
 /// whose expansion may declare names there.
 #[derive(Clone, Debug)]
@@ -369,6 +389,10 @@ pub(crate) struct FileUnits {
     pub textual: Vec<TextualEvent>,
     /// The invocations among items, in the file's order.
     pub invocations: Vec<InvocationRead>,
+    /// Every invocation the file writes (not one inside another's
+    /// arguments, which no tree holds), wherever it stands, in the file's
+    /// order: what reading the file as expanded expands.
+    pub all_invocations: Vec<AnyInvocation>,
     /// The macros defined outside bodies, in the file's order.
     pub macro_defs: Vec<MacroDefRead>,
 }
@@ -448,12 +472,14 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
             import_defs: HashSet::new(),
             textual: Vec::new(),
             invocations: Vec::new(),
+            all_invocations: Vec::new(),
             macro_defs: Vec::new(),
         },
         scopes: 0,
         typed_defs: HashMap::new(),
         generics: HashMap::new(),
         init_defs: HashMap::new(),
+        recorded: HashSet::new(),
     };
     let cx = Cx {
         unit: None,
@@ -652,6 +678,9 @@ struct Walk<'a> {
     /// The values `@inits` gives definitions made below the node that says
     /// so (a pattern's one binding), by the name's span.
     init_defs: HashMap<(u32, u32), (Arc<GreenNode>, u32)>,
+    /// Where the invocations recorded in `all_invocations` start: a site's
+    /// invocation is recorded once, by the site.
+    recorded: HashSet<u32>,
 }
 
 impl Walk<'_> {
@@ -798,6 +827,31 @@ impl Walk<'_> {
         // one that stands as an expression, a type or a pattern within an
         // item (`@expansion(rule)`) declares nothing there.
         let among_items = cx.scopes.is_empty() || cx.in_members;
+        // Every invocation, for reading the file as expanded: what a site
+        // holds (`@expansion(rule, child)`), or the site itself.
+        if let Some((entry, child)) = roles.expansion {
+            let held = match child {
+                Some(c) => self.held_invocation(n, base, c),
+                None => Some((n, base)),
+            };
+            if let Some((inv, at)) = held {
+                let span = (at + leading_trivia(inv), at + inv.width);
+                if let Some((k, namespace)) =
+                    self.g.roles_of(inv).and_then(|r| r.invocation_path.clone())
+                {
+                    if self.recorded.insert(span.0) {
+                        self.out.all_invocations.push(AnyInvocation {
+                            entry,
+                            path: Path::of_child(inv, k, self.g.cfg),
+                            namespace,
+                            span,
+                            path_span: exact_span(inv, at, k),
+                            among_items: child.is_some() && !cx.in_body && among_items,
+                        });
+                    }
+                }
+            }
+        }
         if let (Some((entry, Some(child))), false, true) =
             (roles.expansion, cx.in_body, among_items)
         {

@@ -79,20 +79,7 @@ impl Resolver {
         let mut here: Vec<(u32, u32)> = Vec::new();
         let mut declarations: Vec<(PathBuf, u32)> = Vec::new();
         for (krate, _) in places {
-            let info = &self.graph.crates()[krate as usize];
-            let mut found = Found::default();
-            self.in_seen(krate, id, seen, name, info, false, &mut HashSet::new(), &mut found);
-            if !found.done {
-                self.outward(krate, id, name, info, &mut found);
-            }
-            if !found.done {
-                let at = Module { krate, file: id, unit: self.unit_named(id, units) };
-                let named = self
-                    .in_module(at, name, namespace, info)
-                    .or_else(|| self.in_macro_prelude(krate, name, namespace, info))
-                    .or_else(|| self.in_preludes(krate, name, namespace, info));
-                found.declared.extend(named.unwrap_or_default());
-            }
+            let found = self.by_name(krate, id, units, seen, name, namespace);
             for span in found.here {
                 if !here.contains(&span) {
                     here.push(span);
@@ -114,6 +101,102 @@ impl Resolver {
             ([span], true) => MacroResolution::Here(*span),
             _ => MacroResolution::Several { here, declarations },
         }
+    }
+
+    /// What a name alone, `name`, in `namespace`, names in crate `krate`
+    /// where it stands in file `id`, inside the units `units`, seeing
+    /// `seen` by textual scope: see [`resolve_macro`](Self::resolve_macro).
+    fn by_name(
+        &self,
+        krate: u32,
+        id: u32,
+        units: &[String],
+        seen: &[Seen],
+        name: &str,
+        namespace: &str,
+    ) -> Found {
+        let info = &self.graph.crates()[krate as usize];
+        let mut found = Found::default();
+        self.in_seen(krate, id, seen, name, info, false, &mut HashSet::new(), &mut found);
+        if !found.done {
+            self.outward(krate, id, name, info, &mut found);
+        }
+        if !found.done {
+            let at = Module { krate, file: id, unit: self.unit_named(id, units) };
+            let named = self
+                .in_module(at, name, namespace, info)
+                .or_else(|| self.in_macro_prelude(krate, name, namespace, info))
+                .or_else(|| self.in_preludes(krate, name, namespace, info));
+            found.declared.extend(named.unwrap_or_default());
+        }
+        found
+    }
+
+    /// The first of the answers [`resolve_macro`](Self::resolve_macro)
+    /// finds for `path`, in `namespace`, where it stands (`file`, `units`,
+    /// `seen`, as there), as it says one: the nearest, which may be under a
+    /// condition and not be. A file whose invocations are read once each
+    /// (as expanded) reads one through it. A name alone is looked for in
+    /// the first crate the file is in (each reads it alike, but for its
+    /// conditions), a path as [`resolve`](Self::resolve) resolves it. A
+    /// definition in the file is [`Here`](MacroResolution::Here), by its
+    /// name's span as `seen` says it (the file's text as it is, which its
+    /// summary may not be); a declaration elsewhere, the one declaration
+    /// [`Found`](Resolution::Found). In a file no crate holds, a name alone
+    /// sees the definitions before it there alone.
+    pub fn first_macro(
+        &self,
+        file: &FilePath,
+        units: &[String],
+        path: &Path,
+        namespace: &str,
+        seen: &[Seen],
+    ) -> MacroResolution {
+        let found = |declarations: Vec<(PathBuf, u32)>| match declarations.into_iter().next() {
+            Some(first) => MacroResolution::Elsewhere(Resolution::Found {
+                declarations: vec![first],
+                modules: Vec::new(),
+            }),
+            None => MacroResolution::Elsewhere(Resolution::Escapes { segment: 0 }),
+        };
+        if path.root.is_some() || path.segments.len() != 1 {
+            return match self.resolve(file, units, path, Some(namespace)) {
+                Resolution::Found { declarations, .. } => found(declarations),
+                other => MacroResolution::Elsewhere(other),
+            };
+        }
+        let name = &path.segments[0];
+        let first = self.graph.places(file).first().map(|&(k, _)| k);
+        let (Some(&id), Some(krate)) = (self.ids.get(file), first) else {
+            return match crate::seen_here(seen, name) {
+                Some(span) => MacroResolution::Here(span),
+                None => MacroResolution::Elsewhere(Resolution::Escapes { segment: 0 }),
+            };
+        };
+        let by_name = self.by_name(krate, id, units, seen, name, namespace);
+        match by_name.here.first() {
+            Some(&span) => MacroResolution::Here(span),
+            None => found(
+                by_name
+                    .declared
+                    .into_iter()
+                    .map(|(f, d)| (self.files[f as usize].clone(), d))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// The crate the macro declared at `declaration` of `file` is in, as
+    /// an invocation in crate `krate` names it (`$crate` in its expansion):
+    /// `krate`, where the file is one of its, else the first the file is
+    /// in. `None` for a file no crate holds.
+    pub fn macro_crate(&self, file: &FilePath, krate: u32) -> Option<u32> {
+        let places = self.graph.places(file);
+        places
+            .iter()
+            .map(|&(k, _)| k)
+            .find(|&k| k == krate)
+            .or_else(|| places.first().map(|&(k, _)| k))
     }
 
     /// The macros invocation `invocation` of `file`'s summary (merged with
@@ -183,15 +266,7 @@ impl Resolver {
         let mut out: Vec<(PathBuf, u32, u32)> = Vec::new();
         for (f, d, krate) in declarations {
             let def = self.files[f as usize].clone();
-            // The crate the definition is in: the invocation's, where it
-            // is one of the file's, else the first the file is in.
-            let places = self.graph.places(&def);
-            let krate = places
-                .iter()
-                .map(|&(k, _)| k)
-                .find(|&k| k == krate)
-                .or_else(|| places.first().map(|&(k, _)| k));
-            let Some(krate) = krate else { continue };
+            let Some(krate) = self.macro_crate(&def, krate) else { continue };
             if !out.iter().any(|(p, i, _)| *p == def && *i == d) {
                 out.push((def, d, krate));
             }

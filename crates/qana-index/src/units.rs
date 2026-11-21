@@ -91,6 +91,16 @@ pub(crate) struct Roles {
     pub(crate) builtin: Option<String>,
     /// `@def(x, textual)`: what it defines is seen in textual order.
     pub(crate) textual: bool,
+    /// `@expansion(rule[, child])`: what an invocation here expands to is
+    /// parsed at `rule` (an entry, by its nonterminal); the invocation is
+    /// the child's, or the node itself.
+    pub(crate) expansion: Option<(u16, Option<usize>)>,
+    /// An invocation (`@expands`) whose path is a reference at this child,
+    /// in this namespace (`@ns(name, path)`): the macro it invokes.
+    pub(crate) invocation_path: Option<(usize, String)>,
+    /// What it defines is a macro: a definition in a namespace an
+    /// invocation's path is in.
+    pub(crate) macro_def: bool,
 }
 
 fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Roles> {
@@ -179,6 +189,27 @@ fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Ro
     for &(nt, prod, ty, tr) in &cfg.impls {
         map.entry((nt, prod)).or_default().implementation = Some((ty, tr));
     }
+    for &(nt, prod, entry, child) in &cfg.expansions {
+        map.entry((nt, prod)).or_default().expansion = Some((entry, child));
+    }
+    // An invocation's path is the reference its namespace child holds;
+    // a definition in such a namespace is a macro's.
+    let mut invoked = HashSet::new();
+    for (nt, prod, child, ns) in &cfg.child_namespaces {
+        if cfg.expands.contains(&(*nt, *prod)) {
+            let roles = map.entry((*nt, *prod)).or_default();
+            if roles.invocation_path.is_none() {
+                roles.invocation_path = Some((*child, ns.clone()));
+            }
+            invoked.insert(ns.as_str());
+        }
+    }
+    for (nt, prod, ns) in &cfg.namespaces {
+        if invoked.contains(ns.as_str()) && cfg.defs.iter().any(|&(n, p, _)| (n, p) == (*nt, *prod))
+        {
+            map.entry((*nt, *prod)).or_default().macro_def = true;
+        }
+    }
     for e in outline.entries.iter().filter(|e| e.kind == FUNCTION) {
         map.entry((e.nt, e.prod)).or_default().function = true;
     }
@@ -251,6 +282,44 @@ pub(crate) enum TextualEvent {
     Open { module: Option<TextualModule>, span: Span },
     /// What the last `Open` opened closes, at `end`.
     Close { end: u32 },
+    /// An invocation a summary reads, among a module's items or an impl
+    /// block's or a trait's: its index in `invocations`, and where it
+    /// begins.
+    Invocation { index: u32, at: u32 },
+}
+
+/// An invocation among a unit's items or an impl block's or a trait's,
+/// whose expansion may declare names there.
+#[derive(Clone, Debug)]
+pub(crate) struct InvocationRead {
+    pub unit: Option<u32>,
+    /// The impl block (in walk order) it stands among the items of.
+    pub impl_block: Option<u32>,
+    /// Whether it stands among an impl block's or a trait's items.
+    pub members: bool,
+    /// The entry its expansion is parsed at, by its nonterminal.
+    pub entry: u16,
+    /// The macro's path, and the namespace it names a macro in.
+    pub path: Option<Path>,
+    pub namespace: String,
+    /// The attributes said of it.
+    pub attributes: Vec<Attribute>,
+    /// Its span (from its path to its end), its path's, and its item's
+    /// (with what the grammar puts before it there).
+    pub span: Span,
+    pub path_span: Option<Span>,
+    pub item: Span,
+}
+
+/// A macro's definition: its name's span, its body's (what follows the
+/// name), whether it is textual (`macro_rules!`), the attributes said of
+/// it.
+#[derive(Clone, Debug)]
+pub(crate) struct MacroDefRead {
+    pub name: Span,
+    pub body: Span,
+    pub textual: bool,
+    pub attributes: Vec<Attribute>,
 }
 
 /// An inline module whose body opens: its name, the attributes said of it,
@@ -298,6 +367,10 @@ pub(crate) struct FileUnits {
     /// The textual definitions, modules and scopes, bodies' too, in the
     /// file's order.
     pub textual: Vec<TextualEvent>,
+    /// The invocations among items, in the file's order.
+    pub invocations: Vec<InvocationRead>,
+    /// The macros defined outside bodies, in the file's order.
+    pub macro_defs: Vec<MacroDefRead>,
 }
 
 impl FileUnits {
@@ -346,6 +419,8 @@ struct Cx {
     impl_pending: Option<u32>,
     /// The impl block whose members scope this is.
     members_of: Option<u32>,
+    /// Among the items of a members scope (an impl block's, a trait's).
+    in_members: bool,
     prefix: Prefix,
     /// Inside an import's path or a visibility's.
     imported: bool,
@@ -372,6 +447,8 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
             impl_generics: HashMap::new(),
             import_defs: HashSet::new(),
             textual: Vec::new(),
+            invocations: Vec::new(),
+            macro_defs: Vec::new(),
         },
         scopes: 0,
         typed_defs: HashMap::new(),
@@ -388,6 +465,7 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
         root: true,
         impl_pending: None,
         members_of: None,
+        in_members: false,
         prefix: Prefix::None,
         imported: false,
         item: None,
@@ -705,6 +783,46 @@ impl Walk<'_> {
                 attributes: attributes_here(*span),
             });
         }
+        if let (true, Some((_, span)), false) = (roles.macro_def, &def_name, cx.in_body) {
+            self.out.macro_defs.push(MacroDefRead {
+                name: *span,
+                body: (span.1, whole.1),
+                textual: roles.textual,
+                attributes: attributes_here(*span),
+            });
+        }
+
+        // An invocation among items, whose expansion may declare names
+        // there: what it invokes and where its expansion is parsed. It is
+        // what a construct among the items is (`@expansion(rule, child)`):
+        // one that stands as an expression, a type or a pattern within an
+        // item (`@expansion(rule)`) declares nothing there.
+        let among_items = cx.scopes.is_empty() || cx.in_members;
+        if let (Some((entry, Some(child))), false, true) =
+            (roles.expansion, cx.in_body, among_items)
+        {
+            if let Some((inv, at)) = self.held_invocation(n, base, child) {
+                if let Some((k, namespace)) =
+                    self.g.roles_of(inv).and_then(|r| r.invocation_path.clone())
+                {
+                    let index = self.out.invocations.len() as u32;
+                    let span = (at + leading_trivia(inv), at + inv.width);
+                    self.out.invocations.push(InvocationRead {
+                        unit: cx.unit,
+                        impl_block: cx.members_of,
+                        members: cx.in_members,
+                        entry,
+                        path: Path::of_child(inv, k, self.g.cfg),
+                        namespace,
+                        attributes: attributes_here(span),
+                        span,
+                        path_span: exact_span(inv, at, k),
+                        item: cx.item.unwrap_or(whole),
+                    });
+                    self.out.textual.push(TextualEvent::Invocation { index, at: span.0 });
+                }
+            }
+        }
 
         // Its references, each with its path.
         for &(k, kind) in &roles.refs {
@@ -767,6 +885,7 @@ impl Walk<'_> {
             inner.attributes = None;
             inner.derives = None;
             inner.members_of = if members { cx.impl_pending } else { None };
+            inner.in_members = members;
             inner.impl_pending = None;
         }
         if roles.function {
@@ -1112,6 +1231,28 @@ impl Walk<'_> {
                 (Some((GreenChild::Node(only), _)), None) => node = only,
                 _ => return private(),
             }
+        }
+    }
+}
+
+impl Walk<'_> {
+    /// The invocation child `c` of `n` holds (`n` starting at `base`),
+    /// through nodes that hold only it, and where it starts.
+    fn held_invocation<'n>(
+        &self,
+        n: &'n GreenNode,
+        base: u32,
+        c: usize,
+    ) -> Option<(&'n GreenNode, u32)> {
+        let (first, mut at) = symbol_child_at(n, c, base)?;
+        let mut node: &GreenNode = first;
+        loop {
+            if self.g.roles_of(node).is_some_and(|r| r.expands) {
+                return Some((node, at));
+            }
+            let (inner, inner_at) = only_node(node, at)?;
+            node = inner;
+            at = inner_at;
         }
     }
 }

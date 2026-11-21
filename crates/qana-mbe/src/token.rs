@@ -10,11 +10,12 @@
 use std::sync::Arc;
 
 use qana_lang::EmbeddedLang;
+use serde::{Deserialize, Serialize};
 
 use crate::{Edition, Error, Origin};
 
 /// What kind of token, as rustc's lexer has it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TokenKind {
     /// A name or a keyword (`foo`, `fn`, `r#type`, `_`), or `$crate`.
     Ident,
@@ -33,7 +34,7 @@ pub enum TokenKind {
 }
 
 /// A token, with where it was written.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Token {
     pub kind: TokenKind,
     pub text: Arc<str>,
@@ -152,7 +153,7 @@ pub(crate) fn is_path_segment_keyword(name: &str) -> bool {
 
 /// What a fragment a transcriber put in is, as rustc's invisible
 /// delimiters record it (`MetaVarKind`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum MetaVarKind {
     Item,
     Block,
@@ -182,7 +183,7 @@ pub(crate) enum MetaVarKind {
 /// rustc's tree does not: a `let` always, an expression unless it ends its
 /// block, an item, a block or an empty statement never. It is what the
 /// statement's tokens are, so it tells no two of rustc's kinds apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum Semi {
     Never,
     Always,
@@ -191,7 +192,7 @@ pub(crate) enum Semi {
 
 /// Which patterns a `pat` fragment matches: or-patterns (`pat` from 2021),
 /// or not (`pat_param`, and `pat` before 2021: `inferred`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum PatKind {
     WithOr,
     Param { inferred: bool },
@@ -199,13 +200,13 @@ pub(crate) enum PatKind {
 
 /// Which expressions an `expr` fragment matches: from 2024 a leading `_`
 /// or `const` too; `expr_2021`, and `expr` before 2024 (`inferred`), not.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum ExprKind {
     Expr,
     Expr2021 { inferred: bool },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum Delim {
     Paren,
     Bracket,
@@ -235,13 +236,23 @@ impl Delim {
 }
 
 /// A token tree: a token, or a delimited group of trees.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum Tree {
     Token(Token),
     Group(Group),
 }
 
-#[derive(Clone, Debug)]
+impl Tree {
+    /// Where it begins: a token's origin, a group's opening bracket's.
+    pub(crate) fn origin(&self) -> Origin {
+        match self {
+            Tree::Token(t) => t.origin,
+            Tree::Group(g) => g.open,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct Group {
     pub delim: Delim,
     pub open: Origin,
@@ -253,7 +264,7 @@ pub(crate) struct Group {
 
 /// Tokens with their origins: an invocation's, a definition's, an
 /// expansion's.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TokenStream {
     pub(crate) trees: Vec<Tree>,
 }
@@ -280,6 +291,95 @@ impl TokenStream {
 
     pub fn is_empty(&self) -> bool {
         self.trees.is_empty()
+    }
+
+    /// The streams one after another, as one.
+    pub fn concat(streams: impl IntoIterator<Item = TokenStream>) -> TokenStream {
+        TokenStream::new(streams.into_iter().flat_map(|s| s.trees).collect())
+    }
+
+    /// An invocation's parts, the stream being one (`path ! ( input )`,
+    /// with `[…]` or `{…}`, and a `;` after it or not): the tokens of the
+    /// macro's path, a fragment's among them (`$p!(…)`), and what is passed
+    /// to the macro, the tokens inside its delimiters. `None` for a stream
+    /// that is no invocation.
+    pub fn invocation(&self) -> Option<(Vec<Token>, TokenStream)> {
+        fn tokens_of(trees: &[Tree], out: &mut Vec<Token>) -> bool {
+            for tree in trees {
+                match tree {
+                    Tree::Token(t) => out.push(t.clone()),
+                    Tree::Group(g) if matches!(g.delim, Delim::Invisible(_)) => {
+                        if !tokens_of(&g.trees, out) {
+                            return false;
+                        }
+                    }
+                    Tree::Group(_) => return false,
+                }
+            }
+            true
+        }
+        let bang =
+            self.trees.iter().position(|t| matches!(t, Tree::Token(t) if t.is_punct("!")))?;
+        let mut path = Vec::new();
+        if bang == 0 || !tokens_of(&self.trees[..bang], &mut path) {
+            return None;
+        }
+        let Some(Tree::Group(group)) = self.trees.get(bang + 1) else { return None };
+        if matches!(group.delim, Delim::Invisible(_)) {
+            return None;
+        }
+        let rest = &self.trees[bang + 2..];
+        let ends = match rest {
+            [] => true,
+            [Tree::Token(t)] => t.is_punct(";"),
+            _ => false,
+        };
+        ends.then(|| (path, TokenStream::new(group.trees.to_vec())))
+    }
+
+    /// The arms of rustc's built-in `cfg_select!`, the stream being what
+    /// an invocation of it is passed (`predicate => { items }`, `_ => { …
+    /// }`, a `,` after each or not): each arm's predicate, `None` for `_`,
+    /// and the tokens inside its braces. An error where rustc's parser of
+    /// it would stop.
+    pub fn cfg_select_arms(&self) -> Result<Vec<(Option<TokenStream>, TokenStream)>, Error> {
+        let mut arms = Vec::new();
+        let mut i = 0usize;
+        let trees = &self.trees;
+        while i < trees.len() {
+            let start = i;
+            while i < trees.len() && !matches!(&trees[i], Tree::Token(t) if t.is_punct("=>")) {
+                i += 1;
+            }
+            let predicate = &trees[start..i];
+            let at = predicate.first().map(Tree::origin);
+            if predicate.is_empty() {
+                return Err(Error::new("expected a `cfg_select!` predicate", at));
+            }
+            if i == trees.len() {
+                return Err(Error::new("expected `=>` after a `cfg_select!` predicate", at));
+            }
+            i += 1;
+            let body = match trees.get(i) {
+                Some(Tree::Group(g)) if g.delim == Delim::Brace => {
+                    TokenStream::new(g.trees.to_vec())
+                }
+                other => {
+                    return Err(Error::new(
+                        "expected `{` after `=>` in `cfg_select!`",
+                        other.map(Tree::origin).or(at),
+                    ))
+                }
+            };
+            i += 1;
+            if matches!(trees.get(i), Some(Tree::Token(t)) if t.is_punct(",")) {
+                i += 1;
+            }
+            let wildcard = matches!(predicate, [Tree::Token(t)] if t.is_keyword("_"));
+            let predicate = (!wildcard).then(|| TokenStream::new(predicate.to_vec()));
+            arms.push((predicate, body));
+        }
+        Ok(arms)
     }
 
     /// The texts of its tokens and brackets in order, a fragment's tokens

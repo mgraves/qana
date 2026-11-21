@@ -121,7 +121,8 @@ order (after it, into the modules declared after it, out of a
 `#[macro_use]` module, not past its block) is the project index's, which
 finds a macro's name as rustc does (`qana_index::textual_at` and
 `Resolver::resolve_macro`). A `macro` item is an item of its module, as
-rustc reads one.
+rustc reads one. `#[macro_use(a, b)]` and `#[macro_export(local_inner_macros)]`
+keep their arguments (`@attribute(k, args)`), which a project model reads.
 
 Folding (`@fold`), wherever one runs over lines: blocks and the bodies of
 modules, structs, enums, unions, traits, impls, `extern` blocks, `match`

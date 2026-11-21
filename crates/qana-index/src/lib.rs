@@ -48,15 +48,23 @@ use qana_lang::{EmbeddedLang, GrammarArtifact};
 use qana_sem::{SemDb, Target};
 use serde::{Deserialize, Serialize};
 
+pub use expand::{
+    expand, BuiltinMacro, ExpandRequest, ExpansionSummary, MacroSource, MacroTable,
+    NestedExpansion, SitePlace,
+};
 pub use graph::{CrateInfo, CrateSource, UnitGraph};
 pub use members::{member_at, members, path_at, MemberAccess, MemberKind, Receiver};
+pub use merge::{merge, Expansions};
+pub use qana_mbe::{Edition, Form, TokenStream, RECURSION_LIMIT};
 pub use qana_sem::{Path, Root};
 pub use references::{escaping, references, Reference};
-pub use resolve::{Implementation, MacroResolution, Resolution, Resolver};
+pub use resolve::{Implementation, MacroResolution, Resolution, Resolver, RootMacros};
 pub use textual::{is_textual, seen_here, textual_at, Seen, TextualLink};
 
+mod expand;
 mod graph;
 mod members;
+mod merge;
 mod references;
 mod resolve;
 mod textual;
@@ -100,11 +108,14 @@ impl Summary {
 pub struct Offers {
     attributes: Vec<Attribute>,
     open: bool,
+    clean: bool,
     textual: Vec<TextualLink>,
     units: Vec<Unit>,
     declarations: Vec<Declaration>,
     reexports: Vec<Import>,
     impls: Vec<Impl>,
+    invocations: Vec<Invocation>,
+    macros: Vec<MacroDef>,
     fingerprint: u64,
 }
 
@@ -148,6 +159,26 @@ impl Offers {
     /// The impl blocks; an impl block's index here is what names it.
     pub fn impls(&self) -> &[Impl] {
         &self.impls
+    }
+
+    /// Whether the text parses as the grammar has it, with no repair: one
+    /// that does not may hold what the summary misses, and each of its
+    /// units is open.
+    pub fn clean(&self) -> bool {
+        self.clean
+    }
+
+    /// The invocations among items whose expansions may declare names
+    /// there (a module's, an impl block's or a trait's), in the file's
+    /// order; an invocation's index here is what names it.
+    pub fn invocations(&self) -> &[Invocation] {
+        &self.invocations
+    }
+
+    /// The macros the file defines outside bodies, in the order of the
+    /// declarations they are.
+    pub fn macros(&self) -> &[MacroDef] {
+        &self.macros
     }
 
     /// A hash of everything the offers hold: equal offers have equal
@@ -302,6 +333,66 @@ pub struct Attribute {
     pub args: Vec<Path>,
 }
 
+/// An invocation among a unit's items, or an impl block's or a trait's,
+/// whose expansion may declare names there: what it invokes and where its
+/// expansion is read. What its macro is, the textual links before it say
+/// ([`TextualLink::Invocation`]), and its path; what it is passed, its
+/// text (from [`Locations::invocation_span`]).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Invocation {
+    /// The unit it stands in: an index into [`Offers::units`], or `None`
+    /// for the file's own.
+    pub unit: Option<u32>,
+    /// The names of the constructs it stands in, outermost first, as a
+    /// declaration there has them ([`Declaration::container`]).
+    pub container: Vec<String>,
+    /// The impl block it stands among the items of: an index into
+    /// [`Offers::impls`].
+    pub impl_block: Option<u32>,
+    /// Whether it stands among an impl block's or a trait's items, not a
+    /// unit's: what its expansion declares are members, not the unit's
+    /// names.
+    pub members: bool,
+    /// The macro's path; `None` where it spells none.
+    pub path: Option<Path>,
+    /// The binding's namespace the path names a macro in.
+    pub namespace: String,
+    /// The grammar's rule its expansion is parsed at (an entry: Rust's
+    /// `items_opt`, `assoc_items_opt`).
+    pub entry: String,
+    /// A hash of its text, from its path to its end: what its expansion
+    /// depends on, besides its macro.
+    pub text: u64,
+    /// The attributes said of it, in the file's order.
+    pub attributes: Vec<Attribute>,
+    /// The expansions it stands in, outermost first, each by the
+    /// invocation it expands (its index among those of the level above)
+    /// and which of that invocation's macros it is: empty for the file's
+    /// own. A project index's merged summary ([`merge`]) has these.
+    pub within: Vec<(u32, u32)>,
+    /// Its index among the invocations of the text it stands in (the
+    /// file's, or its expansion's).
+    pub index: u32,
+}
+
+/// A macro the file defines outside bodies (Rust's `macro_rules!`, and a
+/// `macro` item): the declaration it is, how it is written, a hash of its
+/// body (what follows its name, [`Locations::macro_body_span`]), and the
+/// attributes said of it (Rust's `#[macro_export]`, `#[rustc_builtin_macro]`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MacroDef {
+    /// The declaration it is: an index into [`Offers::declarations`].
+    pub declaration: u32,
+    pub form: Form,
+    pub body: u64,
+    pub attributes: Vec<Attribute>,
+    /// The expansion that defines it, as [`Invocation::within`] says one:
+    /// empty for the file's own.
+    pub within: Vec<(u32, u32)>,
+    /// Its index among the macros of the text it stands in.
+    pub index: u32,
+}
+
 /// What a unit imports: one declaration, under a name, or every name of a
 /// unit (a glob).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -407,6 +498,13 @@ pub struct Locations {
     impls: Vec<(u32, u32)>,
     impl_heads: Vec<units::ImplHead>,
     derives: Vec<Vec<(u32, u32)>>,
+    invocations: Vec<(u32, u32)>,
+    invocation_paths: Vec<Option<(u32, u32)>>,
+    invocation_path_chars: Vec<u32>,
+    invocation_items: Vec<(u32, u32)>,
+    invocation_positions: Vec<(u32, u32)>,
+    macro_bodies: Vec<(u32, u32)>,
+    declared_by: Vec<Option<u32>>,
     words: Vec<String>,
     fingerprint: u64,
 }
@@ -476,6 +574,49 @@ impl Locations {
         &self.derives[i]
     }
 
+    /// The byte span of the `i`th invocation, from its path to its end:
+    /// what it passes its macro is in it.
+    pub fn invocation_span(&self, i: usize) -> (u32, u32) {
+        self.invocations[i]
+    }
+
+    /// The byte span of the `i`th invocation's path: where what its
+    /// macro writes is, where the invocation does not write it.
+    pub fn invocation_path_span(&self, i: usize) -> Option<(u32, u32)> {
+        self.invocation_paths[i]
+    }
+
+    /// How many characters the `i`th invocation's path is written in (its
+    /// whole text's, where it has no path): what is selected where a
+    /// declaration its macro writes is.
+    pub fn invocation_path_length(&self, i: usize) -> u32 {
+        self.invocation_path_chars[i]
+    }
+
+    /// The byte span of the item the `i`th invocation stands in, with what
+    /// the grammar puts before it there.
+    pub fn invocation_item_span(&self, i: usize) -> (u32, u32) {
+        self.invocation_items[i]
+    }
+
+    /// The line and character column the `i`th invocation starts at.
+    pub fn invocation_position(&self, i: usize) -> (u32, u32) {
+        self.invocation_positions[i]
+    }
+
+    /// The byte span of the `i`th macro's body: what follows its name.
+    pub fn macro_body_span(&self, i: usize) -> (u32, u32) {
+        self.macro_bodies[i]
+    }
+
+    /// The invocation the file writes whose expansion (or one nested in
+    /// it) declares the `i`th offered declaration, in a merged summary
+    /// ([`crate::merge`]): an index into [`Offers::invocations`]. `None`
+    /// for a declaration the file's text writes.
+    pub fn declared_by(&self, i: usize) -> Option<u32> {
+        self.declared_by.get(i).copied().flatten()
+    }
+
     /// The names the file defines or refers to, sorted, each once: where a
     /// search for a name's uses looks first.
     pub fn words(&self) -> &[String] {
@@ -506,6 +647,16 @@ const URI: &str = "file";
 pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     let session = lang.session(text);
     let tree = session.tree().expect("parsing is total").clone();
+    summarize_tree(lang, text, tree)
+}
+
+/// Summarize `text` as `tree`, its parse (a file's, or an expansion's at
+/// one of the grammar's entries).
+pub(crate) fn summarize_tree(
+    lang: &EmbeddedLang,
+    text: &str,
+    tree: std::sync::Arc<qana_grammar::GreenNode>,
+) -> Summary {
     let mut db = SemDb::new(lang.binding.clone());
     db.set_types(lang.types.clone());
     db.set_macro_bodies(&lang.macros);
@@ -515,7 +666,8 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     let mut read = units::read(&tree, &lang.binding, &lang.outline);
     // A text that does not parse cleanly may hold what the summary misses:
     // each of its units is open.
-    if !parses_cleanly(&tree) {
+    let clean = parses_cleanly(&tree);
+    if !clean {
         read.open = true;
         for (unit, _, _) in &mut read.units {
             unit.open = true;
@@ -611,7 +763,8 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
         derives: Vec<(u32, u32)>,
     }
     let mut found: Vec<Found> = Vec::new();
-    for (symbol, container) in outside_bodies(&tree, &lang.outline) {
+    let outlined = outside_bodies(&tree, &lang.outline);
+    for (symbol, container) in outlined.iter().cloned() {
         let defines = namespaces.get(&symbol.selection);
         let place = read.defs.get(&symbol.selection);
         if let (Some(namespace), Some(place)) = (defines, place) {
@@ -699,6 +852,7 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
                     TextualLink::Def { declaration, attributes }
                 }
                 textual::UnitLink::Module(walk) => TextualLink::Module(unit_place[walk as usize]),
+                textual::UnitLink::Invocation(index) => TextualLink::Invocation(index),
             })
             .collect()
     };
@@ -713,13 +867,142 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     let positions: Vec<(u32, u32)> =
         names.iter().map(|&(start, _)| lines.position(text, start)).collect();
 
-    let offers_fingerprint = {
+    // Invocations, in the file's order, each in the constructs around it.
+    let containing = |span: (u32, u32)| -> Vec<String> {
+        outlined
+            .iter()
+            .filter(|(symbol, _)| symbol.span.0 <= span.0 && span.1 <= symbol.span.1)
+            .min_by_key(|(symbol, _)| symbol.span.1 - symbol.span.0)
+            .map(|(symbol, container)| {
+                let mut names = container.clone();
+                names.push(symbol.name.clone());
+                names
+            })
+            .unwrap_or_default()
+    };
+    let text_of = |span: (u32, u32)| -> &str {
+        let end = (span.1 as usize).min(text.len());
+        text.get((span.0 as usize).min(end)..end).unwrap_or("")
+    };
+    let hash_of = |span: (u32, u32)| -> u64 {
         let mut hash = Fnv::new();
-        hash.attributes(&read.attributes);
-        hash.u64(u64::from(read.open));
-        hash.textual(&textual);
-        hash.u64(units.len() as u64);
-        for u in &units {
+        hash.str(text_of(span));
+        hash.finish()
+    };
+    let mut invocations: Vec<Invocation> = Vec::new();
+    let mut invocation_spans: Vec<(u32, u32)> = Vec::new();
+    let mut invocation_paths: Vec<Option<(u32, u32)>> = Vec::new();
+    let mut invocation_path_chars: Vec<u32> = Vec::new();
+    let mut invocation_items: Vec<(u32, u32)> = Vec::new();
+    let mut invocation_positions: Vec<(u32, u32)> = Vec::new();
+    for (index, inv) in read.invocations.iter().enumerate() {
+        invocations.push(Invocation {
+            unit: unit_index(inv.unit),
+            container: containing(inv.span),
+            impl_block: inv.impl_block.map(|i| impl_place[i as usize]),
+            members: inv.members,
+            path: inv.path.clone(),
+            namespace: inv.namespace.clone(),
+            entry: lang.sg.nt_names[inv.entry as usize].clone(),
+            text: hash_of(inv.span),
+            attributes: inv.attributes.clone(),
+            within: Vec::new(),
+            index: index as u32,
+        });
+        invocation_spans.push(inv.span);
+        invocation_paths.push(inv.path_span);
+        invocation_path_chars
+            .push(text_of(inv.path_span.unwrap_or(inv.span)).chars().count() as u32);
+        invocation_items.push(inv.item);
+        invocation_positions.push(lines.position(text, inv.span.0));
+    }
+
+    // Macro definitions, by the declarations they are.
+    let mut defined: Vec<(MacroDef, (u32, u32))> = read
+        .macro_defs
+        .iter()
+        .filter_map(|def| {
+            let declaration = *by_name.get(&def.name)?;
+            let form = if def.textual { Form::MacroRules } else { Form::Macro };
+            let macro_def = MacroDef {
+                declaration,
+                form,
+                body: hash_of(def.body),
+                attributes: def.attributes.clone(),
+                within: Vec::new(),
+                index: 0,
+            };
+            Some((macro_def, def.body))
+        })
+        .collect();
+    defined.sort_by_key(|(def, _)| def.declaration);
+    let (mut macros, macro_bodies): (Vec<MacroDef>, Vec<(u32, u32)>) = defined.into_iter().unzip();
+    for (index, def) in macros.iter_mut().enumerate() {
+        def.index = index as u32;
+    }
+
+    let names_count = names.len();
+    let mut summary = Summary {
+        offers: Offers {
+            attributes: read.attributes,
+            open: read.open,
+            clean,
+            textual,
+            units,
+            declarations,
+            reexports,
+            impls,
+            invocations,
+            macros,
+            fingerprint: 0,
+        },
+        needs: Needs { imports, escaping, fingerprint: 0 },
+        locations: Locations {
+            names,
+            items,
+            positions,
+            units: unit_spans,
+            unit_items,
+            reexports: reexport_spans,
+            imports: import_spans,
+            impls: impl_spans,
+            impl_heads,
+            derives: derive_spans,
+            invocations: invocation_spans,
+            invocation_paths,
+            invocation_path_chars,
+            invocation_items,
+            invocation_positions,
+            macro_bodies,
+            declared_by: vec![None; names_count],
+            words,
+            fingerprint: 0,
+        },
+    };
+    summary.fingerprint();
+    summary
+}
+
+impl Summary {
+    /// Set each part's fingerprint from what it holds.
+    pub(crate) fn fingerprint(&mut self) {
+        self.offers.fingerprint = self.offers.hash();
+        self.needs.fingerprint = self.needs.hash();
+        self.locations.fingerprint = self.locations.hash();
+    }
+}
+
+impl Offers {
+    fn hash(&self) -> u64 {
+        let mut hash = Fnv::new();
+        hash.u64(u64::from(self.clean));
+        hash.invocations(&self.invocations);
+        hash.macros(&self.macros);
+        hash.attributes(&self.attributes);
+        hash.u64(u64::from(self.open));
+        hash.textual(&self.textual);
+        hash.u64(self.units.len() as u64);
+        for u in &self.units {
             hash.str(&u.name);
             hash.unit(u.parent);
             hash.u64(u64::from(u.inline));
@@ -728,8 +1011,8 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
             hash.u64(u64::from(u.open));
             hash.textual(&u.textual);
         }
-        hash.u64(declarations.len() as u64);
-        for d in &declarations {
+        hash.u64(self.declarations.len() as u64);
+        for d in &self.declarations {
             hash.u64(d.container.len() as u64);
             for c in &d.container {
                 hash.str(c);
@@ -752,44 +1035,56 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
             hash.types(&d.bounds);
             hash.types(&d.positional);
         }
-        hash.imports(&reexports);
-        hash.u64(impls.len() as u64);
-        for i in &impls {
+        hash.imports(&self.reexports);
+        hash.u64(self.impls.len() as u64);
+        for i in &self.impls {
             hash.unit(i.unit);
             hash.type_opt(i.self_type.as_ref());
             hash.path_opt(i.trait_path.as_ref());
             hash.strs(&i.generics);
         }
         hash.finish()
-    };
-    let needs_fingerprint = {
+    }
+}
+
+impl Needs {
+    fn hash(&self) -> u64 {
         let mut hash = Fnv::new();
-        hash.imports(&imports);
-        hash.u64(escaping.len() as u64);
-        for e in &escaping {
+        hash.imports(&self.imports);
+        hash.u64(self.escaping.len() as u64);
+        for e in &self.escaping {
             hash.unit(e.unit);
             hash.str(&e.namespace);
             hash.path(&e.path);
         }
         hash.finish()
-    };
-    let locations_fingerprint = {
+    }
+}
+
+impl Locations {
+    fn hash(&self) -> u64 {
         let mut hash = Fnv::new();
-        for ((name, item), position) in names.iter().zip(&items).zip(&positions) {
+        for ((name, item), position) in self.names.iter().zip(&self.items).zip(&self.positions) {
             for value in [name.0, name.1, item.0, item.1, position.0, position.1] {
                 hash.u64(u64::from(value));
             }
         }
-        let heads = impl_heads.iter().flat_map(|&(ty, tr)| [ty, tr]).flatten().collect();
-        let derived = derive_spans.iter().flatten().copied().collect();
+        let heads = self.impl_heads.iter().flat_map(|&(ty, tr)| [ty, tr]).flatten().collect();
+        let derived = self.derives.iter().flatten().copied().collect();
+        let paths = self.invocation_paths.iter().flatten().copied().collect();
         for spans in [
-            &unit_spans,
-            &unit_items,
-            &reexport_spans,
-            &import_spans,
-            &impl_spans,
+            &self.units,
+            &self.unit_items,
+            &self.reexports,
+            &self.imports,
+            &self.impls,
             &heads,
             &derived,
+            &self.invocations,
+            &paths,
+            &self.invocation_items,
+            &self.invocation_positions,
+            &self.macro_bodies,
         ] {
             hash.u64(spans.len() as u64);
             for span in spans {
@@ -797,45 +1092,23 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
                 hash.u64(u64::from(span.1));
             }
         }
-        for (ty, tr) in &impl_heads {
+        for (ty, tr) in &self.impl_heads {
             hash.u64(u64::from(ty.is_some()));
             hash.u64(u64::from(tr.is_some()));
         }
-        for d in &derive_spans {
+        for d in &self.derives {
             hash.u64(d.len() as u64);
         }
-        for w in &words {
+        for by in &self.declared_by {
+            hash.unit(*by);
+        }
+        for chars in &self.invocation_path_chars {
+            hash.u64(u64::from(*chars));
+        }
+        for w in &self.words {
             hash.str(w);
         }
         hash.finish()
-    };
-
-    Summary {
-        offers: Offers {
-            attributes: read.attributes,
-            open: read.open,
-            textual,
-            units,
-            declarations,
-            reexports,
-            impls,
-            fingerprint: offers_fingerprint,
-        },
-        needs: Needs { imports, escaping, fingerprint: needs_fingerprint },
-        locations: Locations {
-            names,
-            items,
-            positions,
-            units: unit_spans,
-            unit_items,
-            reexports: reexport_spans,
-            imports: import_spans,
-            impls: impl_spans,
-            impl_heads,
-            derives: derive_spans,
-            words,
-            fingerprint: locations_fingerprint,
-        },
     }
 }
 
@@ -967,6 +1240,11 @@ impl Fnv {
             Some(Root::Crate) => self.u64(2),
             Some(Root::Global) => self.u64(3),
             Some(Root::SelfType) => self.u64(4),
+            Some(Root::MacroCrate) => self.u64(5),
+            Some(Root::CrateAt(k)) => {
+                self.u64(6);
+                self.u64(u64::from(k));
+            }
         }
         self.u64(path.segments.len() as u64);
         for segment in &path.segments {
@@ -1082,6 +1360,50 @@ impl Fnv {
         for a in attributes {
             self.path(&a.path);
             self.u64(u64::from(a.conditional));
+            self.u64(a.args.len() as u64);
+            for arg in &a.args {
+                self.path(arg);
+            }
+        }
+    }
+
+    fn invocations(&mut self, invocations: &[Invocation]) {
+        self.u64(invocations.len() as u64);
+        for i in invocations {
+            self.unit(i.unit);
+            self.strs(&i.container);
+            self.unit(i.impl_block);
+            self.u64(u64::from(i.members));
+            self.path_opt(i.path.as_ref());
+            self.str(&i.namespace);
+            self.str(&i.entry);
+            self.u64(i.text);
+            self.attributes(&i.attributes);
+            self.u64(i.within.len() as u64);
+            for &(at, which) in &i.within {
+                self.u64(u64::from(at));
+                self.u64(u64::from(which));
+            }
+            self.u64(u64::from(i.index));
+        }
+    }
+
+    fn macros(&mut self, macros: &[MacroDef]) {
+        self.u64(macros.len() as u64);
+        for m in macros {
+            self.u64(u64::from(m.declaration));
+            self.u64(match m.form {
+                Form::MacroRules => 0,
+                Form::Macro => 1,
+            });
+            self.u64(m.body);
+            self.attributes(&m.attributes);
+            self.u64(m.within.len() as u64);
+            for &(at, which) in &m.within {
+                self.u64(u64::from(at));
+                self.u64(u64::from(which));
+            }
+            self.u64(u64::from(m.index));
         }
     }
 
@@ -1097,6 +1419,10 @@ impl Fnv {
                 TextualLink::Module(unit) => {
                     self.u64(1);
                     self.u64(u64::from(*unit));
+                }
+                TextualLink::Invocation(index) => {
+                    self.u64(2);
+                    self.u64(u64::from(*index));
                 }
             }
         }

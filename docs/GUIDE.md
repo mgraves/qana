@@ -417,8 +417,10 @@ find.
   its body is in another file, which a project model finds.
 - `@root(kind[, first])`: the node begins a path at a root: `self` (the
   unit it stands in), `super` (its parent; `super` on `self` or `super`
-  goes one further), `crate` (the crate's root unit) or `global` (the
-  crates, `::name`), then the name `first` holds.
+  goes one further), `crate` (the crate's root unit), `global` (the
+  crates, `::name`), `self_type` (Rust's `Self`) or `macro_crate` (the
+  root of the crate that defines the macro whose expansion wrote the
+  path: Rust's `$crate`), then the name `first` holds.
 - `@vis(level)`: a visibility: `public`, `crate`, `super`, `private`, or
   `in` with the label of a path. `@visibility(v, item)`: what `item`
   defines and imports where the node stands has the visibility at `v`;

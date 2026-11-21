@@ -12,7 +12,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use qana_lang::EmbeddedLang;
-use qana_mbe::{expand_all, Edition, Form, MacroRules, Nested, Outcome, Token, TokenStream};
+use qana_mbe::{
+    expand_all, Edition, Form, MacroRules, Nested, Outcome, Token, TokenStream, RECURSION_LIMIT,
+};
 
 const GRAMMAR: &str = include_str!("../../../../examples/rust/rust.qana");
 
@@ -183,8 +185,23 @@ pub fn check_in(
     failures: &[(&str, &str)],
 ) -> (usize, Vec<Nested>) {
     let mut resolve = |path: &[Token]| path.last().and_then(|t| defs.get(&*t.text).cloned());
-    let (_, nested) = expand_all(lang(), &lex_in(program, 1, edition), "file", &mut resolve)
-        .unwrap_or_else(|e| panic!("expanding the program: {e}"));
+    check_with(program, edition, &mut resolve, steps, inside_builtins, unresolved, failures)
+}
+
+/// [`check_in`], resolving the macros no `macro_rules!` of the program
+/// defines by what `resolve` says.
+pub fn check_with(
+    program: &str,
+    edition: Edition,
+    resolve: &mut dyn FnMut(&[Token]) -> Option<Arc<MacroRules>>,
+    steps: Vec<Step>,
+    inside_builtins: &[&str],
+    unresolved: &[&str],
+    failures: &[(&str, &str)],
+) -> (usize, Vec<Nested>) {
+    let (_, nested) =
+        expand_all(lang(), &lex_in(program, 1, edition), "file", RECURSION_LIMIT, resolve)
+            .unwrap_or_else(|e| panic!("expanding the program: {e}"));
     let mut ours = Vec::new();
     let mut open = Vec::new();
     let mut failed = Vec::new();

@@ -38,6 +38,14 @@ pub enum Root {
     /// `Self`): what it names depends on where it stands, which a path
     /// alone does not say.
     SelfType,
+    /// The root unit of the crate that defines the macro whose expansion
+    /// wrote the path (Rust's `$crate`): which crate that is, only the
+    /// expansion's definition says.
+    MacroCrate,
+    /// The root unit of a crate of a project's unit graph, by its index
+    /// there: what [`Root::MacroCrate`] is once a project index knows
+    /// which crate defines the macro.
+    CrateAt(u32),
 }
 
 impl Root {

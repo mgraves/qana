@@ -318,6 +318,10 @@ fn a_unit_graph_places_each_file_in_its_crates_at_its_module_path() {
         macro_export: Vec::new(),
         macro_prelude: Vec::new(),
         conditions: Vec::new(),
+        builtin_attributes: Vec::new(),
+        builtin_macros: Vec::new(),
+        local_inner_macros: Vec::new(),
+        recursion_limit: None,
     };
     let mut graph = UnitGraph::new();
     let lib = graph.add_crate(krate("geo", "lib", "/p/src/lib.rs"));

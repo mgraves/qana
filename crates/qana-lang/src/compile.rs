@@ -1518,12 +1518,13 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             Some(("self", false)) => Some(Root::Unit(0)),
                             Some(("global", false)) => Some(Root::Global),
                             Some(("self_type", false)) => Some(Root::SelfType),
+                            Some(("macro_crate", false)) => Some(Root::MacroCrate),
                             _ => None,
                         };
                         if std::mem::replace(&mut seen_root, true) {
                             error(d, a.name_span, "duplicate @root".into());
                         } else if a.args.is_empty() || a.args.len() > 2 {
-                            error(d, a.name_span, "@root takes a root (`crate`, `super`, `self`, `global` or `self_type`) and an optional label of the first name".into());
+                            error(d, a.name_span, "@root takes a root (`crate`, `super`, `self`, `global`, `self_type` or `macro_crate`) and an optional label of the first name".into());
                         } else if let Some(root) = root {
                             let first = match a.args.get(1) {
                                 None => Some(None),

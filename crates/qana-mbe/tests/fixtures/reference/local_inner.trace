@@ -1,0 +1,14 @@
+// rustc +nightly (1.94.0-nightly f52090008 2025-12-10) -Ztrace-macros --edition 2021 local_inner.rs:
+// its notes, the excerpts of the source between them left out.
+   = note: expanding `outer! { 1 }`
+   = note: to `helper! (1)`
+   = note: expanding `helper! { 1 }`
+   = note: to `1 + 1`
+   = note: expanding `calls! { helper }`
+   = note: to `(helper ! (2), helper! (3))`
+   = note: expanding `helper! { 2 }`
+   = note: to `2 * 100`
+   = note: expanding `helper! { 3 }`
+   = note: to `3 + 1`
+   = note: expanding `helper! { 4 }`
+   = note: to `4 * 100`

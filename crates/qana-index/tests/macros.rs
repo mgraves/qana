@@ -186,6 +186,10 @@ fn resolver() -> Resolver {
         macro_export: vec![path(None, &["macro_export"])],
         macro_prelude: vec![path(Some(Root::Global), &["std"])],
         conditions: vec![path(None, &["cfg"])],
+        builtin_attributes: Vec::new(),
+        builtin_macros: Vec::new(),
+        local_inner_macros: Vec::new(),
+        recursion_limit: None,
     };
     let mut graph = UnitGraph::new();
     let alloc = graph.add_crate(krate("alloc", "/s/alloc/lib.rs", Vec::new()));
@@ -334,6 +338,47 @@ fn an_exported_macro_is_at_its_crates_root_and_the_macro_prelude_has_std_and_mac
         named(&r, a, "vec", 0),
         ["/s/alloc/macros.rs: vec"],
         "std's, which std's root imports from alloc's"
+    );
+}
+
+#[test]
+fn a_crates_root_names_its_exported_macros_its_macro_items_and_what_it_imports() {
+    let r = resolver();
+    // The crates, as `resolver` adds them.
+    let (alloc, std, app) = (0u32, 1u32, 3u32);
+    // Each name, and what it names: (file, declared name, crate).
+    type Named = Vec<(String, Vec<(String, String, u32)>)>;
+    let named = |krate: u32| -> Named {
+        r.root_macros(krate, "macro")
+            .iter()
+            .map(|(name, macros)| {
+                let macros = macros
+                    .iter()
+                    .map(|(file, i, k)| {
+                        let text = FILES.iter().find(|(f, _)| FilePath::new(f) == file).unwrap().1;
+                        let summary = summarize(rust(), text);
+                        let declared = summary.offers().declarations()[*i as usize].name.clone();
+                        (file.display().to_string(), declared, *k)
+                    })
+                    .collect();
+                (name.clone(), macros)
+            })
+            .collect()
+    };
+    let at = |file: &str, name: &str, k: u32| (file.to_string(), name.to_string(), k);
+    assert_eq!(
+        named(app),
+        [
+            ("by_path".to_string(), vec![at("/p/src/lib.rs", "by_path", app)]),
+            ("exported".to_string(), vec![at("/p/src/macros.rs", "exported", app)]),
+        ],
+        "`$crate::exported!` from anywhere in the crate, `$crate::by_path!`; no textual \
+         definition it does not export"
+    );
+    assert_eq!(
+        named(std),
+        [("vec".to_string(), vec![at("/s/alloc/macros.rs", "vec", alloc)])],
+        "what its root imports, alloc's"
     );
 }
 

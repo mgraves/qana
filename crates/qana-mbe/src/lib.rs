@@ -48,10 +48,11 @@ pub use rules::{Form, MacroRules};
 pub use token::{Token, TokenKind, TokenStream};
 
 use qana_lang::EmbeddedLang;
+use serde::{Deserialize, Serialize};
 
 /// A Rust edition, which decides what some fragments match (`expr`, `pat`)
 /// and which names are keywords.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Edition {
     E2015,
     E2018,
@@ -61,7 +62,7 @@ pub enum Edition {
 
 /// Where a token was written: a source the caller numbers (a file, the text
 /// of a definition) and the byte span in it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Origin {
     pub source: u32,
     pub start: u32,

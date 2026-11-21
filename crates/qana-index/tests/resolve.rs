@@ -107,6 +107,10 @@ fn project() -> Resolver {
         macro_export: Vec::new(),
         macro_prelude: Vec::new(),
         conditions: Vec::new(),
+        builtin_attributes: Vec::new(),
+        builtin_macros: Vec::new(),
+        local_inner_macros: Vec::new(),
+        recursion_limit: None,
     };
     let mut graph = UnitGraph::new();
     let geo = graph.add_crate(krate("geo", "/p/src/lib.ul", Vec::new()));
@@ -366,6 +370,10 @@ fn one_file(text: &str) -> Resolver {
         macro_export: Vec::new(),
         macro_prelude: Vec::new(),
         conditions: Vec::new(),
+        builtin_attributes: Vec::new(),
+        builtin_macros: Vec::new(),
+        local_inner_macros: Vec::new(),
+        recursion_limit: None,
     });
     Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
 }
@@ -563,6 +571,10 @@ fn with_preludes() -> Resolver {
             macro_export: Vec::new(),
             macro_prelude: Vec::new(),
             conditions: Vec::new(),
+            builtin_attributes: Vec::new(),
+            builtin_macros: Vec::new(),
+            local_inner_macros: Vec::new(),
+            recursion_limit: None,
         };
     let std_prelude = path(Some(Root::Global), &["std", "prelude", "rust_2021"]);
     let mut graph = UnitGraph::new();
@@ -860,6 +872,10 @@ fn one_file_inert(text: &str) -> Resolver {
         macro_export: Vec::new(),
         macro_prelude: Vec::new(),
         conditions: Vec::new(),
+        builtin_attributes: Vec::new(),
+        builtin_macros: Vec::new(),
+        local_inner_macros: Vec::new(),
+        recursion_limit: None,
     });
     Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
 }

@@ -1,8 +1,8 @@
 //! The Rust Reference's rules for macros by example, as rustc applies
 //! them: each fragment kind, repetitions and their separators, forwarding
 //! a fragment to another macro, `$crate`, doc comments, the editions'
-//! fragments, meta-variable expressions, textual scope, the recursion
-//! limit, and what rustc refuses.
+//! fragments, meta-variable expressions, textual scope, `local_inner_macros`,
+//! the recursion limit, and what rustc refuses.
 //!
 //! `tests/fixtures/reference/` holds the programs and what `rustc +nightly
 //! -Ztrace-macros` (nightly 1.94.0, f52090008 2025-12-10) printed for
@@ -12,9 +12,13 @@
 mod common;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use common::{check, check_in, lang, lex, lex_in, trace};
-use qana_mbe::{expand_all, Edition, Expansion, Form, MacroRules, Nested, Outcome, Token};
+use common::{check, check_in, check_with, definition, lang, lex, lex_in, texts, trace};
+use qana_mbe::{
+    expand_all, expand_nested, Edition, Expansion, Form, MacroRules, Nested, Outcome, Token,
+    RECURSION_LIMIT,
+};
 
 /// The first expansion of macro `name`, depth first.
 fn find<'a>(nested: &'a [Nested], name: &str) -> Option<&'a Expansion> {
@@ -122,9 +126,14 @@ fn a_macro_rules_is_seen_after_it_to_the_end_of_its_block_or_module() {
     // rustc: `a!` after the block and `b!` after `mod m` are "cannot find
     // macro … in this scope"; `c!`, after a `#[macro_use]` module, is seen.
     let mut resolve = no_macros;
-    let (_, nested) =
-        expand_all(lang(), &lex(include_str!("fixtures/reference/scope.rs"), 1), "file", &mut resolve)
-            .expect("the program parses");
+    let (_, nested) = expand_all(
+        lang(),
+        &lex(include_str!("fixtures/reference/scope.rs"), 1),
+        "file",
+        RECURSION_LIMIT,
+        &mut resolve,
+    )
+    .expect("the program parses");
     let outcomes: Vec<(String, bool)> = nested
         .iter()
         .map(|n| (n.path[0].text.to_string(), matches!(n.outcome, Outcome::Expanded(_))))
@@ -136,18 +145,60 @@ fn a_macro_rules_is_seen_after_it_to_the_end_of_its_block_or_module() {
     assert_eq!(outcomes, expect);
 }
 
-/// A program of `deep!` recursing `n` times: (expansions made, the
-/// innermost's error if it failed).
-fn deep(n: usize) -> (usize, Option<String>) {
+#[test]
+fn a_local_inner_macros_macro_names_its_helpers_as_its_crate_does() {
+    // rustc: `helper!` that `outer!` and `calls!` write is the crate's
+    // exported one, `$crate::helper!` (`+ 1`), though `main`'s own
+    // `helper!` (`* 100`) is in textual scope; the `helper` `main` passes
+    // `calls!` is `main`'s.
+    let program = include_str!("fixtures/reference/local_inner.rs");
+    let exported = definition(program, 1, "macro_rules!", "helper", Form::MacroRules);
+    let mut asked: Vec<String> = Vec::new();
+    let mut resolve = |path: &[Token]| {
+        let path = path.iter().map(|t| t.text.to_string()).collect::<Vec<_>>().join(" ");
+        asked.push(path.clone());
+        (path == "$crate :: helper").then(|| exported.clone())
+    };
+    let (made, nested) = check_with(
+        program,
+        Edition::E2021,
+        &mut resolve,
+        trace(include_str!("fixtures/reference/local_inner.trace")),
+        &[],
+        &[],
+        &[],
+    );
+    assert_eq!(made, 6);
+    assert_eq!(asked, ["$crate :: helper", "$crate :: helper"], "the written names, by path");
+    let outer = find(&nested, "outer").expect("outer!");
+    let path = &outer.nested[0].path;
+    assert_eq!(texts(&outer.tokens)[0], "helper", "the expansion is as rustc writes it");
+    assert!(path.iter().all(|t| t.mark == outer.mark), "the path the expansion wrote");
+}
+
+/// A program of `deep!` recursing `n` times, in a crate whose
+/// `recursion_limit` is `limit`: (expansions made, the innermost's error
+/// if it failed).
+fn deep_to(n: usize, limit: usize) -> (usize, Option<String>) {
     let program = format!(
         "macro_rules! deep {{ () => {{ 0 }}; (x $($t:tt)*) => {{ deep!($($t)*) }}; }}\n\
          fn main() {{ let _ = deep!({}); }}\n",
         vec!["x"; n].join(" ")
     );
     let mut resolve = no_macros;
-    let (_, nested) = expand_all(lang(), &lex(&program, 1), "file", &mut resolve).expect("parses");
+    let (_, nested) =
+        expand_all(lang(), &lex(&program, 1), "file", limit, &mut resolve).expect("parses");
+    innermost(&nested)
+}
+
+fn deep(n: usize) -> (usize, Option<String>) {
+    deep_to(n, RECURSION_LIMIT)
+}
+
+/// How deep `nested`'s first invocation nests, and the innermost's error.
+fn innermost(nested: &[Nested]) -> (usize, Option<String>) {
     let mut made = 0usize;
-    let mut level = &nested;
+    let mut level = nested;
     loop {
         match &level[0].outcome {
             Outcome::Expanded(e) => {
@@ -172,6 +223,38 @@ fn expansions_nest_to_rustcs_recursion_limit() {
         deep(128),
         (128, Some("recursion limit reached while expanding `deep!`".to_string()))
     );
+    // rustc, with `#![recursion_limit = "256"]`: 255 recursions expand, 256
+    // reach it.
+    assert_eq!(deep_to(255, 256), (256, None));
+    assert_eq!(
+        deep_to(256, 256),
+        (256, Some("recursion limit reached while expanding `deep!`".to_string()))
+    );
+}
+
+#[test]
+fn an_expansion_made_deep_nests_only_to_the_limit() {
+    // An invocation an expansion 100 deep wrote is 101 deep: 27 more
+    // recursions reach 128, a 28th the limit.
+    let rules = Arc::new(
+        MacroRules::read(
+            &lex("{ () => { 0 }; (x $($t:tt)*) => { deep!($($t)*) }; }", 1),
+            Form::MacroRules,
+        )
+        .expect("deep!"),
+    );
+    let at = |n: usize| {
+        let mut resolve =
+            |path: &[Token]| path.last().is_some_and(|t| &*t.text == "deep").then(|| rules.clone());
+        let input = lex(&vec!["x"; n].join(" "), 0);
+        let top =
+            expand_nested(lang(), &rules, &input, "attrs_expr", 101, RECURSION_LIMIT, &mut resolve)
+                .expect("the top expansion is made");
+        let (made, error) = innermost(&top.nested);
+        (made + 1, error)
+    };
+    assert_eq!(at(27), (28, None));
+    assert_eq!(at(28), (28, Some("recursion limit reached while expanding `deep!`".to_string())));
 }
 
 /// What reading `macro_rules! m …` in `program` says.
@@ -247,7 +330,8 @@ fn invocations_rustc_refuses_fail() {
     ] {
         let mut resolve = no_macros;
         let (_, nested) =
-            expand_all(lang(), &lex(program, 1), "file", &mut resolve).expect("parses");
+            expand_all(lang(), &lex(program, 1), "file", RECURSION_LIMIT, &mut resolve)
+                .expect("parses");
         let mut failed = Vec::new();
         common::made(&nested, &mut Vec::new(), &mut Vec::new(), &mut failed);
         assert_eq!(failed.len(), 1, "{program}: one invocation fails: {failed:?}");

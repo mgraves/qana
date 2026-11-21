@@ -30,6 +30,10 @@ pub enum TextualLink {
     /// A child module (an index into the offers' units): what its own
     /// links are seen after it where its attributes carry them out.
     Module(u32),
+    /// An invocation (an index into the offers' invocations): what its
+    /// macro is, the links before it say; what its expansion defines is
+    /// seen after it.
+    Invocation(u32),
 }
 
 /// What a name at a point of a file may see by textual scope, from the
@@ -83,6 +87,13 @@ pub(crate) fn own_links(
                 }
             }
             TextualEvent::File { unit: None, .. } => {}
+            // Among a module's items or an impl block's: in the module's
+            // order, wherever the scopes between are.
+            TextualEvent::Invocation { index, .. } => {
+                if let Some(Some(unit)) = stack.iter().rev().find(|f| f.is_some()) {
+                    out.entry(*unit).or_default().push(UnitLink::Invocation(*index));
+                }
+            }
             TextualEvent::Open { module: Some(module), .. } => {
                 let at = module_level(&stack);
                 match (at, module.unit) {
@@ -109,6 +120,7 @@ pub(crate) fn own_links(
 pub(crate) enum UnitLink {
     Def { declaration: u32, attributes: Vec<Attribute> },
     Module(u32),
+    Invocation(u32),
 }
 
 /// What a name at byte `offset` of `doc` sees by textual scope: the
@@ -145,6 +157,7 @@ pub(crate) fn replay(events: &[TextualEvent], offset: u32) -> Vec<Seen> {
         let at = match event {
             TextualEvent::Def { span, .. } => span.0,
             TextualEvent::File { at, .. } => *at,
+            TextualEvent::Invocation { at, .. } => *at,
             TextualEvent::Open { span, .. } => span.0,
             TextualEvent::Close { end } => *end,
         };
@@ -170,6 +183,8 @@ pub(crate) fn replay(events: &[TextualEvent], offset: u32) -> Vec<Seen> {
                 seen: Vec::new(),
                 module: module.as_ref().map(|m| (m.name.clone(), m.attributes.clone())),
             }),
+            // What an expansion defines, a live document does not see.
+            TextualEvent::Invocation { .. } => {}
             TextualEvent::Close { .. } => {
                 let frame = stack.pop().expect("an open frame");
                 if let Some((_, attributes)) = frame.module {

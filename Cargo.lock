@@ -105,6 +105,7 @@ dependencies = [
  "postcard",
  "qana-grammar",
  "qana-lang",
+ "qana-mbe",
  "qana-sem",
  "qana-services",
  "serde",
@@ -145,6 +146,7 @@ version = "0.0.1"
 dependencies = [
  "qana-grammar",
  "qana-lang",
+ "serde",
 ]
 
 [[package]]

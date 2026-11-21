@@ -12,13 +12,14 @@ use std::sync::Arc;
 use qana_grammar::{GreenChild, GreenNode};
 use qana_lang::EmbeddedLang;
 
-use crate::parsed::Parsed;
+use crate::parsed::{Parsed, Spanned};
 use crate::render::Flat;
 use crate::rules::{Form, MacroRules};
 use crate::token::{Token, TokenKind, TokenStream, Tree};
 use crate::{expand, Error};
 
-/// rustc's default `recursion_limit`: how deep expansions may nest.
+/// rustc's default `recursion_limit`: how deep expansions may nest. A
+/// crate may raise it (`#![recursion_limit = "256"]`).
 pub const RECURSION_LIMIT: usize = 128;
 
 /// An invocation expanded: the tokens its arm transcribed (marked with
@@ -36,7 +37,10 @@ pub struct Expansion {
 pub struct Nested {
     /// Its span in the expansion's text ([`Parsed::text`]).
     pub span: (u32, u32),
-    /// The path of the macro it invokes.
+    /// The path of the macro it invokes, as rustc resolves it: a name alone
+    /// that a `local_inner_macros` macro wrote ([`MacroRules::local_inner`])
+    /// is its crate's, `$crate::name` (the two tokens before it written
+    /// where the name is, by the same expansion).
     pub path: Vec<Token>,
     /// What it passes the macro: the tokens inside its delimiters.
     pub input: TokenStream,
@@ -59,29 +63,39 @@ pub enum Outcome {
 /// defines, before them, by it, the rest by what `resolve` says the path
 /// names. Marks are numbered from 1, the top expansion's, in the order the
 /// expansions are made.
+///
+/// The top expansion is `depth` deep (1 for an invocation no macro wrote;
+/// one an expansion wrote is one deeper than it), and none is made deeper
+/// than `limit`, the crate's `recursion_limit`: one that would be fails,
+/// as rustc's does. The top one is made whatever its depth: its caller
+/// judges that.
 pub fn expand_nested(
     lang: &EmbeddedLang,
     rules: &MacroRules,
     input: &TokenStream,
     entry: &str,
+    depth: usize,
+    limit: usize,
     resolve: &mut dyn FnMut(&[Token]) -> Option<Arc<MacroRules>>,
 ) -> Result<Expansion, Error> {
-    let mut driver = Driver::new(lang, resolve);
-    driver.run(rules, input, entry, 1)
+    let mut driver = Driver::new(lang, limit, resolve);
+    driver.run(rules, input, entry, depth)
 }
 
 /// Parse `stream` at `entry` (a file's items, say) and expand each
 /// invocation in it as [`expand_nested`] does, in textual order: those a
 /// `macro_rules!` before it in the stream or in an expansion defines by
-/// it, the rest by what `resolve` says. Marks are numbered from 1.
+/// it, the rest by what `resolve` says. Marks are numbered from 1, and
+/// none is made deeper than `limit`, the crate's `recursion_limit`.
 pub fn expand_all(
     lang: &EmbeddedLang,
     stream: &TokenStream,
     entry: &str,
+    limit: usize,
     resolve: &mut dyn FnMut(&[Token]) -> Option<Arc<MacroRules>>,
 ) -> Result<(Parsed, Vec<Nested>), Error> {
     let parsed = stream.parse(lang, entry)?;
-    let mut driver = Driver::new(lang, resolve);
+    let mut driver = Driver::new(lang, limit, resolve);
     let mut nested = Vec::new();
     let tree = parsed.tree.clone();
     driver.walk(&parsed, &tree, 0, 0, &mut nested);
@@ -93,7 +107,11 @@ type Local = (String, Result<Arc<MacroRules>, Error>);
 struct Driver<'a, 'r> {
     lang: &'a EmbeddedLang,
     resolve: &'r mut dyn FnMut(&[Token]) -> Option<Arc<MacroRules>>,
+    /// The crate's `recursion_limit`.
+    limit: usize,
     next_mark: u32,
+    /// The marks of the expansions of `local_inner_macros` macros.
+    local_inner: HashSet<u32>,
     /// The `macro_rules!` seen so far, in textual order, still in scope.
     locals: Vec<Local>,
     /// (nt, prod) → (the entry its invocation expands at, the child that
@@ -112,6 +130,7 @@ struct Driver<'a, 'r> {
 impl<'a, 'r> Driver<'a, 'r> {
     fn new(
         lang: &'a EmbeddedLang,
+        limit: usize,
         resolve: &'r mut dyn FnMut(&[Token]) -> Option<Arc<MacroRules>>,
     ) -> Self {
         let b = &lang.binding;
@@ -145,7 +164,9 @@ impl<'a, 'r> Driver<'a, 'r> {
         Driver {
             lang,
             resolve,
+            limit,
             next_mark: 1,
+            local_inner: HashSet::new(),
             locals: Vec::new(),
             expansions,
             invocations,
@@ -164,6 +185,9 @@ impl<'a, 'r> Driver<'a, 'r> {
     ) -> Result<Expansion, Error> {
         let mark = self.next_mark;
         self.next_mark += 1;
+        if rules.local_inner {
+            self.local_inner.insert(mark);
+        }
         let tokens = expand(self.lang, rules, input, mark)?;
         let parsed = tokens.parse(self.lang, entry)?;
         let mut nested = Vec::new();
@@ -313,7 +337,14 @@ impl<'a, 'r> Driver<'a, 'r> {
         let Some(Flat::Token(name)) = flats.get(bang + 1) else { return };
         let Some((name, _)) = name.ident() else { return };
         let body = trees_of(&flats[bang + 2..]);
-        let rules = MacroRules::read(&TokenStream::new(body), Form::MacroRules).map(Arc::new);
+        let start = parsed.flat_spans[first].0;
+        let local_inner = parsed
+            .tokens
+            .iter()
+            .position(|t| t.span.0 >= start)
+            .is_some_and(|k| local_inner_macros(&parsed.tokens, k));
+        let rules = MacroRules::read(&TokenStream::new(body), Form::MacroRules)
+            .map(|r| Arc::new(if local_inner { r.local_inner() } else { r }));
         self.locals.push((name.to_string(), rules));
     }
 
@@ -334,13 +365,25 @@ impl<'a, 'r> Driver<'a, 'r> {
         else {
             return;
         };
-        let path: Vec<Token> = flats[..bang]
+        let mut path: Vec<Token> = flats[..bang]
             .iter()
             .filter_map(|f| match f {
                 Flat::Token(t) => Some(t.clone()),
                 _ => None,
             })
             .collect();
+        if let [name] = path.as_slice() {
+            if name.kind == TokenKind::Ident
+                && &*name.text != "$crate"
+                && self.local_inner.contains(&name.mark)
+            {
+                let written =
+                    |kind, text| Token::new(kind, text, name.origin, name.edition, name.mark);
+                let root = written(TokenKind::Ident, "$crate");
+                let sep = written(TokenKind::Punct, "::");
+                path.splice(0..0, [root, sep]);
+            }
+        }
         let Some(Flat::Open { group, .. }) = flats.get(bang + 1) else { return };
         let args = TokenStream::new(group.trees.to_vec());
         let local = match path.as_slice() {
@@ -362,7 +405,7 @@ impl<'a, 'r> Driver<'a, 'r> {
             out.push(Nested { span, path, input: args, entry, outcome: Outcome::Unresolved });
             return;
         };
-        if depth + 1 > RECURSION_LIMIT {
+        if depth + 1 > self.limit {
             let name = path.last().map(|t| t.text.to_string()).unwrap_or_default();
             let at = path.last().map(|t| t.origin);
             out.push(Nested {
@@ -484,13 +527,33 @@ fn macro_use(parsed: &Parsed, node: &GreenNode, base: u32) -> bool {
     if prev(k).is_some_and(|t| t.is_keyword("pub")) {
         k -= 1;
     }
+    attributes_before(tokens, k)
+        .into_iter()
+        .any(|open| tokens.get(open + 1).is_some_and(|t| t.token.is_keyword("macro_use")))
+}
+
+/// Whether a `macro_rules!` (its `macro_rules` at token `k`) carries
+/// `#[macro_export(local_inner_macros)]`.
+fn local_inner_macros(tokens: &[Spanned], k: usize) -> bool {
+    attributes_before(tokens, k).into_iter().any(|open| {
+        let at = |d: usize| tokens.get(open + d).map(|t| &t.token);
+        at(1).is_some_and(|t| t.is_keyword("macro_export"))
+            && at(2).is_some_and(|t| t.kind == TokenKind::Delimiter && &*t.text == "(")
+            && at(3).is_some_and(|t| t.is_keyword("local_inner_macros"))
+            && at(4).is_some_and(|t| t.kind == TokenKind::Delimiter && &*t.text == ")")
+    })
+}
+
+/// The outer attributes that stand before token `k`, doc comments passed
+/// over: the index of each one's `[`, the nearest first.
+fn attributes_before(tokens: &[Spanned], mut k: usize) -> Vec<usize> {
+    let mut found = Vec::new();
     loop {
-        match prev(k) {
+        match k.checked_sub(1).map(|p| &tokens[p].token) {
             Some(t) if t.kind == TokenKind::DocComment => k -= 1,
             Some(t) if t.kind == TokenKind::Delimiter && &*t.text == "]" => {
-                let close = k - 1;
                 let mut d = 0usize;
-                let mut open = close;
+                let mut open = k - 1;
                 loop {
                     let t = &tokens[open].token;
                     if t.kind == TokenKind::Delimiter && &*t.text == "]" {
@@ -502,19 +565,17 @@ fn macro_use(parsed: &Parsed, node: &GreenNode, base: u32) -> bool {
                         }
                     }
                     if open == 0 {
-                        return false;
+                        return found;
                     }
                     open -= 1;
                 }
                 if open == 0 || !tokens[open - 1].token.is_punct("#") {
-                    return false;
+                    return found;
                 }
-                if tokens.get(open + 1).is_some_and(|t| t.token.is_keyword("macro_use")) {
-                    return true;
-                }
+                found.push(open);
                 k = open - 1;
             }
-            _ => return false,
+            _ => return found,
         }
     }
 }

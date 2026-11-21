@@ -12,9 +12,10 @@ categories = ["parsing", "development-tools"]
 [dependencies]
 qana-grammar.workspace = true
 qana-lang.workspace = true
+qana-mbe.workspace = true
 qana-sem.workspace = true
 qana-services.workspace = true
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 
 [dev-dependencies]
 # The encoding a host keeps summaries in; the tests round-trip them

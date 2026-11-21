@@ -223,7 +223,19 @@ pub struct Resolver {
     /// Each crate's exported textual definitions (`#[macro_export]`) by
     /// name, once gathered: (file, declaration index).
     exported: RefCell<HashMap<u32, Exported>>,
+    /// What each crate's root names by each name alone in a namespace,
+    /// once found ([`Resolver::root_macros`]).
+    root_macros: RefCell<HashMap<(u32, String), RootMacros>>,
+    /// Each crate's files, once gathered.
+    crate_files: RefCell<Option<CrateFiles>>,
 }
+
+/// Each crate's files, by their indices in a resolver.
+type CrateFiles = Rc<HashMap<u32, Vec<u32>>>;
+
+/// What [`Resolver::root_macros`] finds: each name, and the macros it
+/// names.
+pub type RootMacros = Rc<Vec<(String, Vec<(PathBuf, u32, u32)>)>>;
 
 /// A unit in a crate: a file's own (`unit` `None`), or one with its body in
 /// the file.
@@ -393,6 +405,8 @@ impl Resolver {
             blankets_named: RefCell::default(),
             built_in_derives: RefCell::default(),
             exported: RefCell::default(),
+            root_macros: RefCell::default(),
+            crate_files: RefCell::default(),
         }
     }
 
@@ -539,6 +553,10 @@ impl Resolver {
                 (vec![Target { declaration: None, module: Some(module) }], 0)
             }
             Some(Root::Crate) => (vec![self.crate_root(at.krate)], 0),
+            Some(Root::CrateAt(krate)) => (vec![self.crate_root(krate)], 0),
+            // `$crate` outside an expansion, whose definition would say
+            // which crate it is: none here does.
+            Some(Root::MacroCrate) => return Err(0),
             // The type the path stands in an impl block or trait of, which
             // only where it stands says: a member access's typing knows.
             Some(Root::SelfType) => return Err(0),

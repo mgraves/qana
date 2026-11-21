@@ -5,10 +5,12 @@
 use std::collections::HashMap;
 
 use crate::token::{Delim, ExprKind, PatKind, Token, TokenKind, TokenStream, Tree};
+use serde::{Deserialize, Serialize};
+
 use crate::{Edition, Error, Origin};
 
 /// The syntax a definition is written in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Form {
     /// `macro_rules! name { arms }`: arms separated by `;`. Its names are
     /// hygienic as `macro_rules!`'s are (mixed site).
@@ -23,9 +25,27 @@ pub enum Form {
 pub struct MacroRules {
     pub(crate) arms: Vec<Arm>,
     pub(crate) form: Form,
+    /// Whether the macros it invokes by a name alone are its crate's
+    /// (`#[macro_export(local_inner_macros)]`).
+    pub(crate) local_inner: bool,
 }
 
 impl MacroRules {
+    /// The same macro, exported with `local_inner_macros`: a macro its
+    /// expansion invokes by a name alone that it writes (not one a
+    /// fragment holds) is its crate's, as `$crate::name!` names it, which
+    /// is how rustc resolves it.
+    pub fn local_inner(mut self) -> MacroRules {
+        self.local_inner = true;
+        self
+    }
+
+    /// Whether it was exported with `local_inner_macros`
+    /// ([`MacroRules::local_inner`]).
+    pub fn is_local_inner(&self) -> bool {
+        self.local_inner
+    }
+
     /// Read a definition from the tokens after its name: for
     /// `macro_rules!`, its group (`{ … }`, or `( … )` or `[ … ]` and a
     /// `;`); for `macro`, `{ … }` or `( … ) { … }`. An error where rustc
@@ -148,7 +168,7 @@ impl MacroRules {
         if arms.is_empty() {
             return Err(Error::new("macros must contain at least one rule", first_origin));
         }
-        Ok(MacroRules { arms, form })
+        Ok(MacroRules { arms, form, local_inner: false })
     }
 
     /// The syntax it was written in.

@@ -688,6 +688,10 @@ fn project() -> qana_index::Resolver {
         macro_export: Vec::new(),
         macro_prelude: Vec::new(),
         conditions: Vec::new(),
+        builtin_attributes: Vec::new(),
+        builtin_macros: Vec::new(),
+        local_inner_macros: Vec::new(),
+        recursion_limit: None,
     };
     let mut graph = UnitGraph::new();
     let core = graph.add_crate(krate("core", "/core/lib.rs", Vec::new(), Vec::new()));
@@ -1022,6 +1026,10 @@ fn a_lang_trait_is_its_crates_whatever_the_root_calls_by_its_name() {
             macro_export: Vec::new(),
             macro_prelude: Vec::new(),
             conditions: Vec::new(),
+            builtin_attributes: Vec::new(),
+            builtin_macros: Vec::new(),
+            local_inner_macros: Vec::new(),
+            recursion_limit: None,
         };
     let mut graph = UnitGraph::new();
     let core = graph.add_crate(krate("core", "/core/lib.rs", "2021", Vec::new()));

@@ -5,8 +5,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
 
-use super::{Exported, MacroResolution, Module, Resolution, Resolver, Start};
-use crate::{Attribute, CrateInfo, Path, Seen, TextualLink};
+use super::{
+    CrateFiles, Exported, MacroResolution, Module, Resolution, Resolver, RootMacros, Start,
+};
+use crate::{Attribute, CrateInfo, Path, Root, Seen, TextualLink};
 
 /// What a textual search has found, nearest first: definitions in the
 /// file the name stands in (by their names' spans) and declarations
@@ -114,6 +116,227 @@ impl Resolver {
         }
     }
 
+    /// The macros invocation `invocation` of `file`'s summary (merged with
+    /// its expansions, as the resolver was given it) invokes, as rustc
+    /// finds them, by [`resolve_macro`](Self::resolve_macro)'s rules: its
+    /// path alone by textual scope (the links before the invocation's, in
+    /// its unit and out through the units around it and the modules its
+    /// file is declared in), then by its unit's names, the macro prelude
+    /// and the preludes; a path as [`resolve`](Self::resolve) resolves one.
+    /// Each is (the file that defines it, its declaration there, the crate
+    /// that file is in, as `$crate` in its expansion names): several where
+    /// a nearer one is under a condition, as with `resolve_macro`; none
+    /// where it names no macro the project holds.
+    pub fn invocation_macros(&self, file: &FilePath, invocation: u32) -> Vec<(PathBuf, u32, u32)> {
+        let Some(&id) = self.ids.get(file) else { return Vec::new() };
+        let summary = self.summaries[id as usize].clone();
+        let Some(inv) = summary.offers().invocations().get(invocation as usize) else {
+            return Vec::new();
+        };
+        let Some(path) = &inv.path else { return Vec::new() };
+        let mut declarations: Vec<(u32, u32, u32)> = Vec::new();
+        if path.root.is_some() || path.segments.len() != 1 {
+            // A path from a crate's root names that crate's macros; any
+            // other, those of the crates the invocation is in.
+            let krate = match path.root {
+                Some(Root::CrateAt(k)) => Some(k),
+                _ => self.graph.places(file).first().map(|&(k, _)| k),
+            };
+            let units = self.unit_names(id, inv.unit);
+            if let (Some(krate), Resolution::Found { declarations: found, .. }) =
+                (krate, self.resolve(file, &units, path, Some(&inv.namespace)))
+            {
+                for (f, d) in found {
+                    if let Some(&f) = self.ids.get(&f) {
+                        declarations.push((f, d, krate));
+                    }
+                }
+            }
+        } else {
+            let name = &path.segments[0];
+            for (krate, _) in self.graph.places(file) {
+                let info = &self.graph.crates()[krate as usize];
+                let mut found = Found::default();
+                let link = TextualLink::Invocation(invocation);
+                self.before_in_file(krate, id, inv.unit, link, name, info, &mut found);
+                if !found.done {
+                    self.outward(krate, id, name, info, &mut found);
+                }
+                if !found.done {
+                    let at = Module { krate, file: id, unit: inv.unit };
+                    let named = self
+                        .in_module(at, name, &inv.namespace, info)
+                        .or_else(|| self.in_macro_prelude(krate, name, &inv.namespace, info))
+                        .or_else(|| self.in_preludes(krate, name, &inv.namespace, info));
+                    found.declared.extend(named.unwrap_or_default());
+                }
+                declarations.extend(found.declared.into_iter().map(|(f, d)| (f, d, krate)));
+            }
+        }
+        self.macros_in(declarations)
+    }
+
+    /// The macros `declarations` are, each (the file that defines it, its
+    /// declaration there, the crate that file is in): the crate given,
+    /// where it is one of the file's, else the first the file is in.
+    fn macros_in(&self, declarations: Vec<(u32, u32, u32)>) -> Vec<(PathBuf, u32, u32)> {
+        let mut out: Vec<(PathBuf, u32, u32)> = Vec::new();
+        for (f, d, krate) in declarations {
+            let def = self.files[f as usize].clone();
+            // The crate the definition is in: the invocation's, where it
+            // is one of the file's, else the first the file is in.
+            let places = self.graph.places(&def);
+            let krate = places
+                .iter()
+                .map(|&(k, _)| k)
+                .find(|&k| k == krate)
+                .or_else(|| places.first().map(|&(k, _)| k));
+            let Some(krate) = krate else { continue };
+            if !out.iter().any(|(p, i, _)| *p == def && *i == d) {
+                out.push((def, d, krate));
+            }
+        }
+        out
+    }
+
+    /// What a path from crate `krate`'s root names by each name alone in
+    /// `namespace` (Rust's `$crate::name!`, which a macro's expansion writes
+    /// for its crate's macros), for each name a path from the root may
+    /// name a macro by: a textual definition the crate exports
+    /// ([`CrateInfo::macro_export`]), one of the root's own declarations in
+    /// that namespace that is no textual definition (a `macro` item), and
+    /// what one of the root's imports brings. Each, with the macros it
+    /// names there, as [`invocation_macros`](Self::invocation_macros) has
+    /// them, where it names any. A name a glob import brings alone is not
+    /// looked for. Once found, kept.
+    pub fn root_macros(&self, krate: u32, namespace: &str) -> RootMacros {
+        let cached = self.root_macros.borrow().get(&(krate, namespace.to_string())).cloned();
+        if let Some(found) = cached {
+            return found;
+        }
+        let info = &self.graph.crates()[krate as usize];
+        let root = &info.root;
+        let mut names: Vec<String> = self.exported_by(krate).keys().cloned().collect();
+        if let Some(&file) = self.ids.get(root) {
+            let summary = &self.summaries[file as usize];
+            let textual = self.textual_defs(file);
+            names.extend(
+                summary
+                    .offers()
+                    .declarations()
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, d)| {
+                        d.unit.is_none()
+                            && d.namespace == namespace
+                            && !textual.contains_key(&(*i as u32))
+                    })
+                    .map(|(_, d)| d.name.clone()),
+            );
+            let imports = summary.offers().reexports().iter().chain(summary.needs().imports());
+            for import in imports.filter(|i| i.unit.is_none() && !i.glob) {
+                if let Some(name) =
+                    import.name.clone().or_else(|| import.path.segments.last().cloned())
+                {
+                    names.push(name);
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        let mut found = Vec::new();
+        for name in names {
+            let macros = self.root_macro(krate, namespace, &name);
+            if !macros.is_empty() {
+                found.push((name, macros));
+            }
+        }
+        let found = Rc::new(found);
+        self.root_macros.borrow_mut().insert((krate, namespace.to_string()), found.clone());
+        found
+    }
+
+    /// What a path from crate `krate`'s root names by `name` alone in
+    /// `namespace` (`$crate::name!`): the macros, as
+    /// [`invocation_macros`](Self::invocation_macros) has them; none where
+    /// it names none.
+    pub fn root_macro(&self, krate: u32, namespace: &str, name: &str) -> Vec<(PathBuf, u32, u32)> {
+        let root = &self.graph.crates()[krate as usize].root;
+        let path = Path { root: Some(Root::CrateAt(krate)), segments: vec![name.to_string()] };
+        let Resolution::Found { declarations, .. } =
+            self.resolve(root, &[], &path, Some(namespace))
+        else {
+            return Vec::new();
+        };
+        let declarations: Vec<(u32, u32, u32)> = declarations
+            .into_iter()
+            .filter_map(|(f, d)| self.ids.get(&f).map(|&f| (f, d, krate)))
+            .collect();
+        self.macros_in(declarations)
+    }
+
+    /// The names of the units around unit `unit` of `file`, outermost
+    /// first, through those whose bodies are in the file.
+    fn unit_names(&self, file: u32, unit: Option<u32>) -> Vec<String> {
+        let all = self.summaries[file as usize].offers().units();
+        let mut names = Vec::new();
+        let mut at = unit;
+        while let Some(u) = at {
+            let unit = &all[u as usize];
+            if !unit.inline {
+                break;
+            }
+            names.push(unit.name.clone());
+            at = unit.parent;
+        }
+        names.reverse();
+        names
+    }
+
+    /// The textual definitions named `name` that what stands at `link` in
+    /// `unit` of `file` sees there, nearest first, into `found`: the links
+    /// before it in its unit, then those before each unit around it that
+    /// the file holds the body of, out to the file's own.
+    #[allow(clippy::too_many_arguments)]
+    fn before_in_file(
+        &self,
+        krate: u32,
+        file: u32,
+        unit: Option<u32>,
+        mut link: TextualLink,
+        name: &str,
+        info: &CrateInfo,
+        found: &mut Found,
+    ) {
+        let summary = self.summaries[file as usize].clone();
+        let offers = summary.offers();
+        let mut at = unit;
+        loop {
+            let links = match at {
+                None => offers.textual(),
+                Some(u) => &offers.units()[u as usize].textual,
+            };
+            if let Some(k) = links.iter().position(|l| *l == link) {
+                let mut visited = HashSet::new();
+                self.in_links(krate, file, &links[..k], name, info, false, &mut visited, found);
+                if found.done {
+                    return;
+                }
+            }
+            match at {
+                None => return,
+                Some(u) => {
+                    let unit = &offers.units()[u as usize];
+                    if !unit.inline {
+                        return;
+                    }
+                    link = TextualLink::Module(u);
+                    at = unit.parent;
+                }
+            }
+        }
+    }
+
     /// The textual definitions named `name` that `seen` holds, in file
     /// `file` of crate `krate`, nearest first, into `found`: those there,
     /// and those a module there carries out; each under a condition where
@@ -195,6 +418,9 @@ impl Resolver {
                 return;
             }
             match link {
+                // What an expansion defines follows its invocation's link,
+                // in a merged summary.
+                TextualLink::Invocation(_) => {}
                 TextualLink::Def { declaration, attributes } => {
                     if offers.declarations()[*declaration as usize].name == name {
                         let conditional = conditional || is_conditional(info, attributes);
@@ -402,15 +628,13 @@ impl Resolver {
         let info = &self.graph.crates()[krate as usize];
         let mut found: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
         if !info.macro_export.is_empty() {
-            for (file, path) in self.files.iter().enumerate() {
-                if !self.graph.places(path).iter().any(|&(k, _)| k == krate) {
-                    continue;
-                }
-                let offers = self.summaries[file].offers();
-                for (index, attributes) in self.textual_defs(file as u32) {
+            let files = self.crate_files();
+            for &file in files.get(&krate).map(Vec::as_slice).unwrap_or_default() {
+                let offers = self.summaries[file as usize].offers();
+                for (index, attributes) in self.textual_defs(file) {
                     if exported(info, &attributes) {
                         let name = offers.declarations()[index as usize].name.clone();
-                        found.entry(name).or_default().push((file as u32, index));
+                        found.entry(name).or_default().push((file, index));
                     }
                 }
             }
@@ -418,6 +642,25 @@ impl Resolver {
         let found = Rc::new(found);
         self.exported.borrow_mut().insert(krate, found.clone());
         found
+    }
+
+    /// Each crate's files (by their indices here), gathered once.
+    fn crate_files(&self) -> CrateFiles {
+        if let Some(files) = self.crate_files.borrow().as_ref() {
+            return files.clone();
+        }
+        let mut files: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (file, path) in self.files.iter().enumerate() {
+            for (krate, _) in self.graph.places(path) {
+                let of = files.entry(krate).or_default();
+                if of.last() != Some(&(file as u32)) {
+                    of.push(file as u32);
+                }
+            }
+        }
+        let files = Rc::new(files);
+        *self.crate_files.borrow_mut() = Some(files.clone());
+        files
     }
 }
 

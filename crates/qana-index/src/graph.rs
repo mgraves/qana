@@ -111,6 +111,27 @@ pub struct CrateInfo {
     /// a name sees.
     #[serde(default)]
     pub conditions: Vec<crate::Path>,
+    /// The attributes that make a macro's definition the compiler's, its
+    /// body no rules (Rust's `#[rustc_builtin_macro]`).
+    #[serde(default)]
+    pub builtin_attributes: Vec<crate::Path>,
+    /// The compiler's macros whose expansions the model says, by name
+    /// (Rust's `cfg_select`): one of them invoked expands as
+    /// [`crate::expand`] has it. Another is not expanded.
+    #[serde(default)]
+    pub builtin_macros: Vec<(String, crate::BuiltinMacro)>,
+    /// The attributes, each with the argument that says so, that export a
+    /// textual definition whose expansions name their crate's macros by a
+    /// name alone (Rust's `#[macro_export(local_inner_macros)]`): an
+    /// invocation of a name alone that such a macro writes names what the
+    /// name names from its crate's root, as `$crate::name!` would.
+    #[serde(default)]
+    pub local_inner_macros: Vec<(crate::Path, crate::Path)>,
+    /// How deep the expansions of invocations in the crate may nest (Rust's
+    /// `#![recursion_limit = "256"]`); `None` for the language's default
+    /// ([`crate::RECURSION_LIMIT`]).
+    #[serde(default)]
+    pub recursion_limit: Option<u32>,
 }
 
 /// Where a crate comes from.

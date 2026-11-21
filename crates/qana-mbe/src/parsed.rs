@@ -7,7 +7,7 @@ use qana_grammar::{batch_parse_from, GreenNode};
 use qana_lang::EmbeddedLang;
 
 use crate::render::{flatten, render, split_groups, wrappable, Flat};
-use crate::token::{Delim, MetaVarKind, Token, TokenKind, TokenStream};
+use crate::token::{Delim, MetaVarKind, Token, TokenKind, TokenStream, Tree};
 use crate::Error;
 
 /// A token as written into a parsed expansion's text, with its span there.
@@ -141,5 +141,47 @@ impl Parsed {
     pub fn token_at(&self, at: u32) -> Option<&Token> {
         let k = self.tokens.partition_point(|s| s.span.1 <= at);
         self.tokens.get(k).filter(|s| s.span.0 <= at).map(|s| &s.token)
+    }
+
+    /// The token trees written within byte span `span` of the text, as
+    /// they are in the stream: a group whose tokens all are within, whole
+    /// (a fragment a transcriber put in stays one, of its kind); one only
+    /// partly within, by what of it is. What a nested invocation is passed,
+    /// and what a `macro_rules!` an expansion writes is defined by.
+    pub fn stream(&self, span: (u32, u32)) -> TokenStream {
+        // The span of the flats from `a` to `b` that the text writes.
+        let content = |a: usize, b: usize| -> Option<(u32, u32)> {
+            let written = || (a..=b).map(|i| self.flat_spans[i]).filter(|&(s, e)| e > s);
+            let first = written().next()?;
+            let last = written().next_back()?;
+            Some((first.0, last.1))
+        };
+        let inside = |(s, e): (u32, u32)| s >= span.0 && e <= span.1;
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        while i < self.flats.len() {
+            match &self.flats[i] {
+                Flat::Token(t) => {
+                    let s = self.flat_spans[i];
+                    if s.1 > s.0 && inside(s) {
+                        out.push(Tree::Token(t.clone()));
+                    }
+                    i += 1;
+                }
+                Flat::Open { group, close } => match content(i, *close) {
+                    Some(written) if inside(written) => {
+                        out.push(Tree::Group(group.clone()));
+                        i = close + 1;
+                    }
+                    Some((s, e)) if e <= span.0 || s >= span.1 => i = close + 1,
+                    // Nothing of it written: an empty fragment, nowhere.
+                    None => i = close + 1,
+                    // Partly within: what of it is.
+                    Some(_) => i += 1,
+                },
+                Flat::Close { .. } => i += 1,
+            }
+        }
+        TokenStream::new(out)
     }
 }

@@ -145,6 +145,7 @@ token KW_SAFE    = /safe(?=\s+(fn|static)\s)/                          @style(ke
 token KW_CFG_ATTR = /cfg_attr(?=\s*\()/                               @style(variable)
 token KW_DERIVE   = /derive(_const)?(?=\s*\()/                                 @style(variable)
 token KW_MACRO_USE = /macro_use(?=\s*\()/                            @style(variable)
+token KW_MACRO_EXPORT = /macro_export(?=\s*\()/                      @style(variable)
 
 // A raw identifier is never a keyword: `r#fn` is a name.
 token RAW_IDENT = /r#[\a_][\w_]*/ @style(variable)
@@ -369,6 +370,7 @@ rule attr =
   | CfgAttr:    k:KW_CFG_ATTR "(" cfg_meta "," a:cfg_attrs_opt ")" @style(inherit, k, a) @attribute(k) @attributes(a)
   | Derive:     k:KW_DERIVE "(" d:derives_opt ")" @style(inherit, k) @attribute(k) @ns(derive, d)
   | MacroUse:   k:KW_MACRO_USE "(" n:macro_use_names_opt ")" @style(inherit, k) @attribute(k, n)
+  | MacroExport: k:KW_MACRO_EXPORT "(" a:macro_export_args_opt ")" @style(inherit, k) @attribute(k, a)
 
 rule derives_opt =
   | DerivesNone:
@@ -387,6 +389,17 @@ rule macro_use_names_opt =
 rule macro_use_name_list = macro_use_name+ % ","
 
 rule macro_use_name = MacroUseName: t:name @style(macro, t)
+
+// How `#[macro_export(local_inner_macros)]` exports a macro: its
+// arguments, which a project model reads.
+rule macro_export_args_opt =
+  | MacroExportArgsNone:
+  | MacroExportArgsList:  macro_export_arg_list
+  | MacroExportArgsTrail: macro_export_arg_list ","
+
+rule macro_export_arg_list = macro_export_arg+ % ","
+
+rule macro_export_arg = MacroExportArg: t:name
 
 // A derive macro's path, or a macro_rules derive's (`Nothing!`, which a
 // `derive` attribute macro of a library's, shadowing the built-in, takes).
@@ -476,7 +489,7 @@ rule tt_token =
   | TtR3Text: R3_TEXT
   | TtUnion: KW_UNION | TtAuto: KW_AUTO | TtDefault: KW_DEFAULT | TtRaw: KW_RAW
   | TtSafe: KW_SAFE | TtCfgAttr: KW_CFG_ATTR | TtDerive: KW_DERIVE
-  | TtMacroUse: KW_MACRO_USE
+  | TtMacroUse: KW_MACRO_USE | TtMacroExport: KW_MACRO_EXPORT
   | TtEqEq: EQ_EQ | TtEqArrow: EQ_ARROW | TtEq: EQ | TtBangEq: BANG_EQ
   | TtBang: BANG | TtLtShlEq: LT_SHLEQ | TtLtShl: LT_SHL | TtLtLe: LT_LE
   | TtLt: LT | TtGtShrEq: GT_SHREQ | TtGtShr: GT_SHR | TtGtGe: GT_GE | TtGt: GT
@@ -512,6 +525,7 @@ rule name =
   | CfgAttrName: t:KW_CFG_ATTR @style(inherit, t)
   | DeriveName: t:KW_DERIVE @style(inherit, t)
   | MacroUseKwName: t:KW_MACRO_USE @style(inherit, t)
+  | MacroExportKwName: t:KW_MACRO_EXPORT @style(inherit, t)
 
 // What `$i:ident` matches: an identifier or a keyword, `_` aside.
 rule ident_fragment =
@@ -519,6 +533,7 @@ rule ident_fragment =
   | UnionFragment: KW_UNION | AutoFragment: KW_AUTO | DefaultFragment: KW_DEFAULT
   | RawFragment: KW_RAW | SafeFragment: KW_SAFE | CfgAttrFragment: KW_CFG_ATTR
   | DeriveFragment: KW_DERIVE | MacroUseFragment: KW_MACRO_USE
+  | MacroExportFragment: KW_MACRO_EXPORT
   | AsFragment: "as" | BreakFragment: "break" | ConstFragment: "const"
   | ContinueFragment: "continue" | CrateFragment: "crate" | ElseFragment: "else"
   | EnumFragment: "enum" | ExternFragment: "extern" | FalseFragment: "false"
@@ -567,7 +582,7 @@ rule kseg =
   | KSelf:        s:"self" @style(inherit, s) @root(self)
   | KSuper:       "super" @root(super)
   | KCrate:       "crate" @root(crate)
-  | KDollarCrate: DOLLAR "crate" @root(crate)
+  | KDollarCrate: DOLLAR "crate" @root(macro_crate)
 
 // `Self` beginning a path: the type the impl block or trait it stands in is
 // of, which only where it stands says.

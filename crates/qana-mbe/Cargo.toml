@@ -12,3 +12,6 @@ categories = ["parsing", "development-tools"]
 [dependencies]
 qana-grammar.workspace = true
 qana-lang.workspace = true
+# Token streams are kept: a nested invocation's input crosses from a
+# worker to a project index's store and back.
+serde = { version = "1", features = ["derive", "rc"] }

@@ -1,0 +1,74 @@
+# A sample of TOML 1.1's forms, each where the spec allows it.
+
+title = "TOML sample"
+"quoted key" = 'literal value'
+'literal key' = "escapes: \t \" \\ \u00e9 \U0001F600 \x41 \e"
+dotted.key . "and quoted" = true
+1234 = "a key of digits"
+3.14159 = "pi, the key `3`.`14159`"
+1979-05-27 = "a date as a key"
+true = false
+
+[numbers]
+decimal = +99
+negative = -17
+zero = 0
+grouped = 1_000_000
+hex = 0xDEAD_beef
+octal = 0o755
+binary = 0b1101_0110
+float = 6.626e-34
+exponent = 5E+22
+leading_zero_exponent = 1e06
+infinite = -inf
+not_a_number = nan
+
+[dates]
+offset = 1979-05-27T07:32:00Z
+offset_space = 1979-05-27 07:32:00.999999-07:00
+lowercase = 1979-05-27t07:32:00z
+no_seconds = 1979-05-27T07:32Z
+local = 1979-05-27T07:32:00
+date = 1979-05-27
+time = 07:32:00.5
+short_time = 07:32
+
+[strings]
+multi = """
+Roses are red,
+"Violets" are ""blue"".
+A line that \
+    continues, and quotes before the end.""""
+raw = '''
+C:\Users\no-escapes
+two ''quotes'' are fine'''
+
+[arrays]
+integers = [ 1, 2, 3 ]
+mixed = [ "red", 1, 2.0, true, 1979-05-27, [ "nested", [ 1 ] ] ]
+over_lines = [
+  1,
+  2, # a comment inside
+  3,
+]
+empty = []
+
+[inline]
+point = { x = 1, y = 2 }
+nested = { a = { b = { c = 1 } }, list = [ { d = 1 }, { d = 2 } ] }
+over_lines = {
+  name = "multi-line",  # TOML 1.1
+  "quoted" = 'yes',
+  3.14 = "dotted digits",
+}
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[[bin]]
+name = "first"
+
+[[bin]]
+name = "second"
+path = "src/second.rs"

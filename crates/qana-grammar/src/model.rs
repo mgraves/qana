@@ -176,6 +176,10 @@ pub struct Vocab {
     /// construct that runs over tokens of its own, such as a block
     /// comment's body or a string's.
     pub modes: Vec<u16>,
+    /// The mode each token enters (`@push`), by id; `None` for one that
+    /// enters none. What a mode is for is what enters it: a block
+    /// comment's opener enters its body's mode.
+    pub pushes: Vec<Option<u16>>,
     pub unknown: TokenId,
 }
 
@@ -187,12 +191,21 @@ impl Vocab {
         let mut brackets: Vec<Option<(BracketKind, bool)>> =
             g.tokens.iter().map(|t| t.bracket).collect();
         let mut modes: Vec<u16> = g.tokens.iter().map(|t| t.mode).collect();
+        let mut pushes: Vec<Option<u16>> = g
+            .tokens
+            .iter()
+            .map(|t| match t.action {
+                Action::Push(m) => Some(m),
+                Action::None | Action::Pop => None,
+            })
+            .collect();
         names.push("UNKNOWN".to_string());
         trivia.push(true);
         error.push(false);
         brackets.push(None);
         modes.push(0);
-        Vocab { names, trivia, error, brackets, modes, unknown: g.unknown_id() }
+        pushes.push(None);
+        Vocab { names, trivia, error, brackets, modes, pushes, unknown: g.unknown_id() }
     }
     pub fn is_trivia(&self, id: TokenId) -> bool {
         self.trivia[id as usize]

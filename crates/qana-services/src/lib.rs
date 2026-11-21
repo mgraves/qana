@@ -442,10 +442,12 @@ pub struct FoldConfig {
     /// By token id: whether it is a comment (a trivia token styled
     /// `comment` or `doc_comment`).
     pub comments: Vec<bool>,
-    /// By token id: whether the lexer reads it in a mode other than the
-    /// base mode (`Vocab::modes`), within a construct of tokens of its
-    /// own such as a block comment's body.
-    pub in_mode: Vec<bool>,
+    /// By token id: whether the lexer reads it in a mode a comment enters
+    /// (`Vocab::pushes`): a block comment's body, which goes on over line
+    /// breaks. A token of any other mode is a token of its own wherever
+    /// it stands: a mode can hold code over lines (TOML's arrays), and a
+    /// comment there ends with its line.
+    pub in_comment: Vec<bool>,
 }
 
 /// The fold a foldable construct makes.
@@ -495,18 +497,30 @@ impl FoldConfig {
             .map(|(i, _)| i as u32)
             .collect();
         let ids = 0..vocab.names.len() as TokenId;
+        let comments: Vec<bool> = ids
+            .clone()
+            .map(|id| {
+                vocab.is_trivia(id)
+                    && styles.class_of(id).is_some_and(|c| comment_classes.contains(&c))
+            })
+            .collect();
+        // The modes a comment enters: a block comment's body.
+        let comment_modes: Vec<u16> = ids
+            .clone()
+            .filter(|&id| comments[id as usize])
+            .filter_map(|id| vocab.pushes[id as usize])
+            .collect();
         FoldConfig {
             by_prod,
             legend,
             comment,
-            comments: ids
-                .clone()
+            in_comment: ids
                 .map(|id| {
-                    vocab.is_trivia(id)
-                        && styles.class_of(id).is_some_and(|c| comment_classes.contains(&c))
+                    let mode = vocab.modes[id as usize];
+                    mode != 0 && comment_modes.contains(&mode)
                 })
                 .collect(),
-            in_mode: ids.map(|id| vocab.modes[id as usize] != 0).collect(),
+            comments,
         }
     }
 
@@ -519,8 +533,8 @@ impl FoldConfig {
         self.comments.get(id as usize).copied().unwrap_or(false)
     }
 
-    fn is_in_mode(&self, id: TokenId) -> bool {
-        self.in_mode.get(id as usize).copied().unwrap_or(false)
+    fn is_in_comment(&self, id: TokenId) -> bool {
+        self.in_comment.get(id as usize).copied().unwrap_or(false)
     }
 }
 
@@ -547,10 +561,10 @@ pub struct Fold {
 pub struct FoldState {
     /// Line breaks since the last token that was not one. Whether they
     /// end lines or run inside a comment waits on the next token: one
-    /// read in a mode continues the construct the breaks are in.
+    /// read in a mode a comment enters goes on with that comment.
     breaks: u32,
     /// The line being read: whether a real token is on it, the span of
-    /// its comments, and whether it runs over a break inside a mode.
+    /// its comments, and whether it runs over a break inside a comment.
     code: bool,
     comments: Option<(i64, i64)>,
     spans: bool,
@@ -714,11 +728,11 @@ impl<'c> FoldWalker<'c> {
             self.at += w;
             return;
         }
-        let in_mode = self.cfg.is_in_mode(t.id);
+        let in_comment = self.cfg.is_in_comment(t.id);
         if self.st.breaks > 0 {
-            if in_mode {
-                // The breaks run inside the construct this token
-                // continues: the line goes on over them.
+            if in_comment {
+                // The breaks run inside the comment this token goes on
+                // with: the line goes on over them.
                 self.st.spans = true;
                 if let Some(block) = &mut self.st.block {
                     block.3 = true;
@@ -728,14 +742,14 @@ impl<'c> FoldWalker<'c> {
                 self.breaks_end_lines();
             }
         }
-        if !in_mode {
+        if !in_comment {
             self.close_block();
         }
         let comment = t.trivia && self.cfg.is_comment(t.id);
         let (start, end) = (self.at, self.at + w);
         if comment {
             match &mut self.st.block {
-                Some(block) if in_mode => block.2 = end,
+                Some(block) if in_comment => block.2 = end,
                 _ => self.st.block = Some((start, end, end, false)),
             }
             self.st.comments = Some(self.st.comments.map_or((start, end), |(s, _)| (s, end)));

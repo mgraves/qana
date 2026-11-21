@@ -167,7 +167,7 @@ constructs are expressed with modes, not multi-line tokens.
 | `@specialize` | Matched text is looked up in the keyword table and re-tagged |
 | `@style(class)` | Highlight class (see below) |
 | `@push(MODE)` | Enter `MODE` after this token |
-| `@push(MODE, eol)` | Enter a LINE-BOUNDED mode: it pops automatically at end of line, never reaches another line's entry state, and edits inside it stay line-local (preprocessor directives are the canonical use). Every push of a mode must agree on `eol` |
+| `@push(MODE, eol)` | Enter a LINE-BOUNDED mode: it pops automatically at end of line, so it never reaches another line's entry state and edits inside it stay line-local (preprocessor directives are the canonical use). The line-bounded modes on top of the stack pop; one under a mode that is not (an array a TOML pair's value opens) stays while that mode does, and ends with the line it is left on: TOML's pair ends with the line its array closes on. Every push of a mode must agree on `eol` |
 | `@pop` | Leave the current mode after this token |
 
 ### Style classes
@@ -535,9 +535,10 @@ outline structure, in a channel of their own (`Limner::folds_shared`).
 
 Comments are trivia, not syntax, so they fold by their tokens, without
 being asked, as the `comment` kind: a comment that runs over lines (a
-token styled `comment` followed by tokens of its mode, such as a block
-comment's body), and two or more lines in a row holding nothing but
-comments. `qana folds <grammar> <file>` shows what folds.
+token styled `comment` followed by comment tokens of the mode it enters,
+a block comment's body), and two or more lines in a row holding nothing
+but comments. A comment read in any other mode ends with its line: a mode
+can hold code over lines (TOML's arrays), and its lines are lines. `qana folds <grammar> <file>` shows what folds.
 
 A live document keeps its folds and its outline across edits by subtree:
 after an edit only the subtrees the parser rebuilt are read again, and a

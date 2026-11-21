@@ -1779,6 +1779,46 @@ record with nothing but the workspace. CI runs both.
 This is the lexical half. Whether Rust's syntax fits deterministic LR(1)
 is not measured here.
 
+## TOML: a language of lines
+
+[examples/toml](examples/toml/toml.qana) is TOML 1.1.0 (toml.io/en/v1.1.0)
+as one LR(1) grammar: 6 modes, 83 tokens, 110 states, no conflicts. TOML
+is the first grammar here whose syntax is its lines: a key/value pair
+ends with its line, and so does a header, while an array, an inline table
+and a multi-line string go on over lines. The parser sees no line
+terminator, so the modes say which line a token is on:
+
+- A line starts in a mode of keys, where `1234`, `true`, `1979-05-27` and
+  `3.14159` are keys, as the spec says they are there.
+- A key enters a line-bounded mode for the rest of its pair, and `[`
+  one for a header (`@push(…, eol)`). `a = 1 b = 2`, `[a] b = 1` and a
+  key on a line before its `=` are each a token the grammar has no place
+  for: a syntax error, as the spec has it.
+- An array or an inline table enters a mode that is not line-bounded.
+  The pair's mode stays under it and ends with the line the value closes
+  on: the lexer pops only the line-bounded modes on top of the stack.
+- Where a key and a value can both stand (after `=`, inside braces), a
+  key is what a `.` or `=` follows (trailing context): `true = 1` is a
+  key, `x = true` a boolean.
+
+`crates/qana-lang/tests/toml.rs` holds it to the spec's forms: what it
+reads (the sample, and the spec's corner cases: dotted numeric keys,
+quotes before a closer, line-ending backslashes, TOML 1.1's inline tables
+over lines, `\e`, `\xHH`, optional seconds), what it refuses (32 forms),
+its colours, outline (tables, array tables, keys, nested) and folds, and
+that an edit reads as the edited text read afresh while an array or a
+multi-line string runs over the edited lines. What it does not refuse:
+control characters in strings (a pattern cannot name them), and what the
+spec says of a document's meaning (a key defined twice) rather than its
+syntax. Arrays and inline tables nest seven deep in one value, the mode
+stack's bound; an eighth is an error.
+
+A grammar whose modes hold code changed one rule of folding: a comment
+continues over a line break only into the body of the mode the comment
+itself enters (a block comment's), not into any mode, so a comment inside
+an array over lines ends with its line, and two comment lines there fold
+as a run.
+
 ## Status
 
 Eight crates + two binaries (`qana`, `qana-lsp`); 233 tests (`cargo test --workspace`); the full story runs:

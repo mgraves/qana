@@ -1,0 +1,278 @@
+// TOML: Tom's Obvious Minimal Language, version 1.1.0 (toml.io/en/v1.1.0),
+// as one deterministic LR(1) grammar over a lexer of modes.
+//
+// THE LINES. TOML is a language of lines: a key/value pair ends with its
+// line, and so does a table's header; only an array, an inline table and a
+// multi-line string go on past a line's end. The lexer's modes say which
+// line a token is on, so the parser can hold every rule of the spec:
+// - A line starts in the default mode, where a word is a key (`1234`,
+//   `true`, `1979-05-27` and `3.14159` are keys there, as the spec says)
+//   and `[` and `[[` open a header.
+// - A key at the start of a line enters LINE, and `[` or `[[` enters
+//   HEADER. Both are line-bounded (`@push(…, eol)`): they end with the
+//   line, so `a = 1 b = 2`, `[a] b = 1`, and a key on a line before its
+//   `=`, are each a token the grammar has no place for, a syntax error.
+// - An array or an inline table enters NEST, which is not line-bounded:
+//   its closer leaves it, on whatever line that is. LINE stays under it,
+//   and ends with the line its value ends on.
+// - A multi-line string enters MLB or MLL, which its closer leaves.
+//
+// KEYS BESIDE VALUES. In LINE and NEST a key and a value can stand in the
+// same place in a line (`a.b = 1`, `{ x = 1 }`). A key is what an `=` or a
+// `.` follows (trailing context): `true = 1` is a key and `x = true` a
+// boolean. A run of dotted bare keys is one token there (`3.14 = x` in an
+// inline table is the key `3`.`14`, where `3.14` is also a float: the key
+// is declared first and wins at the same length).
+//
+// NESTING. The lexer's mode stack is bounded (`max_stack`, at most 8): a
+// pair's line takes one place, so arrays and inline tables nest seven deep
+// in one value (six with a multi-line string in the deepest). A deeper one
+// lexes wrong from there to its end, an error where TOML has none.
+//
+// WHAT IS NOT REFUSED. Control characters in strings and comments (the
+// spec refuses U+0000 to U+001F but tab, and U+007F): a pattern cannot
+// name them. What the spec says of a document's meaning rather than its
+// syntax (a key defined twice, a table defined after its keys, an
+// out-of-range date) is a reader's, not a grammar's.
+
+language TOML
+extensions "toml"
+max_stack 8
+
+// ---- a line's start: keys and headers ----
+
+token WS        = /\s+/ @trivia
+token COMMENT   = /#.*/ @trivia @style(comment)
+token AH_OPEN   = "[[" @push(HEADER, eol) @style(bracket)
+token H_OPEN    = "[" @push(HEADER, eol) @style(bracket)
+token D_KEY     = /[A-Za-z0-9_-]+/ @push(LINE, eol) @style(variable)
+token D_QKEY    = /"([^"\\]|\\[btnfre"\\]|\\x[0-9A-Fa-f][0-9A-Fa-f]|\\u[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|\\U[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])*"/ @push(LINE, eol) @style(variable)
+token D_LKEY    = /'[^']*'/ @push(LINE, eol) @style(variable)
+token D_OTHER   = /[^\s]/ @error
+
+// ---- a header: `[a.b]`, `[[a.b]]`, to the end of its line ----
+
+mode HEADER {
+  token H_WS      = /\s+/ @trivia
+  token H_COMMENT = /#.*/ @trivia @style(comment)
+  token AH_CLOSE  = "]]" @style(bracket)
+  token H_CLOSE   = "]" @style(bracket)
+  token H_DOT     = "." @style(punctuation)
+  token H_KEY     = /[A-Za-z0-9_-]+/ @style(type)
+  token H_QKEY    = /"([^"\\]|\\[btnfre"\\]|\\x[0-9A-Fa-f][0-9A-Fa-f]|\\u[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|\\U[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])*"/ @style(type)
+  token H_LKEY    = /'[^']*'/ @style(type)
+  token H_OTHER   = /[^\s]/ @error
+}
+
+// ---- a key/value pair, after its first key, to the end of its line ----
+//
+// Keys first (each holds only where `.` or `=` follows), then values, then
+// what no value is: a word (`a = 1 b`, `x = 123abc`) and anything else.
+
+mode LINE {
+  token L_WS         = /\s+/ @trivia
+  token L_COMMENT    = /#.*/ @trivia @style(comment)
+  token L_KEY        = /[A-Za-z0-9_-]+(\s*\.\s*[A-Za-z0-9_-]+)*(?=\s*[.=])/ @style(variable)
+  token L_QKEY       = /"([^"\\]|\\[btnfre"\\]|\\x[0-9A-Fa-f][0-9A-Fa-f]|\\u[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|\\U[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])*"(?=\s*[.=])/ @style(variable)
+  token L_LKEY       = /'[^']*'(?=\s*[.=])/ @style(variable)
+  token L_DOT        = "." @style(punctuation)
+  token L_EQ         = "=" @style(operator)
+  token L_MLB_OPEN   = /"""/ @push(MLB) @style(string)
+  token L_MLL_OPEN   = /'''/ @push(MLL) @style(string)
+  token L_STR        = /"([^"\\]|\\[btnfre"\\]|\\x[0-9A-Fa-f][0-9A-Fa-f]|\\u[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|\\U[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])*"/ @style(string)
+  token L_STR_BAD    = /"([^"\\]|\\.)*"?/ @error @style(string)
+  token L_LSTR       = /'[^']*'/ @style(string)
+  token L_LSTR_BAD   = /'[^']*/ @error @style(string)
+  token L_DATETIME   = /\d\d\d\d-\d\d-\d\d([Tt ]\d\d:\d\d(:\d\d(\.\d+)?)?([Zz]|[+-]\d\d:\d\d)?)?/ @style(number)
+  token L_TIME       = /\d\d:\d\d(:\d\d(\.\d+)?)?/ @style(number)
+  token L_HEX        = /0x[0-9A-Fa-f](_?[0-9A-Fa-f])*/ @style(number)
+  token L_OCT        = /0o[0-7](_?[0-7])*/ @style(number)
+  token L_BIN        = /0b[01](_?[01])*/ @style(number)
+  token L_FLOAT      = /[+-]?(0|[1-9](_?\d)*)(\.\d(_?\d)*([eE][+-]?\d(_?\d)*)?|[eE][+-]?\d(_?\d)*)/ @style(number)
+  token L_INT        = /[+-]?(0|[1-9](_?\d)*)/ @style(number)
+  token L_SPECIAL    = /[+-]?(inf|nan)/ @style(number)
+  token L_TRUE       = "true" @style(keyword)
+  token L_FALSE      = "false" @style(keyword)
+  token L_LBRACK     = "[" @push(NEST) @style(bracket)
+  token L_LBRACE     = "{" @push(NEST) @style(bracket)
+  token L_WORD       = /[A-Za-z0-9_+-][A-Za-z0-9_+.:-]*/ @error
+  token L_OTHER      = /[^\s]/ @error
+}
+
+// ---- inside an array or an inline table, over lines, to its closer ----
+
+mode NEST {
+  token N_WS         = /\s+/ @trivia
+  token N_COMMENT    = /#.*/ @trivia @style(comment)
+  token N_KEY        = /[A-Za-z0-9_-]+(\s*\.\s*[A-Za-z0-9_-]+)*(?=\s*[.=])/ @style(variable)
+  token N_QKEY       = /"([^"\\]|\\[btnfre"\\]|\\x[0-9A-Fa-f][0-9A-Fa-f]|\\u[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|\\U[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])*"(?=\s*[.=])/ @style(variable)
+  token N_LKEY       = /'[^']*'(?=\s*[.=])/ @style(variable)
+  token N_DOT        = "." @style(punctuation)
+  token N_EQ         = "=" @style(operator)
+  token N_COMMA      = "," @style(punctuation)
+  token N_MLB_OPEN   = /"""/ @push(MLB) @style(string)
+  token N_MLL_OPEN   = /'''/ @push(MLL) @style(string)
+  token N_STR        = /"([^"\\]|\\[btnfre"\\]|\\x[0-9A-Fa-f][0-9A-Fa-f]|\\u[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|\\U[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])*"/ @style(string)
+  token N_STR_BAD    = /"([^"\\]|\\.)*"?/ @error @style(string)
+  token N_LSTR       = /'[^']*'/ @style(string)
+  token N_LSTR_BAD   = /'[^']*/ @error @style(string)
+  token N_DATETIME   = /\d\d\d\d-\d\d-\d\d([Tt ]\d\d:\d\d(:\d\d(\.\d+)?)?([Zz]|[+-]\d\d:\d\d)?)?/ @style(number)
+  token N_TIME       = /\d\d:\d\d(:\d\d(\.\d+)?)?/ @style(number)
+  token N_HEX        = /0x[0-9A-Fa-f](_?[0-9A-Fa-f])*/ @style(number)
+  token N_OCT        = /0o[0-7](_?[0-7])*/ @style(number)
+  token N_BIN        = /0b[01](_?[01])*/ @style(number)
+  token N_FLOAT      = /[+-]?(0|[1-9](_?\d)*)(\.\d(_?\d)*([eE][+-]?\d(_?\d)*)?|[eE][+-]?\d(_?\d)*)/ @style(number)
+  token N_INT        = /[+-]?(0|[1-9](_?\d)*)/ @style(number)
+  token N_SPECIAL    = /[+-]?(inf|nan)/ @style(number)
+  token N_TRUE       = "true" @style(keyword)
+  token N_FALSE      = "false" @style(keyword)
+  token N_LBRACK     = "[" @push(NEST) @style(bracket)
+  token N_RBRACK     = "]" @pop @style(bracket)
+  token N_LBRACE     = "{" @push(NEST) @style(bracket)
+  token N_RBRACE     = "}" @pop @style(bracket)
+  token N_WORD       = /[A-Za-z0-9_+-][A-Za-z0-9_+.:-]*/ @error
+  token N_OTHER      = /[^\s]/ @error
+}
+
+// ---- multi-line strings ----
+//
+// One or two quotes may stand right before the closer, so up to five end
+// the string. In a basic one, a backslash ends a line (`\` and spaces at
+// its end), or begins one of the spec's escapes; any other is an error.
+
+mode MLB {
+  token MLB_CLOSE = /"""""|""""|"""/ @pop @style(string)
+  token MLB_ESC   = /\\([btnfre"\\]|x[0-9A-Fa-f][0-9A-Fa-f]|u[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|U[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])/ @style(string)
+  token MLB_CONT  = /\\\s*(?!.)/ @style(string)
+  token MLB_BAD   = /\\/ @error @style(string)
+  token MLB_QUOTE = /""?/ @style(string)
+  token MLB_TEXT  = /[^"\\]+/ @style(string)
+}
+
+mode MLL {
+  token MLL_CLOSE = /'''''|''''|'''/ @pop @style(string)
+  token MLL_QUOTE = /''?/ @style(string)
+  token MLL_TEXT  = /[^']+/ @style(string)
+}
+
+pair H_OPEN H_CLOSE
+pair L_LBRACK N_RBRACK
+pair L_LBRACE N_RBRACE
+pair N_LBRACK N_RBRACK
+pair N_LBRACE N_RBRACE
+
+start toml
+
+// ---- a document: its root table's pairs, then its tables ----
+
+rule toml = Toml: keyvals tables
+
+rule keyvals = keyval*
+rule tables  = table*
+
+// A table holds the pairs after its header, to the next header. Each is an
+// outline entry named by its key (`dependencies.serde`), and folds.
+rule table =
+  | Table:      H_OPEN k:header_key H_CLOSE keyvals @outline(k, module) @fold(table)
+  | ArrayTable: AH_OPEN k:header_key AH_CLOSE keyvals @outline(k, struct) @fold(table)
+
+rule header_key =
+  | HeaderKey:       header_seg
+  | HeaderDottedKey: header_key H_DOT header_seg
+
+rule header_seg =
+  | HeaderBare:    H_KEY
+  | HeaderQuoted:  H_QKEY
+  | HeaderLiteral: H_LKEY
+
+// ---- a key/value pair, on its line ----
+
+rule keyval = KeyVal: k:key L_EQ value @outline(k, variable)
+
+rule key =
+  | Key:       first_key
+  | DottedKey: key L_DOT line_key
+
+rule first_key =
+  | FirstBare:    D_KEY
+  | FirstQuoted:  D_QKEY
+  | FirstLiteral: D_LKEY
+
+rule line_key =
+  | LineBare:    L_KEY
+  | LineQuoted:  L_QKEY
+  | LineLiteral: L_LKEY
+
+rule value =
+  | String:         L_STR
+  | LiteralString:  L_LSTR
+  | MultiString:    L_MLB_OPEN mlb_parts MLB_CLOSE @fold(string)
+  | MultiLiteral:   L_MLL_OPEN mll_parts MLL_CLOSE @fold(string)
+  | DateTime:       L_DATETIME
+  | Time:           L_TIME
+  | HexInteger:     L_HEX
+  | OctInteger:     L_OCT
+  | BinInteger:     L_BIN
+  | Float:          L_FLOAT
+  | Integer:        L_INT
+  | SpecialFloat:   L_SPECIAL
+  | True:           L_TRUE
+  | False:          L_FALSE
+  | Array:          L_LBRACK array_body N_RBRACK @fold(list)
+  | InlineTable:    L_LBRACE inline_body N_RBRACE @fold(list)
+
+// ---- arrays and inline tables: values and pairs over lines ----
+
+rule nested_value =
+  | NestedString:        N_STR
+  | NestedLiteralString: N_LSTR
+  | NestedMultiString:   N_MLB_OPEN mlb_parts MLB_CLOSE @fold(string)
+  | NestedMultiLiteral:  N_MLL_OPEN mll_parts MLL_CLOSE @fold(string)
+  | NestedDateTime:      N_DATETIME
+  | NestedTime:          N_TIME
+  | NestedHexInteger:    N_HEX
+  | NestedOctInteger:    N_OCT
+  | NestedBinInteger:    N_BIN
+  | NestedFloat:         N_FLOAT
+  | NestedInteger:       N_INT
+  | NestedSpecialFloat:  N_SPECIAL
+  | NestedTrue:          N_TRUE
+  | NestedFalse:         N_FALSE
+  | NestedArray:         N_LBRACK array_body N_RBRACK @fold(list)
+  | NestedInlineTable:   N_LBRACE inline_body N_RBRACE @fold(list)
+
+// An array's values, and an inline table's pairs, may end with a comma.
+rule array_body  = array_items?
+rule array_items = ArrayItems: nested_values comma?
+rule nested_values = nested_value+ % N_COMMA
+
+rule inline_body  = inline_items?
+rule inline_items = InlineItems: nested_keyvals comma?
+rule nested_keyvals = nested_keyval+ % N_COMMA
+
+rule comma = Comma: N_COMMA
+
+rule nested_keyval = NestedKeyVal: k:nested_key N_EQ nested_value @outline(k, variable)
+
+rule nested_key =
+  | NestedKey:       nested_seg
+  | NestedDottedKey: nested_key N_DOT nested_seg
+
+rule nested_seg =
+  | NestedBare:    N_KEY
+  | NestedQuoted:  N_QKEY
+  | NestedLiteral: N_LKEY
+
+// ---- multi-line strings' bodies ----
+
+rule mlb_parts = mlb_part*
+rule mlb_part =
+  | MlbText:     MLB_TEXT
+  | MlbEscape:   MLB_ESC
+  | MlbContinue: MLB_CONT
+  | MlbQuote:    MLB_QUOTE
+
+rule mll_parts = mll_part*
+rule mll_part =
+  | MllText:  MLL_TEXT
+  | MllQuote: MLL_QUOTE

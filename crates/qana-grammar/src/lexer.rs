@@ -203,8 +203,11 @@ impl CompiledLexer {
             "lossless invariant: tokens must cover the line exactly"
         );
         // Line-bounded modes (`@push(M, eol)`) end with the line: pop
-        // them from the top so the EXIT state never carries them —
-        // directive edits stay line-local by construction. EXCEPT when
+        // those on top, so the EXIT state carries none above every mode
+        // that goes on — directive edits stay line-local by construction.
+        // One under a mode that is not line-bounded (an array a TOML
+        // pair's value opens) waits for it, and ends with the line it is
+        // left on. EXCEPT when
         // the line's FINAL token is a `@continues` splice (C's
         // backslash-newline): the line has not logically ended, so the
         // whole stack survives as the next line's entry state. Being

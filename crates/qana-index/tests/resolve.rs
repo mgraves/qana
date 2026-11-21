@@ -102,6 +102,7 @@ fn project() -> Resolver {
         unindexed: Vec::new(),
         deref_trait: None,
         try_trait: None,
+        derive_traits: Vec::new(),
     };
     let mut graph = UnitGraph::new();
     let geo = graph.add_crate(krate("geo", "/p/src/lib.ul", Vec::new()));
@@ -356,6 +357,7 @@ fn one_file(text: &str) -> Resolver {
         unindexed: Vec::new(),
         deref_trait: None,
         try_trait: None,
+        derive_traits: Vec::new(),
     });
     Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
 }
@@ -548,6 +550,7 @@ fn with_preludes() -> Resolver {
             unindexed: Vec::new(),
             deref_trait: None,
             try_trait: None,
+            derive_traits: Vec::new(),
         };
     let std_prelude = path(Some(Root::Global), &["std", "prelude", "rust_2021"]);
     let mut graph = UnitGraph::new();
@@ -840,6 +843,7 @@ fn one_file_inert(text: &str) -> Resolver {
         unindexed: vec!["web_sys".to_string()],
         deref_trait: None,
         try_trait: None,
+        derive_traits: Vec::new(),
     });
     Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
 }

@@ -52,7 +52,7 @@ pub use graph::{CrateInfo, CrateSource, UnitGraph};
 pub use members::{member_at, members, path_at, MemberAccess, MemberKind, Receiver};
 pub use qana_sem::{Path, Root};
 pub use references::{escaping, references, Reference};
-pub use resolve::{Resolution, Resolver};
+pub use resolve::{Implementation, Resolution, Resolver};
 
 mod graph;
 mod members;
@@ -387,6 +387,8 @@ pub struct Locations {
     reexports: Vec<(u32, u32)>,
     imports: Vec<(u32, u32)>,
     impls: Vec<(u32, u32)>,
+    impl_heads: Vec<units::ImplHead>,
+    derives: Vec<Vec<(u32, u32)>>,
     words: Vec<String>,
     fingerprint: u64,
 }
@@ -434,6 +436,26 @@ impl Locations {
     /// The byte span of the `i`th impl block.
     pub fn impl_span(&self, i: usize) -> (u32, u32) {
         self.impls[i]
+    }
+
+    /// The byte span of the type the `i`th impl block's head names (`Cell`
+    /// in `impl Display for Cell`), where the grammar says which child it
+    /// is.
+    pub fn impl_type_span(&self, i: usize) -> Option<(u32, u32)> {
+        self.impl_heads[i].0
+    }
+
+    /// The byte span of the trait the `i`th impl block's head names
+    /// (`Display` in `impl Display for Cell`), where it implements one.
+    pub fn impl_trait_span(&self, i: usize) -> Option<(u32, u32)> {
+        self.impl_heads[i].1
+    }
+
+    /// The byte spans of the paths the `i`th offered declaration derives
+    /// (`Clone` in `#[derive(Clone)]`), as [`Declaration::derives`] holds
+    /// them.
+    pub fn derive_spans(&self, i: usize) -> &[(u32, u32)] {
+        &self.derives[i]
     }
 
     /// The names the file defines or refers to, sorted, each once: where a
@@ -516,21 +538,30 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     }
 
     // Impl blocks, by what they say.
-    let mut impls: Vec<(Impl, (u32, u32), usize)> = read
+    type Read = (Impl, (u32, u32), units::ImplHead, usize);
+    let mut impls: Vec<Read> = read
         .impls
         .iter()
         .enumerate()
-        .map(|(i, (block, span))| {
-            (Impl { unit: unit_index(block.unit), ..block.clone() }, *span, i)
+        .map(|(i, (block, span, head))| {
+            (Impl { unit: unit_index(block.unit), ..block.clone() }, *span, *head, i)
         })
         .collect();
     impls.sort_by(|a, b| a.0.cmp(&b.0));
     let mut impl_place = vec![0u32; impls.len()];
-    for (place, (_, _, i)) in impls.iter().enumerate() {
+    for (place, (_, _, _, i)) in impls.iter().enumerate() {
         impl_place[*i] = place as u32;
     }
-    let (impls, impl_spans): (Vec<Impl>, Vec<(u32, u32)>) =
-        impls.into_iter().map(|(block, span, _)| (block, span)).unzip();
+    let mut impl_spans: Vec<(u32, u32)> = Vec::new();
+    let mut impl_heads: Vec<units::ImplHead> = Vec::new();
+    let impls: Vec<Impl> = impls
+        .into_iter()
+        .map(|(block, span, head, _)| {
+            impl_spans.push(span);
+            impl_heads.push(head);
+            block
+        })
+        .collect();
 
     // Imports, by what they say: those others may see are offered.
     let private = units::private();
@@ -559,6 +590,7 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
         declaration: Declaration,
         name: (u32, u32),
         item: (u32, u32),
+        derives: Vec<(u32, u32)>,
     }
     let mut found: Vec<Found> = Vec::new();
     for (symbol, container) in outside_bodies(&tree, &lang.outline) {
@@ -578,13 +610,14 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
                     impl_block: place.impl_block.map(|i| impl_place[i as usize]),
                     ty: place.ty.clone(),
                     returns: place.returns.clone(),
-                    derives: place.derives.clone(),
+                    derives: place.derives.iter().map(|(path, _)| path.clone()).collect(),
                     generics: place.generics.clone(),
                     bounds: place.bounds.clone(),
                     positional: place.positional.clone(),
                 },
                 name: symbol.selection,
                 item: symbol.span,
+                derives: place.derives.iter().map(|&(_, span)| span).collect(),
             });
         }
     }
@@ -636,6 +669,7 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
     let declarations: Vec<Declaration> = found.iter().map(|f| f.declaration.clone()).collect();
     let names: Vec<(u32, u32)> = found.iter().map(|f| f.name).collect();
     let items: Vec<(u32, u32)> = found.iter().map(|f| f.item).collect();
+    let derive_spans: Vec<Vec<(u32, u32)>> = found.iter().map(|f| f.derives.clone()).collect();
     let positions: Vec<(u32, u32)> =
         names.iter().map(|&(start, _)| lines.position(text, start)).collect();
 
@@ -704,12 +738,29 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
                 hash.u64(u64::from(value));
             }
         }
-        for spans in [&unit_spans, &unit_items, &reexport_spans, &import_spans, &impl_spans] {
+        let heads = impl_heads.iter().flat_map(|&(ty, tr)| [ty, tr]).flatten().collect();
+        let derived = derive_spans.iter().flatten().copied().collect();
+        for spans in [
+            &unit_spans,
+            &unit_items,
+            &reexport_spans,
+            &import_spans,
+            &impl_spans,
+            &heads,
+            &derived,
+        ] {
             hash.u64(spans.len() as u64);
             for span in spans {
                 hash.u64(u64::from(span.0));
                 hash.u64(u64::from(span.1));
             }
+        }
+        for (ty, tr) in &impl_heads {
+            hash.u64(u64::from(ty.is_some()));
+            hash.u64(u64::from(tr.is_some()));
+        }
+        for d in &derive_spans {
+            hash.u64(d.len() as u64);
         }
         for w in &words {
             hash.str(w);
@@ -737,6 +788,8 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
             reexports: reexport_spans,
             imports: import_spans,
             impls: impl_spans,
+            impl_heads,
+            derives: derive_spans,
             words,
             fingerprint: locations_fingerprint,
         },

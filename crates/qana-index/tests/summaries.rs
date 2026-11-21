@@ -926,3 +926,37 @@ fn const_impl_blocks_and_const_derives_are_held_like_others() {
     let new = summary.offers().declarations().iter().find(|d| d.name == "new").unwrap();
     assert_eq!(new.impl_block, Some(0), "the inherent block's");
 }
+
+#[test]
+fn locations_say_where_an_impl_blocks_head_and_a_derive_name_what_they_do() {
+    let text = "#[derive(Debug, std::clone::Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct Cell<T>(T);
+
+impl<T: Display> fmt::Display for Cell<T> {}
+
+impl<T> Cell<T> {}
+";
+    let summary = summarize(rust(), text);
+    let at = |span: (u32, u32)| &text[span.0 as usize..span.1 as usize];
+    let impls = summary.offers().impls();
+    let display = impls.iter().position(|i| i.trait_path.is_some()).unwrap();
+    let inherent = impls.iter().position(|i| i.trait_path.is_none()).unwrap();
+    let locations = summary.locations();
+    assert_eq!(
+        locations.impl_trait_span(display).map(at),
+        Some("fmt::Display"),
+        "the trait the head implements, not the bound before it"
+    );
+    assert_eq!(locations.impl_type_span(display).map(at), Some("Cell<T>"));
+    assert_eq!(locations.impl_trait_span(inherent), None);
+    assert_eq!(locations.impl_type_span(inherent).map(at), Some("Cell<T>"));
+    let cell = summary.offers().declarations().iter().position(|d| d.name == "Cell").unwrap();
+    let derives: Vec<&str> = locations.derive_spans(cell).iter().map(|&s| at(s)).collect();
+    assert_eq!(
+        derives,
+        ["Debug", "std::clone::Clone", "PartialEq"],
+        "each as Declaration::derives holds it, one under a condition among them"
+    );
+    assert_eq!(summary.offers().declarations()[cell].derives.len(), 3);
+}

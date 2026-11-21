@@ -78,7 +78,10 @@ use std::rc::Rc;
 
 use crate::{Attribute, Declaration, Import, Path, Root, Summary, TypeRef, UnitGraph, Visibility};
 
+mod implementations;
 mod types;
+
+pub use implementations::Implementation;
 
 /// What a path names. See the [module docs](self).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,6 +185,9 @@ pub struct Resolver {
     /// The blanket impl blocks by the names they may answer for (see
     /// `types`), once found.
     blankets_named: RefCell<Option<BlanketsByName>>,
+    /// The trait each built-in derive implements, by crate and the
+    /// derive's name, once found.
+    built_in_derives: RefCell<HashMap<(u32, String), Declarations>>,
 }
 
 /// A unit in a crate: a file's own (`unit` `None`), or one with its body in
@@ -284,6 +290,12 @@ struct ImplNames {
     /// The impl blocks of trait objects (`impl dyn Any + Send`), by the
     /// last name of each of their traits' paths.
     objects: HashMap<String, Vec<(u32, u32)>>,
+    /// The impl blocks of a trait, by the last name of the trait's path
+    /// (`impl fmt::Display for Cell`: `Display`).
+    by_trait: HashMap<String, Vec<(u32, u32)>>,
+    /// The declarations that derive something, by the last name of each
+    /// derive's path (`#[derive(Clone)]`: `Clone`).
+    derivers: HashMap<String, Vec<Declared>>,
     /// The impl blocks of slices (`impl<T> [T]`), and of arrays.
     slices: Vec<(u32, u32)>,
     arrays: Vec<(u32, u32)>,
@@ -340,6 +352,7 @@ impl Resolver {
             inside: RefCell::default(),
             trait_names: RefCell::default(),
             blankets_named: RefCell::default(),
+            built_in_derives: RefCell::default(),
         }
     }
 
@@ -1323,6 +1336,9 @@ impl Resolver {
                 if let Some(last) = named.and_then(|t| t.segments.last()) {
                     names.by_name.entry(last.clone()).or_default().push(at);
                 }
+                if let Some(last) = block.trait_path.as_ref().and_then(|t| t.segments.last()) {
+                    names.by_trait.entry(last.clone()).or_default().push(at);
+                }
                 let parameter = |t: &TypeRef| {
                     t.path().is_some_and(|p| {
                         p.root.is_none()
@@ -1345,7 +1361,13 @@ impl Resolver {
                     _ => {}
                 }
             }
-            for d in summary.offers().declarations() {
+            for (i, d) in summary.offers().declarations().iter().enumerate() {
+                for last in d.derives.iter().filter_map(|p| p.segments.last()) {
+                    let derivers = names.derivers.entry(last.clone()).or_default();
+                    if !derivers.contains(&(file as u32, i as u32)) {
+                        derivers.push((file as u32, i as u32));
+                    }
+                }
                 // An alias: a type declaration writing the type it is
                 // (an impl block's associated type is no alias).
                 let written =

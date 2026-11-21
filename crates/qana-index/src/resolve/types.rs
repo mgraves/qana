@@ -63,8 +63,8 @@ use crate::{Declaration, MemberAccess, MemberKind, Path, Receiver, Root, TypeRef
 /// trait); a constant without a type is a value of the type around it (an
 /// enum's variant); a field is read.
 const FUNCTION: &str = "function";
-const STRUCT: &str = "struct";
-const CLASS: &str = "class";
+pub(super) const STRUCT: &str = "struct";
+pub(super) const CLASS: &str = "class";
 const CONSTANT: &str = "constant";
 const FIELD: &str = "field";
 
@@ -768,13 +768,13 @@ impl Resolver {
     }
 
     /// Whether impl block `block` is inherent: it implements no trait.
-    fn is_inherent(&self, block: (u32, u32)) -> bool {
+    pub(super) fn is_inherent(&self, block: (u32, u32)) -> bool {
         self.summaries[block.0 as usize].offers().impls()[block.1 as usize].trait_path.is_none()
     }
 
     /// The items of impl block `block`, as indexes into its file's
     /// declarations.
-    fn items_of_block(&self, block: (u32, u32)) -> Rc<[u32]> {
+    pub(super) fn items_of_block(&self, block: (u32, u32)) -> Rc<[u32]> {
         let file = self.block_items.borrow().get(&block.0).cloned();
         let file = file.unwrap_or_else(|| {
             let mut by_block: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -1250,7 +1250,7 @@ impl Resolver {
 
     /// The traits impl block `block` implements: its trait's path, read
     /// where the block is.
-    fn impl_traits(&self, block: (u32, u32)) -> Declarations {
+    pub(super) fn impl_traits(&self, block: (u32, u32)) -> Declarations {
         if let Some(found) = self.impl_traits.borrow().get(&block) {
             return found.clone();
         }
@@ -1283,16 +1283,65 @@ impl Resolver {
     }
 
     /// The traits type `d` derives, its derive paths read where it is.
-    fn derived(&self, d: (u32, u32)) -> Vec<(u32, u32)> {
+    pub(super) fn derived(&self, d: (u32, u32)) -> Vec<(u32, u32)> {
         let mut found = Vec::new();
         for path in &self.declaration(d).derives {
-            for at in self.scopes_of(d, Vec::new(), &HashMap::new()) {
-                for t in self.declarations_at(at.at, path) {
-                    if self.declaration(t).kind == CLASS && !found.contains(&t) {
-                        found.push(t);
-                    }
+            for t in self.derive_implements(d, path) {
+                if !found.contains(&t) {
+                    found.push(t);
                 }
             }
+        }
+        found
+    }
+
+    /// The traits the derive `path`, said of declaration `d`, implements:
+    /// what it names, read where `d` stands; or, naming no trait, the
+    /// built-in derive's, by its name.
+    pub(super) fn derive_implements(&self, d: (u32, u32), path: &Path) -> Vec<(u32, u32)> {
+        let mut found = Vec::new();
+        for at in self.scopes_of(d, Vec::new(), &HashMap::new()) {
+            let mut traits: Vec<(u32, u32)> = self
+                .declarations_at(at.at, path)
+                .into_iter()
+                .filter(|&t| self.declaration(t).kind == CLASS)
+                .collect();
+            if traits.is_empty() {
+                if let Some(name) = path.segments.last() {
+                    traits.extend(self.built_in_derive(at.at.krate, name).iter().copied());
+                }
+            }
+            for t in traits {
+                if !found.contains(&t) {
+                    found.push(t);
+                }
+            }
+        }
+        found
+    }
+
+    /// The trait the built-in derive `name` implements, as crate `krate`'s
+    /// model names it ([`CrateInfo::derive_traits`]); none where it names
+    /// no such derive.
+    ///
+    /// [`CrateInfo::derive_traits`]: crate::CrateInfo::derive_traits
+    fn built_in_derive(&self, krate: u32, name: &str) -> Declarations {
+        let key = (krate, name.to_string());
+        if let Some(found) = self.built_in_derives.borrow().get(&key) {
+            return found.clone();
+        }
+        let info = &self.graph.crates()[krate as usize];
+        let mut found = Vec::new();
+        for (_, path) in info.derive_traits.iter().filter(|(derive, _)| derive == name) {
+            for d in self.lang_declarations(krate, path) {
+                if self.declaration(d).kind == CLASS && !found.contains(&d) {
+                    found.push(d);
+                }
+            }
+        }
+        let found = Rc::new(found);
+        if self.depth.get() == 0 {
+            self.built_in_derives.borrow_mut().insert(key, found.clone());
         }
         found
     }
@@ -1403,7 +1452,7 @@ impl Resolver {
     // Declarations
     // ------------------------------------------------------------------
 
-    fn declaration(&self, d: (u32, u32)) -> &Declaration {
+    pub(super) fn declaration(&self, d: (u32, u32)) -> &Declaration {
         &self.summaries[d.0 as usize].offers().declarations()[d.1 as usize]
     }
 
@@ -1430,7 +1479,7 @@ impl Resolver {
 
     /// The declaration declaration `d` is declared inside (a variant's
     /// enum, a field's struct, an item's trait), not an impl block.
-    fn owner_of(&self, d: (u32, u32)) -> Option<(u32, u32)> {
+    pub(super) fn owner_of(&self, d: (u32, u32)) -> Option<(u32, u32)> {
         let declarations = self.summaries[d.0 as usize].offers().declarations();
         let declaration = &declarations[d.1 as usize];
         if declaration.impl_block.is_some() {

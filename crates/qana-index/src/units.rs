@@ -186,8 +186,9 @@ pub(crate) struct DefPlace {
     pub ty: Option<TypeRef>,
     /// The type a call of it gives, as written (`@returns`).
     pub returns: Option<TypeRef>,
-    /// What it derives (`@derives`, among the attributes said of it).
-    pub derives: Vec<Path>,
+    /// What it derives (`@derives`, among the attributes said of it),
+    /// each path with its span.
+    pub derives: Vec<Derive>,
     /// Its generic parameters' names, in order (`@generic`, in the scope
     /// it opens).
     pub generics: Vec<String>,
@@ -223,6 +224,12 @@ pub(crate) struct RefPlace {
 /// A byte span of the file.
 pub(crate) type Span = (u32, u32);
 
+/// A derive's path (`@derives`), and its span.
+pub(crate) type Derive = (Path, Span);
+
+/// The spans of what an impl block's head names: its type, and its trait.
+pub(crate) type ImplHead = (Option<Span>, Option<Span>);
+
 /// What the walk read, units, imports and impl blocks in document order,
 /// each with its span (a unit's: its name's, then its item's).
 pub(crate) struct FileUnits {
@@ -236,7 +243,7 @@ pub(crate) struct FileUnits {
     pub expanding: HashSet<u32>,
     pub units: Vec<(Unit, Span, Span)>,
     pub imports: Vec<(Import, Span)>,
-    pub impls: Vec<(Impl, Span)>,
+    pub impls: Vec<(Impl, Span, ImplHead)>,
     /// By the name's span.
     pub defs: HashMap<(u32, u32), DefPlace>,
     /// By the name's span.
@@ -288,7 +295,7 @@ struct Cx {
     /// `@attributes` gave them and no scope opened since, and what they
     /// derive.
     attributes: Option<Rc<Vec<Attribute>>>,
-    derives: Option<Rc<Vec<Path>>>,
+    derives: Option<Rc<Vec<Derive>>>,
     /// The scopes around it below its unit's, outermost first: empty among
     /// a unit's items.
     scopes: Rc<Vec<u32>>,
@@ -551,7 +558,7 @@ impl Walk<'_> {
         // without an item child, the unit the node stands in.
         let attributes_given = match (roles.attribute_list, roles.attribute) {
             (Some((attrs, item)), None) => {
-                let (attributes, derives) = self.attributes_at(n, attrs);
+                let (attributes, derives) = self.attributes_at(n, base, attrs);
                 Some((attributes, derives, item))
             }
             _ => None,
@@ -570,8 +577,8 @@ impl Walk<'_> {
             }
             attributes
         };
-        let derives_here = |name: (u32, u32)| -> Vec<Path> {
-            let mut derives: Vec<Path> = cx.derives.as_deref().cloned().unwrap_or_default();
+        let derives_here = |name: (u32, u32)| -> Vec<Derive> {
+            let mut derives: Vec<Derive> = cx.derives.as_deref().cloned().unwrap_or_default();
             if let (Some((_, given, _)), true) = (&attributes_given, in_item(name)) {
                 derives.extend(given.iter().cloned());
             }
@@ -745,6 +752,7 @@ impl Walk<'_> {
                     generics,
                 },
                 whole,
+                (exact_span(n, base, ty), tr.and_then(|tr| exact_span(n, base, tr))),
             ));
             inner.impl_pending = Some(index);
         }
@@ -902,13 +910,14 @@ impl Walk<'_> {
         }
     }
 
-    /// The attributes in the subtree of child `k` of `n`, in the file's
-    /// order: each attribute's, and those an attribute holds, under its
-    /// condition; and what they derive (`@derives`).
-    fn attributes_at(&self, n: &GreenNode, k: usize) -> (Vec<Attribute>, Vec<Path>) {
+    /// The attributes in the subtree of child `k` of `n` (which starts at
+    /// `base`), in the file's order: each attribute's, and those an
+    /// attribute holds, under its condition; and what they derive
+    /// (`@derives`), with where.
+    fn attributes_at(&self, n: &GreenNode, base: u32, k: usize) -> (Vec<Attribute>, Vec<Derive>) {
         let (mut found, mut derives) = (Vec::new(), Vec::new());
-        if let Some(child) = symbol_child(n, k) {
-            self.attributes_in(child, false, &mut found, &mut derives);
+        if let Some((child, at)) = symbol_child_at(n, k, base) {
+            self.attributes_in(child, at, false, &mut found, &mut derives);
         }
         (found, derives)
     }
@@ -916,51 +925,55 @@ impl Walk<'_> {
     fn attributes_in(
         &self,
         node: &GreenNode,
+        base: u32,
         conditional: bool,
         found: &mut Vec<Attribute>,
-        derives: &mut Vec<Path>,
+        derives: &mut Vec<Derive>,
     ) {
         let roles = self.g.roles.get(&(node.nt, node.prod));
         if let Some(k) = roles.and_then(|r| r.derives) {
-            derives.extend(Path::of_child(node, k, self.g.cfg));
+            derives.extend(self.derive_at(node, base, k));
             return;
         }
         if let Some(k) = roles.and_then(|r| r.attribute) {
             if let Some(path) = Path::of_child(node, k, self.g.cfg) {
                 found.push(Attribute { path, conditional });
             }
-            let held =
-                roles.and_then(|r| r.attribute_list).and_then(|(a, _)| symbol_child(node, a));
-            if let Some(held) = held {
-                self.attributes_in(held, true, found, derives);
+            let held = roles
+                .and_then(|r| r.attribute_list)
+                .and_then(|(a, _)| symbol_child_at(node, a, base));
+            if let Some((held, at)) = held {
+                self.attributes_in(held, at, true, found, derives);
             } else {
                 // What an attribute derives is in its arguments.
-                for c in &node.children {
-                    if let GreenChild::Node(m) = c {
-                        self.derives_in(m, derives);
-                    }
+                for (m, at) in child_nodes(node, base) {
+                    self.derives_in(m, at, derives);
                 }
             }
             return;
         }
-        for c in &node.children {
-            if let GreenChild::Node(m) = c {
-                self.attributes_in(m, conditional, found, derives);
-            }
+        for (m, at) in child_nodes(node, base) {
+            self.attributes_in(m, at, conditional, found, derives);
         }
     }
 
-    /// What the `@derives` nodes in `node`'s subtree name.
-    fn derives_in(&self, node: &GreenNode, derives: &mut Vec<Path>) {
+    /// What the `@derives` nodes in `node`'s subtree (which starts at
+    /// `base`) name, with where.
+    fn derives_in(&self, node: &GreenNode, base: u32, derives: &mut Vec<Derive>) {
         if let Some(k) = self.g.roles.get(&(node.nt, node.prod)).and_then(|r| r.derives) {
-            derives.extend(Path::of_child(node, k, self.g.cfg));
+            derives.extend(self.derive_at(node, base, k));
             return;
         }
-        for c in &node.children {
-            if let GreenChild::Node(m) = c {
-                self.derives_in(m, derives);
-            }
+        for (m, at) in child_nodes(node, base) {
+            self.derives_in(m, at, derives);
         }
+    }
+
+    /// The path a `@derives` node (`node`, starting at `base`) names at its
+    /// child `k`, and that child's span.
+    fn derive_at(&self, node: &GreenNode, base: u32, k: usize) -> Option<Derive> {
+        let path = Path::of_child(node, k, self.g.cfg)?;
+        Some((path, exact_span(node, base, k)?))
     }
 
     /// The name span of the definition the pattern `node` (starting at
@@ -1019,6 +1032,22 @@ fn cx_of<'c>(child_cx: &'c mut Vec<(usize, Cx)>, k: usize, inner: &Cx) -> &'c mu
         }
     };
     &mut child_cx[at].1
+}
+
+/// The span of `n`'s `k`th symbol child (`n` starting at `base`), from its
+/// first token: a node's leading trivia is not its own.
+fn exact_span(n: &GreenNode, base: u32, k: usize) -> Option<Span> {
+    let mut off = base;
+    for (c, index) in n.children.iter().zip(symbol_indices(n)) {
+        if index == Some(k) {
+            return Some(match c {
+                GreenChild::Node(m) => (off + leading_trivia(m), off + m.width),
+                GreenChild::Token(_) => (off, off + c.width()),
+            });
+        }
+        off += c.width();
+    }
+    None
 }
 
 /// The width of the trivia before `n`'s first token.
@@ -1087,6 +1116,19 @@ pub(crate) fn symbol_child_at(
         off += c.width();
     }
     None
+}
+
+/// `n`'s child nodes (`n` starting at `base`), each with where it starts.
+fn child_nodes(n: &GreenNode, base: u32) -> impl Iterator<Item = (&GreenNode, u32)> {
+    let mut off = base;
+    n.children.iter().filter_map(move |c| {
+        let at = off;
+        off += c.width();
+        match c {
+            GreenChild::Node(m) => Some((m.as_ref(), at)),
+            GreenChild::Token(_) => None,
+        }
+    })
 }
 
 /// Each symbol child's span, by its symbol index.

@@ -522,6 +522,9 @@ pub mod iter {
 
 pub mod fmt {
     pub trait Display {}
+
+    /// Not in the prelude: there, `Debug` is the derive.
+    pub trait Debug {}
 }
 
 pub mod string {
@@ -584,6 +587,7 @@ pub struct Panel<H, B> {
     b: B,
 }
 
+#[derive(Debug)]
 pub struct Wide;
 
 /// An alias whose impl block is its type's, its parameter one of its
@@ -672,6 +676,7 @@ fn project() -> qana_index::Resolver {
         unindexed: Vec::new(),
         deref_trait: Some((core_ops(name, "Deref"), "Target".to_string())),
         try_trait: Some((core_ops(name, "Try"), "Output".to_string())),
+        derive_traits: vec![("Debug".to_string(), core_path(name, &["fmt", "Debug"]))],
     };
     let mut graph = UnitGraph::new();
     let core = graph.add_crate(krate("core", "/core/lib.rs", Vec::new(), Vec::new()));
@@ -698,12 +703,24 @@ fn project() -> qana_index::Resolver {
 /// A declaration: its file's name, its container, its name and its kind.
 type Named = (String, String, String, String);
 
-/// The path of core's `ops::item` for crate `name`: from its root in core
-/// itself, from the crates themselves in any other (`::core::ops::item`).
+/// The path of core's `ops::item` for crate `name` (see [`core_path`]).
 fn core_ops(name: &str, item: &str) -> Path {
+    core_path(name, &["ops", item])
+}
+
+/// The path of core's item at `segments` for crate `name`: from its root in
+/// core itself, from the crates themselves in any other (`::core::…`).
+fn core_path(name: &str, segments: &[&str]) -> Path {
     match name {
-        "core" => Path { root: Some(Root::Crate), segments: vec!["ops".into(), item.into()] },
-        _ => global(&["core", "ops", item]),
+        "core" => Path {
+            root: Some(Root::Crate),
+            segments: segments.iter().map(|s| s.to_string()).collect(),
+        },
+        _ => {
+            let mut all = vec!["core"];
+            all.extend(segments);
+            global(&all)
+        }
     }
 }
 
@@ -979,6 +996,7 @@ fn a_lang_trait_is_its_crates_whatever_the_root_calls_by_its_name() {
             unindexed: Vec::new(),
             deref_trait: Some((core_ops(name, "Deref"), "Target".to_string())),
             try_trait: Some((core_ops(name, "Try"), "Output".to_string())),
+            derive_traits: Vec::new(),
         };
     let mut graph = UnitGraph::new();
     let core = graph.add_crate(krate("core", "/core/lib.rs", "2021", Vec::new()));
@@ -1012,4 +1030,170 @@ fn a_lang_trait_is_its_crates_whatever_the_root_calls_by_its_name() {
     let declared = summarize(rust(), OLD);
     let width = declared.offers().declarations().iter().position(|d| d.name == "width").unwrap();
     assert_eq!(declarations, vec![(PathBuf::from("/old/lib.rs"), width as u32)]);
+}
+
+/// Where the declaration named `name`, of `kind`, inside `container`, of
+/// `file` is implemented, each said as its file's name and what it is.
+fn implemented(
+    r: &qana_index::Resolver,
+    file: &str,
+    container: &str,
+    name: &str,
+    kind: &str,
+) -> Vec<String> {
+    use qana_index::{summarize, Implementation};
+
+    let summary_of = |path: &std::path::Path| {
+        let text = FILES.iter().find(|(p, _)| std::path::Path::new(p) == path).unwrap().1;
+        summarize(rust(), text)
+    };
+    let short = |path: &std::path::Path| path.file_name().unwrap().to_str().unwrap().to_string();
+    let path = std::path::Path::new(file);
+    let summary = summary_of(path);
+    let index = summary
+        .offers()
+        .declarations()
+        .iter()
+        .position(|d| d.container.join("::") == container && d.name == name && d.kind == kind)
+        .unwrap_or_else(|| panic!("{container}::{name}, a {kind}, in {file}"));
+    r.implementations(path, index as u32)
+        .into_iter()
+        .map(|found| match found {
+            Implementation::Block { file, block } => {
+                let summary = summary_of(&file);
+                let of = &summary.offers().impls()[block as usize];
+                let last = |p: Option<&qana_index::Path>| {
+                    p.and_then(|p| p.segments.last().cloned()).unwrap_or_default()
+                };
+                let ty = last(of.self_type.as_ref().and_then(qana_index::TypeRef::path));
+                match &of.trait_path {
+                    Some(t) => format!("{}: impl {} for {ty}", short(&file), last(Some(t))),
+                    None => format!("{}: impl {ty}", short(&file)),
+                }
+            }
+            Implementation::Item { file, declaration } => {
+                let summary = summary_of(&file);
+                let d = &summary.offers().declarations()[declaration as usize];
+                let block = &summary.offers().impls()[d.impl_block.unwrap() as usize];
+                let t = block.trait_path.as_ref().and_then(|t| t.segments.last()).unwrap();
+                format!("{}: {}::{} of {t}", short(&file), d.container.join("::"), d.name)
+            }
+            Implementation::Derived { file, declaration, derives } => {
+                let d =
+                    &summary_of(&file).offers().declarations()[declaration as usize].name.clone();
+                let t =
+                    summary_of(&derives.0).offers().declarations()[derives.1 as usize].name.clone();
+                format!("{}: {d} derives {t}", short(&file))
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn implementations_of_a_trait_its_items_and_a_type() {
+    use qana_index::summarize;
+
+    let r = project();
+    let (core, cell, deref) = ("/core/lib.rs", "/p/src/cell.rs", "/p/src/deref.rs");
+    assert_eq!(
+        implemented(&r, core, "iter", "Iterator", "class"),
+        ["lib.rs: impl Iterator for Iter", "deref.rs: impl Iterator for Walk"],
+        "a trait's impl blocks, in files' order"
+    );
+    assert_eq!(
+        implemented(&r, core, "iter::Iterator", "next", "function"),
+        ["lib.rs: slice::Iter<'a, T>::next of Iterator", "deref.rs: Walk::next of Iterator"],
+        "a trait's method: its implementors' methods"
+    );
+    assert_eq!(
+        implemented(&r, cell, "Draw", "draw", "function"),
+        ["cell.rs: Cell::draw of Draw"],
+        "not `Hidden`'s `draw`, of another trait"
+    );
+    assert_eq!(
+        implemented(&r, cell, "Hidden", "draw", "function"),
+        ["cell.rs: Cell::draw of Hidden"]
+    );
+    assert!(
+        implemented(&r, cell, "Draw", "redraw", "function").is_empty(),
+        "provided, not overridden"
+    );
+    assert_eq!(
+        implemented(&r, core, "default", "Default", "class"),
+        ["deref.rs: Tally derives Default"],
+        "a derive implements a trait with no impl block written"
+    );
+    assert_eq!(implemented(&r, core, "clone", "Clone", "class"), ["cell.rs: Cell derives Clone"]);
+    assert_eq!(
+        implemented(&r, core, "fmt", "Debug", "class"),
+        ["deref.rs: Wide derives Debug"],
+        "a derive that names no trait: the built-in derive's, by its name"
+    );
+    let wide =
+        summarize(rust(), DEREF).offers().declarations().iter().position(|d| d.name == "Wide");
+    let debug = summarize(rust(), CORE)
+        .offers()
+        .declarations()
+        .iter()
+        .position(|d| d.name == "Debug" && d.kind == "class");
+    assert_eq!(
+        r.derived_traits(std::path::Path::new(deref), wide.unwrap() as u32),
+        [vec![(std::path::PathBuf::from(core), debug.unwrap() as u32)]],
+        "each derive's trait, in the derives' order"
+    );
+    assert_eq!(
+        implemented(&r, core, "string", "ToString", "class"),
+        ["lib.rs: impl ToString for T"],
+        "a blanket impl"
+    );
+    assert_eq!(
+        implemented(&r, cell, "", "Cell", "struct"),
+        [
+            "cell.rs: impl Cell",
+            "cell.rs: impl Draw for Cell",
+            "cell.rs: impl Hidden for Cell",
+            "cell.rs: Cell derives Clone"
+        ],
+        "a type's impl blocks, inherent and of traits, and what it derives"
+    );
+    assert_eq!(
+        implemented(&r, deref, "", "Split", "struct"),
+        ["deref.rs: impl Split"],
+        "an alias's: those of the type it stands for"
+    );
+    assert_eq!(
+        implemented(&r, deref, "Walk", "next", "function"),
+        ["deref.rs: Walk::next of Iterator"],
+        "an impl block's item implementing a trait's is its own implementation"
+    );
+    assert!(implemented(&r, cell, "Cell", "new", "function").is_empty(), "an inherent method");
+
+    // Whether anything is, as far as the first answer: as each list says.
+    for (file, container, name, kind) in [
+        (core, "iter", "Iterator", "class"),
+        (core, "iter::Iterator", "next", "function"),
+        (cell, "Draw", "draw", "function"),
+        (cell, "Draw", "redraw", "function"),
+        (core, "default", "Default", "class"),
+        (core, "fmt", "Debug", "class"),
+        (core, "fmt", "Display", "class"),
+        (cell, "", "Cell", "struct"),
+        (deref, "", "Split", "struct"),
+        (deref, "Walk", "next", "function"),
+        (cell, "Cell", "new", "function"),
+        (cell, "", "Inner", "struct"),
+    ] {
+        let summary = summarize(rust(), FILES.iter().find(|(p, _)| *p == file).unwrap().1);
+        let index = summary
+            .offers()
+            .declarations()
+            .iter()
+            .position(|d| d.container.join("::") == container && d.name == name && d.kind == kind)
+            .unwrap() as u32;
+        assert_eq!(
+            r.is_implemented(std::path::Path::new(file), index),
+            !implemented(&r, file, container, name, kind).is_empty(),
+            "{container}::{name}"
+        );
+    }
 }

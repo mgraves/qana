@@ -80,6 +80,13 @@ pub struct CrateInfo {
     /// holds one (Rust's `Try` and `Output`, what `x?` gives): its path,
     /// read as [`Self::deref_trait`]'s is, and the associated type's name.
     pub try_trait: Option<(crate::Path, String)>,
+    /// The traits the language's built-in derives implement, by the
+    /// derive's name (Rust's `Debug` derives `::core::fmt::Debug`), each
+    /// path read as [`Self::deref_trait`]'s is. A derive whose path names
+    /// no trait, and whose last name is one of these, implements that
+    /// trait: Rust's prelude holds `Debug` and `Hash` as derive macros, not
+    /// traits.
+    pub derive_traits: Vec<(String, crate::Path)>,
 }
 
 /// Where a crate comes from.

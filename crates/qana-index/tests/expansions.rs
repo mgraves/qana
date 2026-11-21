@@ -143,6 +143,7 @@ fn request(body: &str, form: Form, site: &str, entry: &str) -> ExpandRequest {
         of_crate: Vec::new(),
         itself: None,
         names: Vec::new(),
+        krate: None,
     }
 }
 

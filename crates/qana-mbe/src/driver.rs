@@ -27,6 +27,8 @@ pub const RECURSION_LIMIT: usize = 128;
 #[derive(Clone, Debug)]
 pub struct Expansion {
     pub mark: u32,
+    /// The tag of the macro that made it ([`MacroRules::tagged`]).
+    pub tag: Option<u32>,
     pub tokens: TokenStream,
     pub parsed: Parsed,
     pub nested: Vec<Nested>,
@@ -61,7 +63,9 @@ pub enum Outcome {
 /// Expand `input` by `rules` and parse the expansion at `entry`, then each
 /// invocation in it in turn: those a `macro_rules!` of the expansions
 /// defines, before them, by it, the rest by what `resolve` says the path
-/// names. Marks are numbered from 1, the top expansion's, in the order the
+/// names, told the tag of the macro that wrote the path
+/// ([`MacroRules::tagged`]; `None` for one the input wrote, or an untagged
+/// macro). Marks are numbered from 1, the top expansion's, in the order the
 /// expansions are made.
 ///
 /// The top expansion is `depth` deep (1 for an invocation no macro wrote;
@@ -76,7 +80,7 @@ pub fn expand_nested(
     entry: &str,
     depth: usize,
     limit: usize,
-    resolve: &mut dyn FnMut(&[Token]) -> Option<Arc<MacroRules>>,
+    resolve: &mut Resolve<'_>,
 ) -> Result<Expansion, Error> {
     let mut driver = Driver::new(lang, limit, resolve);
     driver.run(rules, input, entry, depth)
@@ -92,7 +96,7 @@ pub fn expand_all(
     stream: &TokenStream,
     entry: &str,
     limit: usize,
-    resolve: &mut dyn FnMut(&[Token]) -> Option<Arc<MacroRules>>,
+    resolve: &mut Resolve<'_>,
 ) -> Result<(Parsed, Vec<Nested>), Error> {
     let parsed = stream.parse(lang, entry)?;
     let mut driver = Driver::new(lang, limit, resolve);
@@ -102,16 +106,24 @@ pub fn expand_all(
     Ok((parsed, nested))
 }
 
+/// What the macro a nested invocation's path names is, as the driver
+/// asks: given the path's tokens and the tag of the macro that wrote the
+/// path ([`MacroRules::tagged`]; `None` for one the input wrote, or an
+/// untagged macro), its rules, if it names a macro.
+pub(crate) type Resolve<'r> = dyn FnMut(&[Token], Option<u32>) -> Option<Arc<MacroRules>> + 'r;
+
 type Local = (String, Result<Arc<MacroRules>, Error>);
 
 struct Driver<'a, 'r> {
     lang: &'a EmbeddedLang,
-    resolve: &'r mut dyn FnMut(&[Token]) -> Option<Arc<MacroRules>>,
+    resolve: &'r mut Resolve<'r>,
     /// The crate's `recursion_limit`.
     limit: usize,
     next_mark: u32,
     /// The marks of the expansions of `local_inner_macros` macros.
     local_inner: HashSet<u32>,
+    /// Each expansion's macro's tag, by the expansion's mark.
+    tags: HashMap<u32, Option<u32>>,
     /// The `macro_rules!` seen so far, in textual order, still in scope.
     locals: Vec<Local>,
     /// (nt, prod) → (the entry its invocation expands at, the child that
@@ -128,11 +140,7 @@ struct Driver<'a, 'r> {
 }
 
 impl<'a, 'r> Driver<'a, 'r> {
-    fn new(
-        lang: &'a EmbeddedLang,
-        limit: usize,
-        resolve: &'r mut dyn FnMut(&[Token]) -> Option<Arc<MacroRules>>,
-    ) -> Self {
+    fn new(lang: &'a EmbeddedLang, limit: usize, resolve: &'r mut Resolve<'r>) -> Self {
         let b = &lang.binding;
         let mut expansions = HashMap::new();
         let mut invocations: HashSet<(u16, u16)> = b.expands.iter().copied().collect();
@@ -167,6 +175,7 @@ impl<'a, 'r> Driver<'a, 'r> {
             limit,
             next_mark: 1,
             local_inner: HashSet::new(),
+            tags: HashMap::new(),
             locals: Vec::new(),
             expansions,
             invocations,
@@ -188,12 +197,13 @@ impl<'a, 'r> Driver<'a, 'r> {
         if rules.local_inner {
             self.local_inner.insert(mark);
         }
+        self.tags.insert(mark, rules.tag);
         let tokens = expand(self.lang, rules, input, mark)?;
         let parsed = tokens.parse(self.lang, entry)?;
         let mut nested = Vec::new();
         let tree = parsed.tree.clone();
         self.walk(&parsed, &tree, 0, depth, &mut nested);
-        Ok(Expansion { mark, tokens, parsed, nested })
+        Ok(Expansion { mark, tag: rules.tag, tokens, parsed, nested })
     }
 
     fn walk(
@@ -399,7 +409,12 @@ impl<'a, 'r> Driver<'a, 'r> {
                 out.push(Nested { span, path, input: args, entry, outcome: Outcome::Failed(e) });
                 return;
             }
-            None => (self.resolve)(&path),
+            None => {
+                // Who wrote the path: the tag of the macro whose expansion
+                // wrote its first token (none for the site's).
+                let writer = path.first().and_then(|t| self.tags.get(&t.mark).copied().flatten());
+                (self.resolve)(&path, writer)
+            }
         };
         let Some(rules) = rules else {
             out.push(Nested { span, path, input: args, entry, outcome: Outcome::Unresolved });

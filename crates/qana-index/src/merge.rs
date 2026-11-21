@@ -174,6 +174,7 @@ fn splice(merged: &mut Summary, at: usize, expansions: &Expansions) -> bool {
                 derives: d.derives.iter().map(|p| rooted.path(p)).collect(),
                 bounds: d.bounds.iter().map(|t| rooted.ty(t)).collect(),
                 positional: d.positional.iter().map(|t| rooted.ty(t)).collect(),
+                params: d.params.iter().map(|t| t.as_ref().map(|t| rooted.ty(t))).collect(),
                 ..d.clone()
             });
             let (name, position) = place(&placed.names[k]);

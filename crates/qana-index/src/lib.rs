@@ -56,7 +56,9 @@ pub use expanded::{
     expand_text, expanded_file, invocations, ExpandedFile, ExpandedText, InvocationAt,
 };
 pub use graph::{CrateInfo, CrateSource, UnitGraph};
-pub use members::{member_at, members, path_at, MemberAccess, MemberKind, Receiver};
+pub use members::{
+    member_at, member_at_in, members, members_in, path_at, MemberAccess, MemberKind, Receiver,
+};
 pub use merge::{merge, Expansions};
 pub use qana_mbe::{Edition, Form, TokenStream, RECURSION_LIMIT};
 pub use qana_sem::{Path, Root};
@@ -243,6 +245,12 @@ pub struct Declaration {
     /// Its positional fields' types, in order: a tuple struct's (`.0`,
     /// `.1`), a tuple variant's (`Some(T)`'s `T`).
     pub positional: Vec<TypeRef>,
+    /// Its parameters' types as written, in order (a function's): `None`
+    /// for the value a method is called on where none is written
+    /// (`&self`), so that a call through its path (`Cell::width(&c)`)
+    /// lines up with them.
+    #[serde(default)]
+    pub params: Vec<Option<TypeRef>>,
 }
 
 /// A type as a declaration writes it: read, never inferred, its paths
@@ -789,6 +797,7 @@ pub(crate) fn summarize_tree(
                     generics: place.generics.clone(),
                     bounds: place.bounds.clone(),
                     positional: place.positional.clone(),
+                    params: place.params.clone(),
                 },
                 name: symbol.selection,
                 item: symbol.span,

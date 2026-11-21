@@ -92,7 +92,11 @@ fn member(of: Receiver, name: &str, kind: MemberKind) -> Receiver {
 }
 
 fn call(of: Receiver) -> Receiver {
-    Receiver::Call(Box::new(of))
+    call_with(of, Vec::new())
+}
+
+fn call_with(of: Receiver, args: Vec<Receiver>) -> Receiver {
+    Receiver::Call { callee: Box::new(of), args }
 }
 
 fn position(of: Receiver, index: u32) -> Receiver {
@@ -131,8 +135,12 @@ fn a_members_receiver_is_what_the_file_writes_of_its_value() {
     );
     assert_eq!(
         width[5].receiver,
-        position(call(Receiver::Path(named(&["Px"]))), 1),
-        "a binding's value, a tuple struct called"
+        position(
+            call_with(Receiver::Path(named(&["Px"])), vec![Receiver::Unknown, cell_new.clone()]),
+            1
+        ),
+        "a binding's value, a tuple struct called, with what it is given (a number's type is \
+         inferred: none is written)"
     );
     assert_eq!(
         width[6].receiver,
@@ -469,6 +477,12 @@ pub mod cell {
 pub mod boxed {
     pub struct Box<T>(T);
 
+    impl<T> Box<T> {
+        pub fn new(x: T) -> Box<T> {
+            Box(x)
+        }
+    }
+
     impl<T> crate::ops::Deref for Box<T> {
         type Target = T;
         fn deref(&self) -> &T {
@@ -643,6 +657,19 @@ fn reach(v: Vec<Cell>, b: Box<Cell>, g: Grid<Cell>, mut w: Walk, a: [Cell; 2], m
     fresh().width();
     b.missing();
     todo!()
+}
+
+/// What it is given.
+fn keep<T>(value: T) -> T {
+    value
+}
+
+fn infer(c: Cell) {
+    keep(c).width();
+    keep({ let made = 1; c }).width();
+    Box::new(c).width();
+    let held = { c };
+    held.width();
 }
 ";
 
@@ -930,6 +957,10 @@ fn a_member_is_found_through_arguments_associated_types_and_derefs() {
         Err(0),
         "an Rc whose T a call infers: what it dereferences to is not known"
     );
+    assert_eq!(width(13), cell_width, "`keep(c)`: its T is what it is given, a Cell");
+    assert_eq!(width(14), cell_width, "given a block: its value, the expression it ends with");
+    assert_eq!(width(15), cell_width, "`Box::new(c)`: the impl block's T, then Box's Deref");
+    assert_eq!(width(16), cell_width, "a binding of a block, by its value");
     assert_eq!(
         typed_member(&r, deref, "missing", 0),
         Err(1),
@@ -1253,4 +1284,35 @@ fn implementations_of_a_trait_its_items_and_a_type() {
             "{container}::{name}"
         );
     }
+}
+
+/// A `$crate` the caller says is a crate is rooted at it.
+#[test]
+fn a_crate_path_is_rooted_at_the_crate_the_caller_says() {
+    let text = "fn f() {\n    $crate::make().width();\n    $crate::Cell { w: 1 }.width();\n}\n";
+    let first = text.find("$crate").unwrap() as u32;
+    let second = text.rfind("$crate").unwrap() as u32;
+    let crates = [((first, first + 6), 3), ((second, second + 6), 4)];
+    let all = qana_index::members_in(rust(), text, &crates);
+    let width = accesses(&all, "width");
+    let at =
+        |k: u32, name: &str| Path { root: Some(Root::CrateAt(k)), segments: vec![name.into()] };
+    assert_eq!(
+        width[0].receiver,
+        call(Receiver::Path(Path { root: Some(Root::CrateAt(3)), segments: vec!["make".into()] }))
+    );
+    assert_eq!(
+        width[1].receiver,
+        Receiver::Typed(TypeRef::Path {
+            path: at(4, "Cell"),
+            args: Vec::new(),
+            bindings: Vec::new()
+        })
+    );
+    let unsaid = members(rust(), text);
+    assert_eq!(
+        accesses(&unsaid, "width")[0].receiver,
+        call(Receiver::Path(Path { root: Some(Root::MacroCrate), segments: vec!["make".into()] })),
+        "unsaid, it is the macro's crate"
+    );
 }

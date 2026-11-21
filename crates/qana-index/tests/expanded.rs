@@ -46,6 +46,7 @@ fn expanded(
         of_crate: Vec::new(),
         itself: None,
         names: Vec::new(),
+        krate: None,
     };
     expand_text(rust(), &request, table).expect("it expands")
 }
@@ -364,7 +365,7 @@ fn built_in(
     file: &str,
     inv: &InvocationAt,
     macro_: BuiltinMacro,
-    names: Vec<(Path, Vec<MacroSource>)>,
+    names: Vec<(Path, Vec<MacroSource>, u32)>,
 ) -> ExpandedText {
     let request = ExpandRequest {
         definition: MacroSource::Builtin { macro_, condition: None },
@@ -378,14 +379,16 @@ fn built_in(
         of_crate: Vec::new(),
         itself: None,
         names,
+        krate: None,
     };
     expand_text(rust(), &request, &[]).expect("it expands")
 }
 
-fn format_args_named(root: Option<Root>, segments: &[&str]) -> (Path, Vec<MacroSource>) {
+fn format_args_named(root: Option<Root>, segments: &[&str]) -> (Path, Vec<MacroSource>, u32) {
     (
         Path { root, segments: segments.iter().map(|s| s.to_string()).collect() },
         vec![MacroSource::Builtin { macro_: BuiltinMacro::FormatArgs, condition: None }],
+        0,
     )
 }
 
@@ -455,9 +458,62 @@ fn a_macro_crates_path_of_several_names_is_wanted_as_written() {
         of_crate: Vec::new(),
         itself: None,
         names: std::mem::take(&mut request_names),
+        krate: None,
     };
     let made = expand_text(rust(), &request, &[]).expect("it expands");
     let file = expanded_file(rust(), ASSERTS, &[(fmt.clone(), made)]);
     let refs = file.references(ASSERTS, references(rust(), file.text(), &["n".to_string()]));
     assert_eq!(refs.iter().map(|r| r.span.0).collect::<Vec<_>>(), [at(ASSERTS, "n}", 0)]);
+}
+
+const CROSSING: &str = "fn h(a: u8) {
+    let _ = outer!(a);
+}
+";
+
+/// `outer!`, of crate 1, passes its argument to a macro its crate's root
+/// re-exports from crate 2 (`$crate::fmtish!`), whose own `$crate` is crate
+/// 2's: `$crate::inner!` there is crate 2's `inner`, not crate 1's.
+#[test]
+fn a_crate_macro_crate_is_the_crate_of_the_macro_that_wrote_it() {
+    let found = invocations(rust(), CROSSING);
+    let outer = " { ($e:expr) => { ($crate::fmtish!($e), $crate::one()) }; }";
+    let fmtish = " { ($e:expr) => { $crate::inner!($e) }; }";
+    let inner = " { ($e:expr) => { $crate::take($e) }; }";
+    let request = |names: Vec<(Path, Vec<MacroSource>, u32)>| ExpandRequest {
+        definition: text(outer),
+        site: CROSSING[found[0].span.0 as usize..found[0].span.1 as usize].to_string(),
+        site_edition: Edition::E2021,
+        input: None,
+        entry: found[0].entry.clone(),
+        mark: 1,
+        limit: RECURSION_LIMIT as u32,
+        local_inner: Vec::new(),
+        of_crate: Vec::new(),
+        itself: None,
+        names,
+        krate: Some(1),
+    };
+    let rooted =
+        |root: Root, name: &str| Path { root: Some(root), segments: vec![name.to_string()] };
+    let fmtish_named = (rooted(Root::MacroCrate, "fmtish"), vec![text(fmtish)], 2);
+
+    let first = expand_text(rust(), &request(vec![fmtish_named.clone()]), &[]).expect("expands");
+    assert_eq!(
+        first.wanted(),
+        [rooted(Root::CrateAt(2), "inner")],
+        "the `$crate` `fmtish!` (crate 2's) wrote is crate 2"
+    );
+    let names = vec![fmtish_named, (rooted(Root::CrateAt(2), "inner"), vec![text(inner)], 2)];
+    let made = expand_text(rust(), &request(names), &[]).expect("expands");
+    assert!(made.wanted().is_empty(), "{:?}", made.wanted());
+    let file = expanded_file(rust(), CROSSING, &[(found[0].clone(), made)]);
+    let refs = file.references(CROSSING, references(rust(), file.text(), &["a".to_string()]));
+    assert_eq!(refs.iter().map(|r| r.span.0).collect::<Vec<_>>(), [at(CROSSING, "a);", 0)]);
+    // Each `$crate` left in the text is its writer's crate.
+    let take = at(file.text(), "$crate::take", 0);
+    let one = at(file.text(), "$crate::one", 0);
+    assert_eq!(file.crate_at(take), Some(2), "{}", file.text());
+    assert_eq!(file.crate_at(one), Some(1));
+    assert_eq!(file.crate_at(at(file.text(), "take", 0)), None, "not a `$crate`");
 }

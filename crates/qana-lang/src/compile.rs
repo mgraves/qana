@@ -1185,6 +1185,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             let mut seen_type_ref = false;
             let mut seen_typed = false;
             let mut seen_returns = false;
+            let mut seen_params = false;
             let mut seen_derives = false;
             let mut pending_generic: Option<(u32, u32)> = None;
             let mut seen_bounds = false;
@@ -1669,6 +1670,17 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             binding.returns.push((nt, prod, ty));
                         }
                     }
+                    "params" => {
+                        // `@params(p)`: what this defines takes the
+                        // parameters written at `p`.
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@params takes the label of the parameters written".into());
+                        } else if std::mem::replace(&mut seen_params, true) {
+                            error(d, a.name_span, "duplicate @params".into());
+                        } else if let Some(params) = rule_pos_of(d, &positions, &sg, prod, &a.args[0]) {
+                            binding.params.push((nt, prod, params));
+                        }
+                    }
                     "derives" => {
                         // `@derives(path)`: the item derives what the path
                         // names.
@@ -1723,7 +1735,15 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                         let arity = |n: usize| a.args.len() == n;
                         let made = match form {
                             Some("path") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Path),
-                            Some("call") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Call),
+                            Some("call") if arity(2) => {
+                                label(d, 1).map(|callee| qana_sem::ValueForm::Call { callee, args: None })
+                            }
+                            Some("call") if arity(3) => match (label(d, 1), label(d, 2)) {
+                                (Some(callee), Some(args)) => {
+                                    Some(qana_sem::ValueForm::Call { callee, args: Some(args) })
+                                }
+                                _ => None,
+                            },
                             Some("same") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Same),
                             Some("typed") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Typed),
                             Some("struct") if arity(2) => label(d, 1).map(qana_sem::ValueForm::Struct),
@@ -1750,7 +1770,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                                 _ => None,
                             },
                             _ => {
-                                error(d, a.name_span, "@value takes `path`, `call`, `same`, `typed`, `struct` or `try` and a label; `builtin` and a type's name; or `member` and the labels of the value, the positional field if one is given, and the member".into());
+                                error(d, a.name_span, "@value takes `path`, `call`, `same`, `typed`, `struct` or `try` and a label (`call` and the label of the arguments after it, where they are given); `builtin` and a type's name; or `member` and the labels of the value, the positional field if one is given, and the member".into());
                                 None
                             }
                         };

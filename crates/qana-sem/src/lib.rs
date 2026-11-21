@@ -257,6 +257,12 @@ pub struct BindingConfig {
     /// (nt, prod, type child) — a call of what this production defines
     /// gives the type written at the `type child` (`@returns(type)`).
     pub returns: Vec<(u16, u16, usize)>,
+    /// (nt, prod, parameters child) — what this production defines takes
+    /// the parameters at the `parameters child`, in order (`@params(p)`):
+    /// each one's type is what an `@typed` inside it writes, where one
+    /// does.
+    #[serde(default)]
+    pub params: Vec<(u16, u16, usize)>,
     /// (nt, prod, path child) — the production names what the item its
     /// attributes are said of derives: the path at the `path child`
     /// (`@derives(path)`).
@@ -302,8 +308,10 @@ pub enum ValueForm {
     /// `@value(path, p)`: what the path at `p` names, as a value (a
     /// binding, a constant, a function, a unit struct).
     Path(usize),
-    /// `@value(call, c)`: what calling the value at `c` gives.
-    Call(usize),
+    /// `@value(call, c)`, or `@value(call, c, a)`: what calling the value
+    /// at `c` gives, with the arguments at `a` where they are given (each
+    /// one a value: what an `@value` says, an element of the list).
+    Call { callee: usize, args: Option<usize> },
     /// `@value(member, b, m)`, or `@value(member, b, i, m)`: the member
     /// the `@member` at `m` names, of the value at `b`; or of its
     /// positional field the token at `i` names (`x.0.len()`, where `0.` is

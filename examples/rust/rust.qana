@@ -817,7 +817,7 @@ rule use_tree_list = use_tree+ % ","
 // prefix would ask the parser to decide it is absent before it sees what
 // the `unsafe` or `const` it is reading begins (an `unsafe impl`, a
 // `const` item), which one token cannot tell.
-rule fn_def = FnDef: fn_head n:name generics_opt open:"(" params_opt close:")" r:fn_ret_opt where_opt fn_body @outline(n, function) @fold(list, open, close) @style(function, n) @def(n, hoisted) @scope @returns(r)
+rule fn_def = FnDef: fn_head n:name generics_opt open:"(" ps:params_opt close:")" r:fn_ret_opt where_opt fn_body @outline(n, function) @fold(list, open, close) @style(function, n) @def(n, hoisted) @scope @returns(r) @params(ps)
 
 rule fn_body =
   | FnBlock: block_body
@@ -1384,7 +1384,7 @@ rule raw3_part = | Raw3Text: R3_TEXT | Raw3Quote: R3_QUOTE
 
 // ---- blocks and statements ----
 
-rule block = Block: "{" inner_attrs_opt stmts_opt tail_opt "}" @fold(block) @scope
+rule block = Block: "{" inner_attrs_opt stmts_opt t:tail_opt "}" @fold(block) @scope @value(same, t)
 
 // A function's body: the same as a block.
 rule block_body = BlockBody: "{" inner_attrs_opt stmts_opt tail_opt "}" @fold(block) @scope
@@ -1418,7 +1418,7 @@ rule stmt_fragment =
   | BlockStmtFragment: outer_attrs_opt block_like
 
 // The expression a block ends with, without `;`.
-rule tail = Tail: outer_attrs_opt stmt_expr
+rule tail = Tail: outer_attrs_opt e:stmt_expr @value(same, e)
 
 rule stmt =
   | EmptyStmt:  ";"
@@ -1517,8 +1517,8 @@ rule expr_list = elem+ % ","
 // attributes may come before it (`f(#[cfg(unix)] fd)`), as the Reference
 // allows there.
 rule elem =
-  | Elem:     expr
-  | AttrElem: outer_attrs expr
+  | Elem:     e:expr @value(same, e)
+  | AttrElem: outer_attrs e:expr @value(same, e)
 
 rule outer_attrs = outer_attr+
 
@@ -1589,7 +1589,7 @@ rule expr =
   | BreakLabelValue: "break" l:lifetime expr @precedence("return") @style(label, l) @ref(l) @ns(label)
   | Member:      b:expr DOT m:member @precedence(DOT) @value(member, b, m)
   | SplitMember: b:expr DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
-  | Call:        c:expr open:"(" args_opt ")" @fold(list, open) @style(function, c) @value(call, c)
+  | Call:        c:expr open:"(" a:args_opt ")" @fold(list, open) @style(function, c) @value(call, c, a)
   | Index:       expr open:"[" expr "]" @fold(list, open)
   | Try:         e:expr QMARK @value(try, e)
   | Neg:         MINUS expr @precedence(BANG)
@@ -1658,7 +1658,7 @@ rule cond =
   | CBreakLabelValue: "break" l:lifetime cond @precedence("return") @style(label, l) @ref(l) @ns(label)
   | CMember:      b:cond DOT m:member @precedence(DOT) @value(member, b, m)
   | CSplitMember: b:cond DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
-  | CCall:        c:cond open:"(" args_opt ")" @fold(list, open) @style(function, c) @value(call, c)
+  | CCall:        c:cond open:"(" a:args_opt ")" @fold(list, open) @style(function, c) @value(call, c, a)
   | CIndex:       cond open:"[" expr "]" @fold(list, open)
   | CTry:         e:cond QMARK @value(try, e)
   | CNeg:         MINUS cond @precedence(BANG)
@@ -1723,7 +1723,7 @@ rule stmt_expr =
   | SBreakLabelValue: "break" l:lifetime expr @precedence("return") @style(label, l) @ref(l) @ns(label)
   | SMember:      b:stmt_expr DOT m:member @precedence(DOT) @value(member, b, m)
   | SSplitMember: b:stmt_expr DOT i:FLOAT_DOT m:member @precedence(DOT) @value(member, b, i, m)
-  | SCall:        c:stmt_expr open:"(" args_opt ")" @fold(list, open) @style(function, c) @value(call, c)
+  | SCall:        c:stmt_expr open:"(" a:args_opt ")" @fold(list, open) @style(function, c) @value(call, c, a)
   | SIndex:       stmt_expr open:"[" expr "]" @fold(list, open)
   | STry:         e:stmt_expr QMARK @value(try, e)
   | SNeg:         MINUS expr @precedence(BANG)

@@ -83,8 +83,9 @@ pub enum Receiver {
     /// an enum's unit variant. Called, a function, a tuple struct or a
     /// tuple variant.
     Path(Path),
-    /// What calling a value gives.
-    Call(Box<Receiver>),
+    /// What calling a value gives, given what is passed (each argument's
+    /// value, in order).
+    Call { callee: Box<Receiver>, args: Vec<Receiver> },
     /// A member of a value.
     Member { of: Box<Receiver>, name: String, kind: MemberKind },
     /// A positional field of a value (`.0`).
@@ -101,6 +102,18 @@ pub enum Receiver {
 /// The member accesses in `text`, a file of `lang`'s language, in the
 /// text's order.
 pub fn members(lang: &EmbeddedLang, text: &str) -> Vec<MemberAccess> {
+    members_in(lang, text, &[])
+}
+
+/// [`members`], of a text in which each `$crate` of `crates` (its span,
+/// sorted) is a crate the caller numbers: a path that begins with one is
+/// rooted at it ([`Root::CrateAt`]), as a file read as expanded says them
+/// ([`crate::ExpandedFile::crates`]).
+pub fn members_in(
+    lang: &EmbeddedLang,
+    text: &str,
+    crates: &[((u32, u32), u32)],
+) -> Vec<MemberAccess> {
     let session = lang.session(text);
     let tree = session.tree().expect("parsing is total").clone();
     let mut db = SemDb::new(lang.binding.clone());
@@ -109,7 +122,7 @@ pub fn members(lang: &EmbeddedLang, text: &str) -> Vec<MemberAccess> {
     db.set_tree(URI, tree.clone());
     let symbols = db.symbols(URI);
     let resolutions = db.resolve(URI);
-    let reader = Reader::new(lang, &tree, &symbols, &resolutions);
+    let reader = Reader::new(lang, &tree, &symbols, &resolutions).with_crates(crates);
     let mut found = Vec::new();
     reader.collect(&tree, 0, &Cx::default(), &mut found);
     found.sort_by_key(|a| a.span);
@@ -118,6 +131,16 @@ pub fn members(lang: &EmbeddedLang, text: &str) -> Vec<MemberAccess> {
 
 /// The member access whose name holds byte `offset` of `doc`, if one does.
 pub fn member_at(doc: &mut LiveDoc, offset: u32) -> Option<MemberAccess> {
+    member_at_in(doc, offset, &[])
+}
+
+/// [`member_at`], in a document in which each `$crate` of `crates` is a
+/// crate the caller numbers (see [`members_in`]).
+pub fn member_at_in(
+    doc: &mut LiveDoc,
+    offset: u32,
+    crates: &[((u32, u32), u32)],
+) -> Option<MemberAccess> {
     // Whether a member's name is there, read on the way down to it, before
     // the file and its binding are read as a whole.
     let (lang, tree) = doc.tree()?;
@@ -125,7 +148,7 @@ pub fn member_at(doc: &mut LiveDoc, offset: u32) -> Option<MemberAccess> {
         return None;
     }
     let (lang, tree, symbols, resolutions) = doc.bound()?;
-    let reader = Reader::new(lang, tree, &symbols, &resolutions);
+    let reader = Reader::new(lang, tree, &symbols, &resolutions).with_crates(crates);
     let mut cx = Cx::default();
     let mut node: &GreenNode = tree;
     let mut base = 0;
@@ -229,6 +252,9 @@ struct Reader<'a> {
     bound: HashMap<(u32, u32), Option<(u32, u32)>>,
     /// The references' name spans, sorted.
     refs: Vec<(u32, u32)>,
+    /// The crate each `$crate` is, by its span, sorted, where the caller
+    /// says ([`members_in`]).
+    crates: &'a [((u32, u32), u32)],
 }
 
 impl<'a> Reader<'a> {
@@ -257,7 +283,36 @@ impl<'a> Reader<'a> {
             .collect();
         let mut refs: Vec<(u32, u32)> = read.refs.keys().copied().collect();
         refs.sort();
-        Self { g: Grammar::new(&lang.binding, &lang.outline), read, declared, bound, refs }
+        Self {
+            g: Grammar::new(&lang.binding, &lang.outline),
+            read,
+            declared,
+            bound,
+            refs,
+            crates: &[],
+        }
+    }
+
+    /// The same reader, of a text whose `$crate`s are `crates`.
+    fn with_crates(mut self, crates: &'a [((u32, u32), u32)]) -> Self {
+        self.crates = crates;
+        self
+    }
+
+    /// `path`, written within bytes `within` (its node, from before its
+    /// first token to its end): rooted at the crate its `$crate` is, the
+    /// first the reader was told of there.
+    fn in_crate(&self, path: Path, within: (u32, u32)) -> Path {
+        if path.root != Some(Root::MacroCrate) {
+            return path;
+        }
+        let k = self.crates.partition_point(|&((start, _), _)| start < within.0);
+        match self.crates.get(k) {
+            Some(&((start, _), krate)) if start < within.1 => {
+                Path { root: Some(Root::CrateAt(krate)), segments: path.segments }
+            }
+            _ => path,
+        }
     }
 
     /// The context `n`'s children stand in.
@@ -393,8 +448,15 @@ impl<'a> Reader<'a> {
                 Some((m, at)) => self.path_value(m, at, cx, visiting),
                 None => Receiver::Unknown,
             },
-            ValueForm::Call(c) => match child(c) {
-                Some((m, at)) => Receiver::Call(Box::new(self.value(m, at, cx, visiting))),
+            ValueForm::Call { callee, args } => match child(callee) {
+                Some((m, at)) => {
+                    let callee = Box::new(self.value(m, at, cx, visiting));
+                    let mut values = Vec::new();
+                    if let Some((a, at)) = args.and_then(child) {
+                        self.arguments(a, at, cx, visiting, &mut values);
+                    }
+                    Receiver::Call { callee, args: values }
+                }
                 None => Receiver::Unknown,
             },
             ValueForm::Member { base: of, position, member } => {
@@ -447,10 +509,37 @@ impl<'a> Reader<'a> {
             },
             ValueForm::Struct(p) => match Path::of_child(n, p, self.g.cfg) {
                 Some(path) => {
+                    let within = child(p).map_or((base, base), |(m, at)| (at, at + m.width));
+                    let path = self.in_crate(path, within);
                     typed(&TypeRef::Path { path, args: Vec::new(), bindings: Vec::new() }, cx)
                 }
                 None => Receiver::Unknown,
             },
+        }
+    }
+
+    /// The values of a call's arguments, under `n` (starting at `base`),
+    /// into `out`, in order: each node with a value of its own (an element
+    /// of the list) is one; any other is read through.
+    fn arguments(
+        &self,
+        n: &GreenNode,
+        base: u32,
+        cx: &Cx,
+        visiting: &mut Vec<(u32, u32)>,
+        out: &mut Vec<Receiver>,
+    ) {
+        let roles = self.g.roles_of(n);
+        if roles.is_some_and(|r| r.value.is_some() || r.builtin.is_some()) {
+            out.push(self.value(n, base, cx, visiting));
+            return;
+        }
+        let mut at = base;
+        for ch in &n.children {
+            if let GreenChild::Node(m) = ch {
+                self.arguments(m, at, cx, visiting, out);
+            }
+            at += ch.width();
         }
     }
 
@@ -479,7 +568,7 @@ impl<'a> Reader<'a> {
             }
         }
         match place.path.as_ref().and_then(|path| self_path(path, cx.self_type.as_deref())) {
-            Some(path) => Receiver::Path(path),
+            Some(path) => Receiver::Path(self.in_crate(path, (base, end))),
             None => Receiver::Unknown,
         }
     }

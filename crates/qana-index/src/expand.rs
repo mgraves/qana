@@ -81,13 +81,22 @@ pub struct ExpandRequest {
     pub itself: Option<(String, Vec<MacroSource>)>,
     /// For [`expand_text`](crate::expand_text): the macros other paths that
     /// its expansions' invocations write name, as the index found them
-    /// (a `$crate` path in the table's crate, rooted at
-    /// [`Root::MacroCrate`]; any other where the request's invocation
-    /// stands, as rustc looks a macro's name up where the invocation is),
-    /// one by each answer: those an earlier expansion of the request said
-    /// it wanted ([`ExpandedText::wanted`](crate::ExpandedText::wanted)).
+    /// (a `$crate` path in the crate of the macro that wrote it: rooted at
+    /// [`Root::MacroCrate`] for the request's macro's crate, at
+    /// [`Root::CrateAt`] for another's; any other where the request's
+    /// invocation stands, as rustc looks a macro's name up where the
+    /// invocation is), one by each answer, with the crate that defines them:
+    /// those an earlier expansion of the request said it wanted
+    /// ([`ExpandedText::wanted`](crate::ExpandedText::wanted)).
     #[serde(default)]
-    pub names: Vec<(Path, Vec<MacroSource>)>,
+    pub names: Vec<(Path, Vec<MacroSource>, u32)>,
+    /// For [`expand_text`](crate::expand_text): the crate that defines the
+    /// request's macro (and the table's), by the caller's numbering, which
+    /// the names' crates are in too. With it, a `$crate` a macro of another
+    /// crate wrote is that crate's ([`Root::CrateAt`]); without it, every
+    /// `$crate` is the table's crate.
+    #[serde(default)]
+    pub krate: Option<u32>,
 }
 
 /// A macro, as a worker is given it.
@@ -134,15 +143,21 @@ pub enum BuiltinMacro {
     StandIn(String),
 }
 
-/// `source`'s rules, as `lang`'s macros expand: a definition's arms, read;
-/// a built-in's (`format_args!`'s reading, a stand-in's arms). `cfg_select!`
-/// has none: its expansion is all its arms, which no rules write.
+/// `source`'s rules, as `lang`'s macros expand, tagged `tag` where one is
+/// given ([`MacroRules::tagged`]): a definition's arms, read; a built-in's
+/// (`format_args!`'s reading, a stand-in's arms). `cfg_select!` has none:
+/// its expansion is all its arms, which no rules write.
 pub(crate) fn rules_of(
     lang: &EmbeddedLang,
     source: &MacroSource,
+    tag: Option<u32>,
 ) -> Result<Arc<MacroRules>, String> {
     let local = |rules: MacroRules, local_inner: bool| {
-        Arc::new(if local_inner { rules.local_inner() } else { rules })
+        let rules = if local_inner { rules.local_inner() } else { rules };
+        Arc::new(match tag {
+            Some(tag) => rules.tagged(tag),
+            None => rules,
+        })
     };
     match source {
         MacroSource::Text { body, form, edition, local_inner } => {
@@ -155,12 +170,12 @@ pub(crate) fn rules_of(
             .map(|rules| local(rules, *local_inner))
             .map_err(|e| e.message),
         MacroSource::Builtin { macro_: BuiltinMacro::FormatArgs, .. } => {
-            Ok(Arc::new(MacroRules::format_args()))
+            Ok(local(MacroRules::format_args(), false))
         }
         MacroSource::Builtin { macro_: BuiltinMacro::StandIn(body), .. } => {
             TokenStream::lex(lang, body, 1, 0, Edition::E2021)
                 .and_then(|body| MacroRules::read(&body, Form::MacroRules))
-                .map(Arc::new)
+                .map(|rules| local(rules, false))
                 .map_err(|e| format!("the model's stand-in does not read: {}", e.message))
         }
         MacroSource::Builtin { macro_: BuiltinMacro::CfgSelect, .. } => {
@@ -520,7 +535,7 @@ impl Job<'_> {
         if let Some(read) = self.rules.get(&which) {
             return read.clone();
         }
-        let read = rules_of(self.lang, definition);
+        let read = rules_of(self.lang, definition, None);
         self.rules.insert(which, read.clone());
         read
     }

@@ -246,15 +246,17 @@ impl Resolver {
                 }
             }
             Receiver::Path(_) => {}
-            Receiver::Call(callee) => {
+            Receiver::Call { callee, args } => {
                 // Calling a path; what calling any other value gives (a
                 // closure's, a field's) is not written, nor what a generic
-                // parameter's function gives.
+                // parameter's function gives. A function's generic
+                // parameters are what its arguments say they are.
                 if let Receiver::Path(path) = callee.as_ref() {
                     if !from_parameter(scope, path) {
                         for d in self.declarations_at(scope.at, path) {
                             let self_type = self.path_self(scope, path, d, depth + 1);
-                            types.extend(self.call_of(d, self_type, depth + 1));
+                            let bound = self.inferred(scope, d, args, depth + 1);
+                            types.extend(self.call_of(d, self_type, &bound, depth + 1));
                         }
                     }
                 }
@@ -313,13 +315,19 @@ impl Resolver {
     /// What calling declaration `d` gives: a function's written return
     /// type, `Self` read as `self_type`; a tuple struct; a tuple variant,
     /// of its enum.
-    fn call_of(&self, d: (u32, u32), self_type: Vec<Ty>, depth: usize) -> Vec<Ty> {
+    fn call_of(
+        &self,
+        d: (u32, u32),
+        self_type: Vec<Ty>,
+        bound: &HashMap<String, Vec<Ty>>,
+        depth: usize,
+    ) -> Vec<Ty> {
         let declaration = self.declaration(d);
         match declaration.kind.as_str() {
             FUNCTION => {
                 let Some(written) = &declaration.returns else { return Vec::new() };
                 let mut types = Vec::new();
-                for at in self.scopes_of(d, self_type, &HashMap::new()) {
+                for at in self.scopes_of(d, self_type, bound) {
                     types.extend(self.types_of(&at, written, depth + 1));
                 }
                 types
@@ -330,6 +338,58 @@ impl Resolver {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// What calling function `d` with `args`, written where `scope` is,
+    /// says its generic parameters are (its own, its impl block's, its
+    /// owner's): each parameter's written type matched to what its
+    /// argument's value is ([`Self::unify`]: `must_use<T>(value: T)` given
+    /// a `String` says `T` is one; `new(x: T)` in `impl<T> Box<T>`, given a
+    /// `Cell`, says `T` is a `Cell`).
+    fn inferred(
+        &self,
+        scope: &Rc<Scope>,
+        d: (u32, u32),
+        args: &[Receiver],
+        depth: usize,
+    ) -> HashMap<String, Vec<Ty>> {
+        let mut bound = HashMap::new();
+        let declaration = self.declaration(d);
+        let names = self.generic_names(d);
+        if declaration.kind != FUNCTION || names.is_empty() || args.is_empty() {
+            return bound;
+        }
+        let places = self.graph.places(&self.files[d.0 as usize]);
+        for (pattern, arg) in declaration.params.iter().zip(args) {
+            let Some(pattern) = pattern else { continue };
+            for ty in self.value_types(scope, arg, depth + 1) {
+                for &(krate, _) in &places {
+                    let at = Written {
+                        at: Module { krate, file: d.0, unit: declaration.unit },
+                        alias: None,
+                    };
+                    self.unify(pattern, &ty, &names, &at, &mut bound, depth + 1);
+                }
+            }
+        }
+        bound
+    }
+
+    /// The names of the generic parameters declaration `d` is read with:
+    /// its own, its impl block's, its owner's.
+    fn generic_names(&self, d: (u32, u32)) -> Vec<String> {
+        let declaration = self.declaration(d);
+        let summary = &self.summaries[d.0 as usize];
+        let mut names = declaration.generics.clone();
+        if let Some(block) = declaration.impl_block {
+            if let Some(of) = summary.offers().impls().get(block as usize) {
+                names.extend(of.generics.iter().cloned());
+            }
+        }
+        if let Some(owner) = self.owner_of(d) {
+            names.extend(self.declaration(owner).generics.iter().cloned());
+        }
+        names
     }
 
     /// What `Self` is in declaration `d`, which `path`, written where
@@ -1587,16 +1647,7 @@ impl Resolver {
         bound: &HashMap<String, Vec<Ty>>,
     ) -> Vec<Rc<Scope>> {
         let declaration = self.declaration(d);
-        let summary = &self.summaries[d.0 as usize];
-        let mut names = declaration.generics.clone();
-        if let Some(block) = declaration.impl_block {
-            if let Some(of) = summary.offers().impls().get(block as usize) {
-                names.extend(of.generics.iter().cloned());
-            }
-        }
-        if let Some(owner) = self.owner_of(d) {
-            names.extend(self.declaration(owner).generics.iter().cloned());
-        }
+        let names = self.generic_names(d);
         let generics: Vec<(String, Vec<Ty>)> = names
             .into_iter()
             .map(|name| {

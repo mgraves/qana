@@ -31,6 +31,8 @@ pub struct MacroRules {
     /// Whether it is the compiler's `format_args!`, which has no arms: its
     /// expansion is what it reads ([`MacroRules::format_args`]).
     pub(crate) format_args: bool,
+    /// What its caller says it is ([`MacroRules::tagged`]).
+    pub(crate) tag: Option<u32>,
 }
 
 impl MacroRules {
@@ -49,6 +51,7 @@ impl MacroRules {
             form: Form::MacroRules,
             local_inner: false,
             format_args: true,
+            tag: None,
         }
     }
 
@@ -59,6 +62,20 @@ impl MacroRules {
     pub fn local_inner(mut self) -> MacroRules {
         self.local_inner = true;
         self
+    }
+
+    /// The same macro, which its caller says is `tag` (the crate that
+    /// defines it, say): the driver says, of each path an expansion writes,
+    /// the tag of the macro whose expansion wrote it ([`crate::expand_nested`]),
+    /// and of each expansion, its macro's ([`crate::Expansion::tag`]).
+    pub fn tagged(mut self, tag: u32) -> MacroRules {
+        self.tag = Some(tag);
+        self
+    }
+
+    /// What its caller said it is ([`MacroRules::tagged`]).
+    pub fn tag(&self) -> Option<u32> {
+        self.tag
     }
 
     /// Whether it was exported with `local_inner_macros`
@@ -189,7 +206,7 @@ impl MacroRules {
         if arms.is_empty() {
             return Err(Error::new("macros must contain at least one rule", first_origin));
         }
-        Ok(MacroRules { arms, form, local_inner: false, format_args: false })
+        Ok(MacroRules { arms, form, local_inner: false, format_args: false, tag: None })
     }
 
     /// The syntax it was written in.

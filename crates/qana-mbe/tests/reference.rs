@@ -35,7 +35,7 @@ fn find<'a>(nested: &'a [Nested], name: &str) -> Option<&'a Expansion> {
     None
 }
 
-fn no_macros(_: &[Token]) -> Option<std::sync::Arc<MacroRules>> {
+fn no_macros(_: &[Token], _: Option<u32>) -> Option<std::sync::Arc<MacroRules>> {
     None
 }
 
@@ -154,7 +154,7 @@ fn a_local_inner_macros_macro_names_its_helpers_as_its_crate_does() {
     let program = include_str!("fixtures/reference/local_inner.rs");
     let exported = definition(program, 1, "macro_rules!", "helper", Form::MacroRules);
     let mut asked: Vec<String> = Vec::new();
-    let mut resolve = |path: &[Token]| {
+    let mut resolve = |path: &[Token], _: Option<u32>| {
         let path = path.iter().map(|t| t.text.to_string()).collect::<Vec<_>>().join(" ");
         asked.push(path.clone());
         (path == "$crate :: helper").then(|| exported.clone())
@@ -244,8 +244,9 @@ fn an_expansion_made_deep_nests_only_to_the_limit() {
         .expect("deep!"),
     );
     let at = |n: usize| {
-        let mut resolve =
-            |path: &[Token]| path.last().is_some_and(|t| &*t.text == "deep").then(|| rules.clone());
+        let mut resolve = |path: &[Token], _: Option<u32>| {
+            path.last().is_some_and(|t| &*t.text == "deep").then(|| rules.clone())
+        };
         let input = lex(&vec!["x"; n].join(" "), 0);
         let top =
             expand_nested(lang(), &rules, &input, "attrs_expr", 101, RECURSION_LIMIT, &mut resolve)

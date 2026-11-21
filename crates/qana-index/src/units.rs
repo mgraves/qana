@@ -64,6 +64,8 @@ pub(crate) struct Roles {
     pub(crate) typed: Option<(usize, usize)>,
     /// `@returns(type)`: the type child.
     pub(crate) returns: Option<usize>,
+    /// `@params(p)`: the parameters child.
+    pub(crate) params: Option<usize>,
     /// `@derives(path)`: the path child.
     pub(crate) derives: Option<usize>,
     /// `@generic`: what it defines is a generic parameter.
@@ -159,6 +161,9 @@ fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Ro
     for &(nt, prod, ty) in &cfg.returns {
         map.entry((nt, prod)).or_default().returns = Some(ty);
     }
+    for &(nt, prod, params) in &cfg.params {
+        map.entry((nt, prod)).or_default().params = Some(params);
+    }
     for &(nt, prod, path) in &cfg.derives {
         map.entry((nt, prod)).or_default().derives = Some(path);
     }
@@ -241,6 +246,9 @@ pub(crate) struct DefPlace {
     pub bounds: Vec<TypeRef>,
     /// Its positional fields' types, in order (`@positional`).
     pub positional: Vec<TypeRef>,
+    /// Its parameters' types, in order (`@params`): `None` for the value
+    /// a method is called on where no type is written (`&self`).
+    pub params: Vec<Option<TypeRef>>,
     /// The value it holds, as written (`@inits`): the node, and where it
     /// starts.
     pub init: Option<(Arc<GreenNode>, u32)>,
@@ -575,6 +583,34 @@ impl<'a> Grammar<'a> {
     /// The types of the positional fields listed at child `k` of `n`: one
     /// for each element of the first list there, the type it writes, in
     /// order. No list (none written) is no fields.
+    /// The parameters written at child `k` of `n` (`@params`), in order:
+    /// each one's type where an `@typed` writes it; `None` for the value a
+    /// method is called on (`@self_value`), which writes none.
+    pub(crate) fn params_in(&self, n: &GreenNode, k: usize) -> Vec<Option<TypeRef>> {
+        let mut out = Vec::new();
+        if let Some(node) = symbol_child(n, k) {
+            self.params_under(node, &mut out);
+        }
+        out
+    }
+
+    fn params_under(&self, n: &GreenNode, out: &mut Vec<Option<TypeRef>>) {
+        let roles = self.roles_of(n);
+        if let Some((_, ty)) = roles.and_then(|r| r.typed) {
+            out.push(self.type_in(n, ty));
+            return;
+        }
+        if roles.is_some_and(|r| r.self_value) {
+            out.push(None);
+            return;
+        }
+        for ch in &n.children {
+            if let GreenChild::Node(m) = ch {
+                self.params_under(m, out);
+            }
+        }
+    }
+
     fn positional_in(&self, n: &GreenNode, k: usize) -> Vec<TypeRef> {
         let Some(mut node) = symbol_child(n, k) else { return Vec::new() };
         while node.prod != LIST_PROD && node.prod != RUN_PROD {
@@ -781,6 +817,7 @@ impl Walk<'_> {
                 let bounds = roles.bounds.map(|b| self.g.traits_in(n, b)).unwrap_or_default();
                 let positional =
                     roles.positional.map(|f| self.g.positional_in(n, f)).unwrap_or_default();
+                let params = roles.params.map(|p| self.g.params_in(n, p)).unwrap_or_default();
                 if let (true, Some(&scope)) = (roles.generic, cx.scopes.last()) {
                     self.generics.entry(scope).or_default().push(name.clone());
                 }
@@ -797,6 +834,7 @@ impl Walk<'_> {
                         generics: Vec::new(),
                         bounds,
                         positional,
+                        params,
                         init,
                         self_value: roles.self_value,
                     },

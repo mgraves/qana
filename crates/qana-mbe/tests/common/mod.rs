@@ -18,6 +18,10 @@ use qana_mbe::{
 
 const GRAMMAR: &str = include_str!("../../../../examples/rust/rust.qana");
 
+/// What a macro's path names, as the driver asks it: the path's tokens and
+/// the tag of the macro that wrote the path.
+type Resolve<'r> = dyn FnMut(&[Token], Option<u32>) -> Option<Arc<MacroRules>> + 'r;
+
 pub fn lang() -> &'static EmbeddedLang {
     static LANG: OnceLock<EmbeddedLang> = OnceLock::new();
     LANG.get_or_init(|| EmbeddedLang::from_qana_source(GRAMMAR).unwrap_or_else(|d| panic!("{d:?}")))
@@ -184,7 +188,8 @@ pub fn check_in(
     unresolved: &[&str],
     failures: &[(&str, &str)],
 ) -> (usize, Vec<Nested>) {
-    let mut resolve = |path: &[Token]| path.last().and_then(|t| defs.get(&*t.text).cloned());
+    let mut resolve =
+        |path: &[Token], _: Option<u32>| path.last().and_then(|t| defs.get(&*t.text).cloned());
     check_with(program, edition, &mut resolve, steps, inside_builtins, unresolved, failures)
 }
 
@@ -193,7 +198,7 @@ pub fn check_in(
 pub fn check_with(
     program: &str,
     edition: Edition,
-    resolve: &mut dyn FnMut(&[Token]) -> Option<Arc<MacroRules>>,
+    resolve: &mut Resolve<'_>,
     steps: Vec<Step>,
     inside_builtins: &[&str],
     unresolved: &[&str],

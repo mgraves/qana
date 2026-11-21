@@ -103,6 +103,11 @@ pub struct ExpandedText {
     /// once: those no macro the job was given names.
     #[serde(default)]
     wanted: Vec<Path>,
+    /// Each `$crate` token's span in `text` and the crate it is (the crate
+    /// of the macro that wrote it), where the request said its macros'
+    /// crates ([`ExpandRequest::krate`]).
+    #[serde(default)]
+    crates: Vec<((u32, u32), u32)>,
 }
 
 /// A token of an [`ExpandedText`]: its span in the text; where the site
@@ -206,31 +211,43 @@ pub fn expand_text(
         Some(input) => input.clone(),
         None => site.invocation().ok_or("the site is no invocation")?.1,
     };
-    // The table's paths, then the request's names: each path's macros,
-    // the first of them read once.
+    // The table's paths (its crate's, the request's macro's), then the
+    // request's names (each with its crate): each path's macros, the first
+    // of them read once, tagged with its crate.
+    let krate = request.krate;
     let mut by_path: HashMap<&Path, usize> = HashMap::new();
-    let known: Vec<&(Path, Vec<MacroSource>)> = table.iter().chain(&request.names).collect();
-    for (k, (path, _)) in known.iter().enumerate() {
+    let known: Vec<(&Path, &[MacroSource], Option<u32>)> = table
+        .iter()
+        .map(|(path, macros)| (path, macros.as_slice(), krate))
+        .chain(request.names.iter().map(|(path, macros, k)| (path, macros.as_slice(), Some(*k))))
+        .collect();
+    for (k, (path, _, _)) in known.iter().enumerate() {
         by_path.entry(path).or_insert(k);
     }
     let itself = request.itself.as_ref();
     let mut read: HashMap<usize, Option<Arc<MacroRules>>> = HashMap::new();
-    let mut rules_once = |which: usize, source: &MacroSource| -> Option<Arc<MacroRules>> {
-        read.entry(which).or_insert_with(|| rules_of(lang, source).ok()).clone()
-    };
-    let mut resolve = |tokens: &[Token]| -> Option<Arc<MacroRules>> {
-        let path = path_of(tokens)?;
+    let mut rules_once =
+        |which: usize, source: &MacroSource, tag: Option<u32>| -> Option<Arc<MacroRules>> {
+            read.entry(which).or_insert_with(|| rules_of(lang, source, tag).ok()).clone()
+        };
+    let mut resolve = |tokens: &[Token], writer: Option<u32>| -> Option<Arc<MacroRules>> {
+        let path = in_crate(path_of(tokens)?, writer, krate);
         // The invocation's own name alone names its macro, whoever wrote it.
         if let (None, [name], Some((own, macros))) = (path.root, path.segments.as_slice(), itself) {
             if name == own {
-                return rules_once(usize::MAX, macros.first()?);
+                return rules_once(usize::MAX, macros.first()?, krate);
             }
         }
         let &k = by_path.get(&path)?;
-        rules_once(k, known[k].1.first()?)
+        rules_once(k, known[k].1.first()?, known[k].2)
     };
     let limit = request.limit as usize;
-    let mut out = ExpandedText { text: String::new(), tokens: Vec::new(), wanted: Vec::new() };
+    let mut out = ExpandedText {
+        text: String::new(),
+        tokens: Vec::new(),
+        wanted: Vec::new(),
+        crates: Vec::new(),
+    };
     match &request.definition {
         MacroSource::Text { .. }
         | MacroSource::Tokens { .. }
@@ -238,7 +255,7 @@ pub fn expand_text(
             macro_: BuiltinMacro::FormatArgs | BuiltinMacro::StandIn(_),
             ..
         } => {
-            let rules = rules_of(lang, &request.definition)?;
+            let rules = rules_of(lang, &request.definition, krate)?;
             let expansion = qana_mbe::expand_nested(
                 lang,
                 &rules,
@@ -249,7 +266,9 @@ pub fn expand_text(
                 &mut resolve,
             )
             .map_err(|e| e.message)?;
-            render(&expansion.parsed, &expansion.nested, &mut out);
+            let mut tags = HashMap::from([(expansion.mark, expansion.tag)]);
+            tags_of(&expansion.nested, &mut tags);
+            render(&expansion.parsed, &expansion.nested, (&tags, krate), &mut out);
         }
         MacroSource::Builtin { macro_: BuiltinMacro::CfgSelect, .. } => {
             let arms = input.cfg_select_arms().map_err(|e| e.message)?;
@@ -257,18 +276,50 @@ pub fn expand_text(
             let (parsed, nested) =
                 qana_mbe::expand_all(lang, &stream, &request.entry, limit, &mut resolve)
                     .map_err(|e| e.message)?;
-            render(&parsed, &nested, &mut out);
+            let mut tags = HashMap::new();
+            tags_of(&nested, &mut tags);
+            render(&parsed, &nested, (&tags, krate), &mut out);
         }
     }
     Ok(out)
 }
 
+/// `path`, written by a macro of crate `writer`, where the request's macro
+/// is of crate `krate`: a `$crate` path of another crate is rooted at it.
+fn in_crate(path: Path, writer: Option<u32>, krate: Option<u32>) -> Path {
+    match (path.root, writer, krate) {
+        (Some(Root::MacroCrate), Some(w), Some(k)) if w != k => {
+            Path { root: Some(Root::CrateAt(w)), segments: path.segments }
+        }
+        _ => path,
+    }
+}
+
+/// Each expansion's macro's tag (its crate), by its mark, in `nested` and
+/// below it.
+fn tags_of(nested: &[Nested], tags: &mut HashMap<u32, Option<u32>>) {
+    for n in nested {
+        if let Outcome::Expanded(e) = &n.outcome {
+            tags.insert(e.mark, e.tag);
+            tags_of(&e.nested, tags);
+        }
+    }
+}
+
+/// What rendering reads: each expansion's macro's crate by its mark, and
+/// the request's macro's crate.
+type Writers<'a> = (&'a HashMap<u32, Option<u32>>, Option<u32>);
+
 /// `parsed`'s text into `out`, each expanded invocation of `nested` in its
 /// place (rendered the same way), the rest as written; the paths of those
-/// nothing named, wanted.
-fn render(parsed: &Parsed, nested: &[Nested], out: &mut ExpandedText) {
+/// nothing named, wanted (a `$crate` path in the crate of the macro that
+/// wrote it).
+fn render(parsed: &Parsed, nested: &[Nested], writers: Writers, out: &mut ExpandedText) {
+    let (tags, krate) = writers;
     for n in nested {
         if let (Outcome::Unresolved, Some(path)) = (&n.outcome, path_of(&n.path)) {
+            let writer = n.path.first().and_then(|t| tags.get(&t.mark).copied().flatten());
+            let path = in_crate(path, writer, krate);
             if !out.wanted.contains(&path) {
                 out.wanted.push(path);
             }
@@ -284,22 +335,28 @@ fn render(parsed: &Parsed, nested: &[Nested], out: &mut ExpandedText) {
     expanded.sort_by_key(|(n, _)| n.span.0);
     let mut at = 0u32;
     for (n, e) in expanded {
-        copy(parsed, (at, n.span.0), out);
+        copy(parsed, (at, n.span.0), tags, out);
         let wrap = parenthesized(&n.entry);
         if wrap {
             out.text.push('(');
         }
-        render(&e.parsed, &e.nested, out);
+        render(&e.parsed, &e.nested, writers, out);
         if wrap {
             out.text.push(')');
         }
         at = n.span.1;
     }
-    copy(parsed, (at, parsed.text.len() as u32), out);
+    copy(parsed, (at, parsed.text.len() as u32), tags, out);
 }
 
-/// The text of `parsed` within `span`, and its tokens, into `out`.
-fn copy(parsed: &Parsed, span: (u32, u32), out: &mut ExpandedText) {
+/// The text of `parsed` within `span`, and its tokens, into `out`: each
+/// `$crate` with the crate of the macro that wrote it, by `tags`.
+fn copy(
+    parsed: &Parsed,
+    span: (u32, u32),
+    tags: &HashMap<u32, Option<u32>>,
+    out: &mut ExpandedText,
+) {
     let Some(piece) = parsed.text.get(span.0 as usize..span.1 as usize) else { return };
     let base = out.text.len() as u32;
     out.text.push_str(piece);
@@ -309,6 +366,11 @@ fn copy(parsed: &Parsed, span: (u32, u32), out: &mut ExpandedText) {
             let written = (o.source == 0).then_some((o.start, o.end));
             let at = (base + s.span.0 - span.0, base + s.span.1 - span.0);
             out.tokens.push((at, written, s.token.mark));
+            if &*s.token.text == "$crate" {
+                if let Some(krate) = tags.get(&s.token.mark).copied().flatten() {
+                    out.crates.push((at, krate));
+                }
+            }
         }
     }
 }
@@ -328,6 +390,10 @@ pub struct ExpandedFile {
     /// The invocations the file writes inside another's arguments that
     /// the text holds unexpanded (see [`inner`](ExpandedFile::inner)).
     inner: Vec<InvocationAt>,
+    /// Each `$crate` the text holds, at its span there, and the crate it is
+    /// (the crate of the macro that wrote it).
+    #[serde(default)]
+    crates: Vec<((u32, u32), u32)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -426,6 +492,8 @@ struct Splicer<'a> {
     renames: &'a Renames,
     out: String,
     written_by: HashMap<u32, (usize, (u32, u32), u32)>,
+    /// Each `$crate` put in, at its span in `out`, and its crate.
+    crates: Vec<((u32, u32), u32)>,
     /// How many expansions have been put in.
     put: usize,
 }
@@ -445,6 +513,7 @@ fn splice(
         renames,
         out: String::with_capacity(text.len()),
         written_by: HashMap::new(),
+        crates: Vec::new(),
         put: 0,
     };
     let mut copied = Vec::new();
@@ -473,7 +542,7 @@ fn splice(
         copied.push(((start, s.out.len() as u32), at));
     }
     Spliced {
-        file: ExpandedFile { text: s.out, copied, parts, inner: Vec::new() },
+        file: ExpandedFile { text: s.out, copied, parts, inner: Vec::new(), crates: s.crates },
         written_by: s.written_by,
     }
 }
@@ -522,6 +591,9 @@ impl Splicer<'_> {
                 None => self.out.push_str(&expansion.text[span.0 as usize..span.1 as usize]),
             }
             tokens.push(((here, self.out.len() as u32), file, call));
+            if let Ok(k) = expansion.crates.binary_search_by_key(&span, |&(at, _)| at) {
+                self.crates.push(((here, self.out.len() as u32), expansion.crates[k].1));
+            }
             if written.is_none() {
                 self.written_by.insert(here, (index, span, mark));
             }
@@ -646,6 +718,19 @@ impl ExpandedFile {
     /// The file's text, read as expanded.
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Each `$crate` the text holds, by its span, sorted, with the crate it
+    /// is: what a reader of the text is told ([`crate::members_in`]).
+    pub fn crates(&self) -> &[((u32, u32), u32)] {
+        &self.crates
+    }
+
+    /// The crate a `$crate` at byte `at` of the text is: the crate of the
+    /// macro that wrote it, where its expansion said. `None` elsewhere.
+    pub fn crate_at(&self, at: u32) -> Option<u32> {
+        let k = self.crates.partition_point(|&((_, end), _)| end <= at);
+        self.crates.get(k).filter(|&&((start, _), _)| start <= at).map(|&(_, krate)| krate)
     }
 
     /// The invocations the file writes inside another's arguments that the

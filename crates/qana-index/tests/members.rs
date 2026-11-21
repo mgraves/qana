@@ -684,6 +684,10 @@ fn project() -> qana_index::Resolver {
         deref_trait: Some((core_ops(name, "Deref"), "Target".to_string())),
         try_trait: Some((core_ops(name, "Try"), "Output".to_string())),
         derive_traits: vec![("Debug".to_string(), core_path(name, &["fmt", "Debug"]))],
+        macro_use: Vec::new(),
+        macro_export: Vec::new(),
+        macro_prelude: Vec::new(),
+        conditions: Vec::new(),
     };
     let mut graph = UnitGraph::new();
     let core = graph.add_crate(krate("core", "/core/lib.rs", Vec::new(), Vec::new()));
@@ -1014,6 +1018,10 @@ fn a_lang_trait_is_its_crates_whatever_the_root_calls_by_its_name() {
             deref_trait: Some((core_ops(name, "Deref"), "Target".to_string())),
             try_trait: Some((core_ops(name, "Try"), "Output".to_string())),
             derive_traits: Vec::new(),
+            macro_use: Vec::new(),
+            macro_export: Vec::new(),
+            macro_prelude: Vec::new(),
+            conditions: Vec::new(),
         };
     let mut graph = UnitGraph::new();
     let core = graph.add_crate(krate("core", "/core/lib.rs", "2021", Vec::new()));

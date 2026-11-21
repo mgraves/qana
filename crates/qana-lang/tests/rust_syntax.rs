@@ -217,6 +217,20 @@ fn items() {
     parses("impl<T> Tr for Vec<T> where T: Clone {}");
     parses("unsafe extern \"C\" { safe fn f(); pub static X: u8; }");
     parses("macro_rules! m { ($x:expr) => { $x }; }");
+    // `macro` items, as core and std write them: rules in braces, or one
+    // rule's matcher and transcriber; `pub`, in a block.
+    let p = parses("pub macro panic_2021 { () => (1), ($($t:tt)+) => (2), }");
+    assert!(p.contains("(DeclMacro macro panic_2021 (DeclMacroRules {"), "{p}");
+    let p = parses("pub(crate) macro Clone($item:item) { /* built in */ }");
+    assert!(p.contains("(DeclMacroFn ( "), "{p}");
+    parses("pub macro asm(\"assembly template\", $(operands,)* $(options($(option),*))?) {}");
+    parses("fn f() { macro m() {} }");
+    let p = parses("#[macro_use(a, b,)]\nextern crate x;\n#[macro_use]\nmod m;");
+    assert!(p.contains("(MacroUse macro_use ("), "{p}");
+    parses("fn f() { macro_use(1); x.macro_use(2); }");
+    refused("macro m;");
+    refused("macro m() ;");
+    refused("macro m [] {}");
     parses("#![allow(x)]\n#[derive(Debug)]\npub enum E { A, B(u8), C { x: u8 } = 3 }");
     parses("fn f<'a, T: ?Sized + 'a, const N: usize>(x: &'a T) -> impl Fn(u8) -> u8 + 'a where for<'b> &'b T: Tr {}");
 }

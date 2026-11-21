@@ -66,6 +66,20 @@
 //! does not hold ([`CrateInfo::unindexed`]), where anything may be. That
 //! every library the graph holds has been read, the caller knows.
 //!
+//! A textual name (Rust's macro's, `@def(x, textual)`: see
+//! [`crate::textual_at`]) is found by [`Resolver::resolve_macro`] as rustc
+//! finds one: a name alone first by textual scope (in its file, then in
+//! each module it is declared in, before its declaration, out to the
+//! crate's root), then among its module's names (a textual definition is
+//! none of them unless an import names it, or, at its crate's root, an
+//! attribute exports it: [`CrateInfo::macro_export`]), then in the macro
+//! prelude ([`CrateInfo::macro_prelude`], and the crates the root loads
+//! under [`CrateInfo::macro_use`]), then in the preludes; a path, as any
+//! path is.
+//!
+//! [`CrateInfo::macro_export`]: crate::CrateInfo::macro_export
+//! [`CrateInfo::macro_prelude`]: crate::CrateInfo::macro_prelude
+//! [`CrateInfo::macro_use`]: crate::CrateInfo::macro_use
 //! [`CrateInfo::inert`]: crate::CrateInfo::inert
 //! [`CrateInfo::unindexed`]: crate::CrateInfo::unindexed
 //!
@@ -79,6 +93,7 @@ use std::rc::Rc;
 use crate::{Attribute, Declaration, Import, Path, Root, Summary, TypeRef, UnitGraph, Visibility};
 
 mod implementations;
+mod macros;
 mod types;
 
 pub use implementations::Implementation;
@@ -103,6 +118,23 @@ pub enum Resolution {
     /// that segment's name was looked for holds all the names it has. See
     /// the [module docs](self).
     Unresolved { segment: usize },
+}
+
+/// What a textual name's path names ([`Resolver::resolve_macro`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MacroResolution {
+    /// A textual definition in the file it stands in, by its name's span:
+    /// a [`Seen::Def`](crate::Seen::Def) it sees.
+    Here((u32, u32)),
+    /// What it names elsewhere, said as [`Resolver::resolve`] says it.
+    Elsewhere(Resolution),
+    /// Several answers, where a nearer textual definition is under a
+    /// condition ([`CrateInfo::conditions`](crate::CrateInfo::conditions):
+    /// Rust's `#[cfg]`) and may not be, so that an earlier one may be what
+    /// the name sees: the file's definitions, nearest first, by their
+    /// names' spans; then declarations elsewhere, (file, declaration
+    /// index).
+    Several { here: Vec<(u32, u32)>, declarations: Vec<(PathBuf, u32)> },
 }
 
 /// Resolves paths over a unit graph and the summaries of a project's files,
@@ -188,6 +220,9 @@ pub struct Resolver {
     /// The trait each built-in derive implements, by crate and the
     /// derive's name, once found.
     built_in_derives: RefCell<HashMap<(u32, String), Declarations>>,
+    /// Each crate's exported textual definitions (`#[macro_export]`) by
+    /// name, once gathered: (file, declaration index).
+    exported: RefCell<HashMap<u32, Exported>>,
 }
 
 /// A unit in a crate: a file's own (`unit` `None`), or one with its body in
@@ -262,6 +297,10 @@ type Blanket = ((u32, u32), Declared);
 /// Blanket impl blocks, each with a trait it implements, by each name it may
 /// answer a member for.
 type BlanketsByName = Rc<HashMap<String, Vec<Blanket>>>;
+
+/// A crate's exported textual definitions by name: (file, declaration
+/// index).
+type Exported = Rc<HashMap<String, Vec<(u32, u32)>>>;
 
 /// A file's impl blocks' items, as indexes into its declarations, by the
 /// block's index.
@@ -353,6 +392,7 @@ impl Resolver {
             trait_names: RefCell::default(),
             blankets_named: RefCell::default(),
             built_in_derives: RefCell::default(),
+            exported: RefCell::default(),
         }
     }
 
@@ -1141,6 +1181,19 @@ impl Resolver {
                     visibility: d.visibility.clone(),
                     from: module,
                 });
+            }
+        }
+        // A crate's root has its exported textual definitions, from
+        // anywhere in it.
+        if self.crate_root(module.krate).module == Some(module) {
+            if let Some(defined) = self.exported_by(module.krate).get(name) {
+                for &(file, index) in defined {
+                    found.push(Binding {
+                        target: self.target_of(module.krate, file, index),
+                        visibility: Visibility::Public,
+                        from: module,
+                    });
+                }
             }
         }
         let imports: Vec<Import> = self.imports_of(module).cloned().collect();

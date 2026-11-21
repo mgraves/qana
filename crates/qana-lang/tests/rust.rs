@@ -66,9 +66,9 @@ fn colour_classes(colour: &CompiledLexer, measured: &CompiledLexer) -> Vec<Class
                 | "DOT" | "COLON_COLON" | "COLON" | "SEMI" | "COMMA" | "AT" | "HASH_BANG"
                 | "HASH" | "TILDE" | "QMARK" | "DOLLAR" => Class::Punct,
                 // The weak keywords, where they act as keywords, and
-                // `cfg_attr` and `derive` before `(`: words.
+                // `cfg_attr`, `derive` and `macro_use` before `(`: words.
                 "KW_UNION" | "KW_AUTO" | "KW_DEFAULT" | "KW_RAW" | "KW_SAFE" | "KW_CFG_ATTR"
-                | "KW_DERIVE" => Class::Word,
+                | "KW_DERIVE" | "KW_MACRO_USE" => Class::Word,
                 // `1.` alone, a float the parser may split, as rustc_lexer
                 // cuts it.
                 "FLOAT_DOT" => by_name["FLOAT"],

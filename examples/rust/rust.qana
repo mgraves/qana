@@ -73,7 +73,7 @@
 // path that goes on after `Fn(A) -> B` sugar (see `type_fn_path`);
 // unstable syntax (`box`, `yield`, `try` blocks, `do yeet`, `gen` blocks,
 // coroutine closures, `impl const`, `~const`, default field values,
-// `macro` 2.0, trait aliases, type ascription, `builtin #`); and the 2015
+// trait aliases, type ascription, `builtin #`); and the 2015
 // and 2018 editions' anonymous trait method parameters and bare trait
 // objects. examples/rust/README.md has what it was measured on.
 
@@ -144,6 +144,7 @@ token KW_RAW     = /raw(?=\s+(const|mut)\s)/                           @style(ke
 token KW_SAFE    = /safe(?=\s+(fn|static)\s)/                          @style(keyword)
 token KW_CFG_ATTR = /cfg_attr(?=\s*\()/                               @style(variable)
 token KW_DERIVE   = /derive(_const)?(?=\s*\()/                                 @style(variable)
+token KW_MACRO_USE = /macro_use(?=\s*\()/                            @style(variable)
 
 // A raw identifier is never a keyword: `r#fn` is a name.
 token RAW_IDENT = /r#[\a_][\w_]*/ @style(variable)
@@ -367,6 +368,7 @@ rule attr =
   | UnsafeAttr: "unsafe" "(" p:attr_path attr_input_opt ")" @style(inherit, p) @ns(attribute, p) @attribute(p)
   | CfgAttr:    k:KW_CFG_ATTR "(" cfg_meta "," a:cfg_attrs_opt ")" @style(inherit, k, a) @attribute(k) @attributes(a)
   | Derive:     k:KW_DERIVE "(" d:derives_opt ")" @style(inherit, k) @attribute(k) @ns(derive, d)
+  | MacroUse:   k:KW_MACRO_USE "(" n:macro_use_names_opt ")" @style(inherit, k) @attribute(k, n)
 
 rule derives_opt =
   | DerivesNone:
@@ -374,6 +376,17 @@ rule derives_opt =
   | DerivesTrail: derive_list ","
 
 rule derive_list = derive_item+ % ","
+
+// The macros `#[macro_use(a, b)] extern crate x;` loads, by name: its
+// arguments, which a project model reads (rustc refuses them on a module).
+rule macro_use_names_opt =
+  | MacroUseNamesNone:
+  | MacroUseNamesList:  macro_use_name_list
+  | MacroUseNamesTrail: macro_use_name_list ","
+
+rule macro_use_name_list = macro_use_name+ % ","
+
+rule macro_use_name = MacroUseName: t:name @style(macro, t)
 
 // A derive macro's path, or a macro_rules derive's (`Nothing!`, which a
 // `derive` attribute macro of a library's, shadowing the built-in, takes).
@@ -463,6 +476,7 @@ rule tt_token =
   | TtR3Text: R3_TEXT
   | TtUnion: KW_UNION | TtAuto: KW_AUTO | TtDefault: KW_DEFAULT | TtRaw: KW_RAW
   | TtSafe: KW_SAFE | TtCfgAttr: KW_CFG_ATTR | TtDerive: KW_DERIVE
+  | TtMacroUse: KW_MACRO_USE
   | TtEqEq: EQ_EQ | TtEqArrow: EQ_ARROW | TtEq: EQ | TtBangEq: BANG_EQ
   | TtBang: BANG | TtLtShlEq: LT_SHLEQ | TtLtShl: LT_SHL | TtLtLe: LT_LE
   | TtLt: LT | TtGtShrEq: GT_SHREQ | TtGtShr: GT_SHR | TtGtGe: GT_GE | TtGt: GT
@@ -497,13 +511,14 @@ rule name =
   | RawName: t:RAW_IDENT @style(inherit, t)
   | CfgAttrName: t:KW_CFG_ATTR @style(inherit, t)
   | DeriveName: t:KW_DERIVE @style(inherit, t)
+  | MacroUseKwName: t:KW_MACRO_USE @style(inherit, t)
 
 // What `$i:ident` matches: an identifier or a keyword, `_` aside.
 rule ident_fragment =
   | IdentFragment: IDENT | RawIdentFragment: RAW_IDENT
   | UnionFragment: KW_UNION | AutoFragment: KW_AUTO | DefaultFragment: KW_DEFAULT
   | RawFragment: KW_RAW | SafeFragment: KW_SAFE | CfgAttrFragment: KW_CFG_ATTR
-  | DeriveFragment: KW_DERIVE
+  | DeriveFragment: KW_DERIVE | MacroUseFragment: KW_MACRO_USE
   | AsFragment: "as" | BreakFragment: "break" | ConstFragment: "const"
   | ContinueFragment: "continue" | CrateFragment: "crate" | ElseFragment: "else"
   | EnumFragment: "enum" | ExternFragment: "extern" | FalseFragment: "false"
@@ -740,6 +755,7 @@ rule vis_item_kind =
   | ExternSelf:   "extern" "crate" "self" ";"
   | ExternCrateAsUnderscore: "extern" "crate" n:name "as" "_" ";" @outline(n, module)
   | ExternSelfAsUnderscore: "extern" "crate" "self" "as" "_" ";"
+  | DeclMacro:    "macro" n:name decl_macro_body @outline(n, function) @style(macro, n) @def(n, hoisted) @ns(macro)
 
 rule mod_head =
   | Mod:       "mod"
@@ -1024,12 +1040,21 @@ rule item_macro =
   | MacroItemParen:   p:plain_path b:BANG open:"(" tts close:")" ";" @fold(list, open, close) @style(macro, p, b) @ns(macro, p) @expands
   | MacroItemBracket: p:plain_path b:BANG open:"[" tts close:"]" ";" @fold(list, open, close) @style(macro, p, b) @ns(macro, p) @expands
 
-rule macro_def = MacroDef: p:plain_path b:BANG n:name delim_tt_def @outline(n, function) @style(macro, p, b, n) @def(n, hoisted) @ns(macro) @ns(macro, p)
+rule macro_def = MacroDef: p:plain_path b:BANG n:name delim_tt_def @outline(n, function) @style(macro, p, b, n) @def(n, textual) @ns(macro) @ns(macro, p)
 
 rule delim_tt_def =
   | MacroDefBrace:   "{" tts "}" @fold(block)
   | MacroDefParen:   open:"(" tts close:")" ";" @fold(list, open, close)
   | MacroDefBracket: open:"[" tts close:"]" ";" @fold(list, open, close)
+
+// A `macro` item (macros 2.0, as core and std write some: `pub macro
+// panic_2021 { … }`, `pub macro Clone($item:item) { … }`), as rustc's
+// `parse_item_decl_macro` reads one: its rules in braces, or one rule's
+// matcher in parentheses and its transcriber in braces. Unlike
+// `macro_rules!`, it is an item of its module, found by path.
+rule decl_macro_body =
+  | DeclMacroRules: open:"{" tts "}" @fold(block, open)
+  | DeclMacroFn:    "(" tts ")" open:"{" tts "}" @fold(block, open)
 
 // ---- generics and bounds ----
 

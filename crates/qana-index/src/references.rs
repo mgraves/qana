@@ -9,7 +9,9 @@
 //! declaration's usage is takes the whole project, and is the searcher's:
 //! a reference bound within its file to a local (a definition the file
 //! does not offer, and no import's) is that local's; any other is what its
-//! path resolves to across the project.
+//! path resolves to across the project. A textual name's (a macro's) is
+//! what textual scope finds, which each says it sees
+//! ([`Reference::textual`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -18,7 +20,8 @@ use qana_sem::{SemDb, Target};
 use serde::{Deserialize, Serialize};
 
 use crate::members::SelfPaths;
-use crate::{outside_bodies, units, LineStarts, Path, URI};
+use crate::textual::{is_textual, replay};
+use crate::{outside_bodies, units, LineStarts, Path, Seen, URI};
 
 /// A reference to one of the names looked for. See the [module
 /// docs](self).
@@ -47,6 +50,13 @@ pub struct Reference {
     /// Whether that definition is a local: one the file does not offer as a
     /// declaration, and no import's.
     pub local: bool,
+    /// What it sees by textual scope, where its namespace is one textual
+    /// definitions are in (Rust's macros: [`is_textual`](crate::is_textual)),
+    /// as [`textual_at`](crate::textual_at) says: what it names is then
+    /// what [`Resolver::resolve_macro`](crate::Resolver::resolve_macro)
+    /// finds, not what it binds to (the file's binding reads a textual
+    /// definition as seen from anywhere in its scope).
+    pub textual: Option<Vec<Seen>>,
 }
 
 /// The references in `text`, a file of `lang`'s language, to any of
@@ -113,6 +123,7 @@ pub fn references(lang: &EmbeddedLang, text: &str, names: &[String]) -> Vec<Refe
             in_import: read.refs.get(&r.span).is_some_and(|place| place.imported),
             binds,
             local,
+            textual: is_textual(lang, &r.ns).then(|| replay(&read.textual, r.span.0)),
         });
     }
     found.sort_by_key(|r| r.span);
@@ -176,6 +187,7 @@ pub fn escaping(lang: &EmbeddedLang, text: &str) -> Vec<Reference> {
             in_import: place.imported,
             binds: None,
             local: false,
+            textual: is_textual(lang, &r.ns).then(|| replay(&read.textual, r.span.0)),
         });
     }
     found.sort_by_key(|r| r.span);

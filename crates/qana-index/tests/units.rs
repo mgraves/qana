@@ -6,7 +6,8 @@
 use std::sync::OnceLock;
 
 use qana_index::{
-    summarize, EscapingName, Impl, Import, Path, Root, Summary, TypeRef, Unit, Visibility,
+    summarize, EscapingName, Impl, Import, Path, Root, Summary, TextualLink, TypeRef, Unit,
+    Visibility,
 };
 use qana_lang::EmbeddedLang;
 
@@ -31,7 +32,15 @@ fn private() -> Visibility {
 }
 
 fn unit(name: &str, parent: Option<u32>, inline: bool, visibility: Visibility) -> Unit {
-    Unit { name: name.into(), parent, inline, visibility, attributes: Vec::new(), open: false }
+    Unit {
+        name: name.into(),
+        parent,
+        inline,
+        visibility,
+        attributes: Vec::new(),
+        open: false,
+        textual: Vec::new(),
+    }
 }
 
 /// A declaration as (container, name, unit, visibility, impl block).
@@ -55,7 +64,10 @@ fn a_files_units_are_its_modules_with_their_parents_and_visibility() {
     assert_eq!(
         summary.offers().units(),
         [
-            unit("geo", None, true, Visibility::Public),
+            Unit {
+                textual: vec![TextualLink::Module(1)],
+                ..unit("geo", None, true, Visibility::Public)
+            },
             unit("inner", Some(0), true, within(Root::Unit(1), &[])),
             unit("shapes", None, false, private()),
             unit("util", None, false, within(Root::Crate, &[])),
@@ -302,6 +314,10 @@ fn a_unit_graph_places_each_file_in_its_crates_at_its_module_path() {
         deref_trait: None,
         try_trait: None,
         derive_traits: Vec::new(),
+        macro_use: Vec::new(),
+        macro_export: Vec::new(),
+        macro_prelude: Vec::new(),
+        conditions: Vec::new(),
     };
     let mut graph = UnitGraph::new();
     let lib = graph.add_crate(krate("geo", "lib", "/p/src/lib.rs"));

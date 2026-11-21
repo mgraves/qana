@@ -436,6 +436,19 @@ find.
 - `@impl(type[, trait])`: an implementation block of the type the path
   at `type` names, of the trait at `trait`; its members are what is
   defined directly in the members scope it opens.
+- `@attribute(path[, args])`: the node is an attribute, the one the path
+  names, with the paths `args` spells as its arguments (Rust's
+  `#[macro_use(a, b)]`). `@attributes(attrs[, item])`: the attributes in
+  `attrs` are said of what `item` declares (a unit, an import), or of the
+  unit the node stands in; what they mean is the project model's.
+  `@loads`: the import loads the library its path names (Rust's `extern
+  crate`).
+- `@def(name, textual)`: a definition seen in textual order, as Rust's
+  `macro_rules!` is: after it, into the modules declared after it, out
+  of a module whose attributes the model says carry it out (Rust's
+  `#[macro_use]`), not past its block. Within a file it binds as
+  `hoisted`; `qana_index::textual_at` and `Resolver::resolve_macro` find
+  a name in that order.
 
 What path a subtree spells is read from the annotations: a token is one
 segment; a `@qualify(base, name)` node is its base's path then its name;

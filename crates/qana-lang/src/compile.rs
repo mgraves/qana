@@ -1214,11 +1214,13 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                 match a.name.as_str() {
                     "def" => {
                         // `@def(x)`, then any of `hoisted` (visible
-                        // throughout its scope whatever the order) and
-                        // `open` (its namespace has members the binding
-                        // cannot see), each once.
+                        // throughout its scope whatever the order),
+                        // `textual` (seen after it, as rustc's
+                        // `macro_rules!` are: see `BindingConfig::textual`)
+                        // and `open` (its namespace has members the
+                        // binding cannot see), each once.
                         if a.args.is_empty() || a.args.len() > 3 {
-                            error(d, a.name_span, "@def takes a label, then `hoisted` or `open` or both".into());
+                            error(d, a.name_span, "@def takes a label, then `hoisted` or `textual`, and `open`".into());
                         } else if let Some(k) = pos_of(d, &a.args[0]) {
                             let mut seen: Vec<&str> = Vec::new();
                             for flag in &a.args[1..] {
@@ -1226,9 +1228,20 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                                     f if seen.contains(&f) => {
                                         error(d, flag.1, format!("`{f}` is given twice"))
                                     }
+                                    "hoisted" | "textual" if seen.iter().any(|s| *s == "hoisted" || *s == "textual") => {
+                                        error(d, flag.1, "`hoisted` and `textual` are two orders: give one".into())
+                                    }
                                     "hoisted" => {
                                         seen.push("hoisted");
                                         binding.hoisted.push((nt, prod));
+                                    }
+                                    // The file's binding reads it as
+                                    // hoisted; its textual order is the
+                                    // project index's to apply.
+                                    "textual" => {
+                                        seen.push("textual");
+                                        binding.hoisted.push((nt, prod));
+                                        binding.textual.push((nt, prod));
                                     }
                                     "open" => {
                                         seen.push("open");
@@ -1237,7 +1250,7 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                                     other => error(
                                         d,
                                         flag.1,
-                                        format!("unknown definition kind `{other}` (`hoisted` or `open`)"),
+                                        format!("unknown definition kind `{other}` (`hoisted`, `textual` or `open`)"),
                                     ),
                                 }
                             }
@@ -1558,10 +1571,11 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                         }
                     }
                     "attribute" => {
-                        // `@attribute(path)`: the node is an attribute,
-                        // the one the path names.
-                        if a.args.len() != 1 {
-                            error(d, a.name_span, "@attribute takes the label of the path that names the attribute".into());
+                        // `@attribute(path[, args])`: the node is an
+                        // attribute, the one the path names, whose
+                        // arguments are the paths `args` spells.
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@attribute takes the label of the path that names the attribute and an optional label of its arguments".into());
                         } else if pending_attribute.replace(ai).is_some() {
                             error(d, a.name_span, "duplicate @attribute".into());
                         }
@@ -2118,13 +2132,16 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             }
             if let Some(ai) = pending_attribute {
                 let a = &alt.attrs[ai];
-                match positions.get(a.args[0].0.as_str()) {
-                    Some(&k) => binding.attributes.push((nt, prod, k)),
-                    None => error(
-                        d,
-                        a.args[0].1,
-                        format!("no symbol labeled `{}` in this alternative", a.args[0].0),
-                    ),
+                for (i, arg) in a.args.iter().enumerate() {
+                    match positions.get(arg.0.as_str()) {
+                        Some(&k) if i == 0 => binding.attributes.push((nt, prod, k)),
+                        Some(&k) => binding.attribute_args.push((nt, prod, k)),
+                        None => error(
+                            d,
+                            arg.1,
+                            format!("no symbol labeled `{}` in this alternative", arg.0),
+                        ),
+                    }
                 }
             }
             if let Some(ai) = pending_attributes {

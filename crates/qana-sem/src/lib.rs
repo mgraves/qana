@@ -135,6 +135,14 @@ pub struct BindingConfig {
     /// while the scope's other defs keep its ordering (Rust's items
     /// beside its `let`s).
     pub hoisted: Vec<(u16, u16)>,
+    /// (nt, prod) — this production's def is TEXTUAL (`@def(x, textual)`),
+    /// as rustc's `macro_rules!` are: a name sees it after it, in its scope
+    /// and in the scopes and modules declared after it within, whatever
+    /// barriers stand between, and the latest of a name before shadows
+    /// the rest; out of a module only where the module's attributes say
+    /// so. The file's binding reads it as hoisted (it is in `hoisted`
+    /// too); the order is the project index's (`qana_index::textual_at`).
+    pub textual: Vec<(u16, u16)>,
     /// (nt, prod) — the namespace this production's def introduces is
     /// OPEN (`@def(x, open)`): it has members the binding cannot see
     /// (Rust's `impl` blocks, a macro's expansion, a glob import), so a
@@ -210,6 +218,10 @@ pub struct BindingConfig {
     /// the path at `path child` names, said of what the attributes it
     /// stands among are said of.
     pub attributes: Vec<(u16, u16, usize)>,
+    /// (nt, prod, arguments child) — an attribute's arguments
+    /// (`@attribute(path, args)`): the paths the `arguments child` spells,
+    /// in order (Rust's `#[macro_use(a, b)]`).
+    pub attribute_args: Vec<(u16, u16, usize)>,
     /// (nt, prod, attributes child, item child) — the attributes in the
     /// subtree of `attributes child` (`@attributes(attrs[, item])`) are
     /// said of what the `item child` declares where this node stands (a
@@ -428,6 +440,9 @@ pub fn compose_binding(
     for &(nt, prod) in &guest.open {
         out.open.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset));
     }
+    for &(nt, prod) in &guest.textual {
+        out.textual.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset));
+    }
     for &(nt, prod) in &guest.members {
         out.members.push((nt + map.guest_nt_offset, prod + map.guest_prod_offset));
     }
@@ -461,6 +476,9 @@ pub fn compose_binding(
     }
     for &(nt, prod, path) in &guest.attributes {
         out.attributes.push((nt + nts, prod + prods, path));
+    }
+    for &(nt, prod, args) in &guest.attribute_args {
+        out.attribute_args.push((nt + nts, prod + prods, args));
     }
     for &(nt, prod, attrs, item) in &guest.attribute_lists {
         out.attribute_lists.push((nt + nts, prod + prods, attrs, item));

@@ -68,7 +68,9 @@ What it leaves out:
   `-> B::C` as `B::C`;
 * unstable syntax (`box`, `yield`, `try` blocks, `do yeet`, `gen`
   blocks, coroutine closures, `impl const`, `~const`, default field
-  values, `macro` 2.0, trait aliases, type ascription, `builtin #`);
+  values, trait aliases, type ascription, `builtin #`). Macros 2.0's
+  `macro` items, which core and std use, are read (since that
+  measurement);
 * the 2015 edition's anonymous trait method parameters and bare trait
   objects.
 
@@ -112,6 +114,14 @@ declare. `use super::*` does not yet open a module to its parent's items,
 and `macro_rules!` defined outside an inline module is not seen inside
 it. `cargo test -p qana-lang --test rust_binding` pins the binding; over
 this workspace's largest files, no name is a problem.
+
+A `macro_rules!` is a textual definition (`@def(n, textual)`): the
+file's binding reads it as an item, seen throughout its scope, and its
+order (after it, into the modules declared after it, out of a
+`#[macro_use]` module, not past its block) is the project index's, which
+finds a macro's name as rustc does (`qana_index::textual_at` and
+`Resolver::resolve_macro`). A `macro` item is an item of its module, as
+rustc reads one.
 
 Folding (`@fold`), wherever one runs over lines: blocks and the bodies of
 modules, structs, enums, unions, traits, impls, `extern` blocks, `match`

@@ -103,6 +103,10 @@ fn project() -> Resolver {
         deref_trait: None,
         try_trait: None,
         derive_traits: Vec::new(),
+        macro_use: Vec::new(),
+        macro_export: Vec::new(),
+        macro_prelude: Vec::new(),
+        conditions: Vec::new(),
     };
     let mut graph = UnitGraph::new();
     let geo = graph.add_crate(krate("geo", "/p/src/lib.ul", Vec::new()));
@@ -358,6 +362,10 @@ fn one_file(text: &str) -> Resolver {
         deref_trait: None,
         try_trait: None,
         derive_traits: Vec::new(),
+        macro_use: Vec::new(),
+        macro_export: Vec::new(),
+        macro_prelude: Vec::new(),
+        conditions: Vec::new(),
     });
     Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
 }
@@ -551,6 +559,10 @@ fn with_preludes() -> Resolver {
             deref_trait: None,
             try_trait: None,
             derive_traits: Vec::new(),
+            macro_use: Vec::new(),
+            macro_export: Vec::new(),
+            macro_prelude: Vec::new(),
+            conditions: Vec::new(),
         };
     let std_prelude = path(Some(Root::Global), &["std", "prelude", "rust_2021"]);
     let mut graph = UnitGraph::new();
@@ -844,6 +856,10 @@ fn one_file_inert(text: &str) -> Resolver {
         deref_trait: None,
         try_trait: None,
         derive_traits: Vec::new(),
+        macro_use: Vec::new(),
+        macro_export: Vec::new(),
+        macro_prelude: Vec::new(),
+        conditions: Vec::new(),
     });
     Resolver::new(Rc::new(graph), vec![(PathBuf::from("/w/lib.ul"), summary)])
 }

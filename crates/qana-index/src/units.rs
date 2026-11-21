@@ -49,8 +49,10 @@ pub(crate) struct Roles {
     pub(crate) import: Option<(Option<usize>, bool)>,
     /// `@loads`: the import loads the library its path names.
     pub(crate) loads: bool,
-    /// `@attribute(path)`: the path child.
+    /// `@attribute(path[, args])`: the path child.
     pub(crate) attribute: Option<usize>,
+    /// `@attribute(path, args)`: the arguments child.
+    pub(crate) attribute_args: Option<usize>,
     /// `@attributes(attrs[, item])`: the attributes child, and the item
     /// child.
     pub(crate) attribute_list: Option<(usize, Option<usize>)>,
@@ -87,6 +89,8 @@ pub(crate) struct Roles {
     /// `@value(builtin, name)`: a value of the type the language provides
     /// under that name.
     pub(crate) builtin: Option<String>,
+    /// `@def(x, textual)`: what it defines is seen in textual order.
+    pub(crate) textual: bool,
 }
 
 fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Roles> {
@@ -121,8 +125,14 @@ fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Ro
     for &(nt, prod) in &cfg.loads {
         map.entry((nt, prod)).or_default().loads = true;
     }
+    for &(nt, prod) in &cfg.textual {
+        map.entry((nt, prod)).or_default().textual = true;
+    }
     for &(nt, prod, path) in &cfg.attributes {
         map.entry((nt, prod)).or_default().attribute = Some(path);
+    }
+    for &(nt, prod, args) in &cfg.attribute_args {
+        map.entry((nt, prod)).or_default().attribute_args = Some(args);
     }
     for &(nt, prod, attrs, item) in &cfg.attribute_lists {
         map.entry((nt, prod)).or_default().attribute_list = Some((attrs, item));
@@ -224,6 +234,34 @@ pub(crate) struct RefPlace {
 /// A byte span of the file.
 pub(crate) type Span = (u32, u32);
 
+/// What rustc's textual scope is made of, in the file's order
+/// (`@def(x, textual)`): see [`crate::textual_at`].
+#[derive(Clone, Debug)]
+pub(crate) enum TextualEvent {
+    /// A textual definition: its name, the name's span, the attributes
+    /// said of it.
+    Def { name: String, span: Span, attributes: Vec<Attribute> },
+    /// A module whose body is another file, at its item: its name, the
+    /// attributes said of it, its index in `units` where a summary reads
+    /// it (not in a body).
+    File { name: String, attributes: Vec<Attribute>, at: u32, unit: Option<u32> },
+    /// A scope opens (a block: what is defined in it is not seen after
+    /// it), or an inline module's body (`module`: what is defined in it is
+    /// seen after it where its attributes carry it out).
+    Open { module: Option<TextualModule>, span: Span },
+    /// What the last `Open` opened closes, at `end`.
+    Close { end: u32 },
+}
+
+/// An inline module whose body opens: its name, the attributes said of it,
+/// its index in `units` where a summary reads it.
+#[derive(Clone, Debug)]
+pub(crate) struct TextualModule {
+    pub name: String,
+    pub attributes: Vec<Attribute>,
+    pub unit: Option<u32>,
+}
+
 /// A derive's path (`@derives`), and its span.
 pub(crate) type Derive = (Path, Span);
 
@@ -257,6 +295,9 @@ pub(crate) struct FileUnits {
     /// The names imports define (a `use` leaf's, a rename's), by span:
     /// a reference bound to one is bound to what it imports.
     pub import_defs: HashSet<Span>,
+    /// The textual definitions, modules and scopes, bodies' too, in the
+    /// file's order.
+    pub textual: Vec<TextualEvent>,
 }
 
 impl FileUnits {
@@ -330,6 +371,7 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
             bodies: Vec::new(),
             impl_generics: HashMap::new(),
             import_defs: HashSet::new(),
+            textual: Vec::new(),
         },
         scopes: 0,
         typed_defs: HashMap::new(),
@@ -656,6 +698,14 @@ impl Walk<'_> {
             }
         }
 
+        if let (true, Some((name, span))) = (roles.textual, &def_name) {
+            self.out.textual.push(TextualEvent::Def {
+                name: name.clone(),
+                span: *span,
+                attributes: attributes_here(*span),
+            });
+        }
+
         // Its references, each with its path.
         for &(k, kind) in &roles.refs {
             let Some((name, off)) = name_child(n, k, self.g.cfg) else { continue };
@@ -767,6 +817,28 @@ impl Walk<'_> {
             child_cx.push((k, path_cx));
         }
 
+        // A module, for the textual log, a body's too: a file's at its
+        // item, an inline one around its body.
+        let mut textual_body: Option<(usize, TextualModule, Span)> = None;
+        if let (Some(body), Some((name, span))) = (roles.unit, &def_name) {
+            let attributes = attributes_here(*span);
+            let unit = (!cx.in_body).then_some(self.out.units.len() as u32);
+            match body {
+                Some(b) => {
+                    if let Some(at) = span_of(b) {
+                        let module = TextualModule { name: name.clone(), attributes, unit };
+                        textual_body = Some((b, module, at));
+                    }
+                }
+                None => self.out.textual.push(TextualEvent::File {
+                    name: name.clone(),
+                    attributes,
+                    at: cx.item.unwrap_or(whole).0,
+                    unit,
+                }),
+            }
+        }
+
         if let (Some(body), Some((name, span)), false) = (roles.unit, &def_name, cx.in_body) {
             let index = self.out.units.len() as u32;
             self.out.units.push((
@@ -777,6 +849,7 @@ impl Walk<'_> {
                     visibility: visibility_here(*span),
                     attributes: attributes_here(*span),
                     open: false,
+                    textual: Vec::new(),
                 },
                 *span,
                 cx.item.unwrap_or(whole),
@@ -879,6 +952,9 @@ impl Walk<'_> {
             }
         }
 
+        if own_scope.is_some() {
+            self.out.textual.push(TextualEvent::Open { module: None, span: whole });
+        }
         let is_list = |prod: u16| prod == LIST_PROD || prod == RUN_PROD;
         let mut off = base;
         for (c, index) in n.children.iter().zip(symbol_indices(n)) {
@@ -886,6 +962,12 @@ impl Walk<'_> {
                 let cx = index
                     .and_then(|k| child_cx.iter().find(|(c, _)| *c == k))
                     .map_or(&inner, |(_, cx)| cx);
+                let body = textual_body.as_ref().filter(|(b, _, _)| index == Some(*b));
+                if let Some((_, module, at)) = body {
+                    self.out
+                        .textual
+                        .push(TextualEvent::Open { module: Some(module.clone()), span: *at });
+                }
                 if is_list(n.prod) && !is_list(m.prod) {
                     // An element of a list: an item, from its first token
                     // (the trivia before it is the space between items).
@@ -895,8 +977,14 @@ impl Walk<'_> {
                 } else {
                     self.node(m, off, cx);
                 }
+                if let Some((_, _, at)) = body {
+                    self.out.textual.push(TextualEvent::Close { end: at.1 });
+                }
             }
             off += c.width();
+        }
+        if own_scope.is_some() {
+            self.out.textual.push(TextualEvent::Close { end: whole.1 });
         }
 
         // The generic parameters declared in the scope this definition
@@ -937,7 +1025,14 @@ impl Walk<'_> {
         }
         if let Some(k) = roles.and_then(|r| r.attribute) {
             if let Some(path) = Path::of_child(node, k, self.g.cfg) {
-                found.push(Attribute { path, conditional });
+                let mut args = Vec::new();
+                if let Some((held, _)) = roles
+                    .and_then(|r| r.attribute_args)
+                    .and_then(|a| symbol_child_at(node, a, base))
+                {
+                    paths_in(held, self.g.cfg, &mut args);
+                }
+                found.push(Attribute { path, conditional, args });
             }
             let held = roles
                 .and_then(|r| r.attribute_list)
@@ -1119,6 +1214,20 @@ pub(crate) fn symbol_child_at(
 }
 
 /// `n`'s child nodes (`n` starting at `base`), each with where it starts.
+/// The paths `node` spells, in order: its own, or, where it spells none,
+/// those of its child nodes (a list's elements).
+fn paths_in(node: &GreenNode, cfg: &BindingConfig, out: &mut Vec<Path>) {
+    if let Some(path) = Path::of_node(node, cfg) {
+        out.push(path);
+        return;
+    }
+    for c in &node.children {
+        if let GreenChild::Node(m) = c {
+            paths_in(m, cfg, out);
+        }
+    }
+}
+
 fn child_nodes(n: &GreenNode, base: u32) -> impl Iterator<Item = (&GreenNode, u32)> {
     let mut off = base;
     n.children.iter().filter_map(move |c| {

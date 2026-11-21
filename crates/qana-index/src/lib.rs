@@ -52,12 +52,14 @@ pub use graph::{CrateInfo, CrateSource, UnitGraph};
 pub use members::{member_at, members, path_at, MemberAccess, MemberKind, Receiver};
 pub use qana_sem::{Path, Root};
 pub use references::{escaping, references, Reference};
-pub use resolve::{Implementation, Resolution, Resolver};
+pub use resolve::{Implementation, MacroResolution, Resolution, Resolver};
+pub use textual::{is_textual, seen_here, textual_at, Seen, TextualLink};
 
 mod graph;
 mod members;
 mod references;
 mod resolve;
+mod textual;
 mod units;
 
 include!(concat!(env!("OUT_DIR"), "/summarizer.rs"));
@@ -98,6 +100,7 @@ impl Summary {
 pub struct Offers {
     attributes: Vec<Attribute>,
     open: bool,
+    textual: Vec<TextualLink>,
     units: Vec<Unit>,
     declarations: Vec<Declaration>,
     reexports: Vec<Import>,
@@ -117,6 +120,13 @@ impl Offers {
     /// does not parse cleanly, so that a name it has may be missing here.
     pub fn open(&self) -> bool {
         self.open
+    }
+
+    /// The file's own unit's textual links, in its order: its textual
+    /// definitions (Rust's `macro_rules!`) and its child modules, what a
+    /// name after each sees ([`crate::textual_at`] has the rules).
+    pub fn textual(&self) -> &[TextualLink] {
+        &self.textual
     }
 
     /// The units the file holds, besides its own; a unit's index here is
@@ -271,17 +281,25 @@ pub struct Unit {
     /// (`@expands`) stands among its items, or its file's text does not
     /// parse cleanly, so that a name it has may be missing here.
     pub open: bool,
+    /// Its textual links, in its order, where its body is here (see
+    /// [`Offers::textual`]).
+    pub textual: Vec<TextualLink>,
 }
 
-/// An attribute said of a unit or an import: the path that names it, and
+/// An attribute said of a unit or an import: the path that names it,
 /// whether it holds only under a condition (Rust's `cfg_attr(pred, attr)`,
-/// whose condition a summary does not decide).
+/// whose condition a summary does not decide), and the paths its arguments
+/// are, where the grammar reads them (`@attribute(path, args)`).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Attribute {
     /// The path that names it (`no_std`, `rustfmt::skip`).
     pub path: Path,
     /// Whether it holds only under a condition.
     pub conditional: bool,
+    /// Its arguments, in order: Rust's `#[macro_use(a, b)]` has `a` and
+    /// `b`. Empty where it has none, or where the grammar reads none.
+    #[serde(default)]
+    pub args: Vec<Path>,
 }
 
 /// What a unit imports: one declaration, under a name, or every name of a
@@ -668,6 +686,28 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
 
     let declarations: Vec<Declaration> = found.iter().map(|f| f.declaration.clone()).collect();
     let names: Vec<(u32, u32)> = found.iter().map(|f| f.name).collect();
+
+    // Each module's textual links, a unit by its place.
+    let by_name: HashMap<(u32, u32), u32> =
+        names.iter().enumerate().map(|(i, &span)| (span, i as u32)).collect();
+    let mut own = textual::own_links(&read.textual, &by_name);
+    let placed = |links: Vec<textual::UnitLink>| -> Vec<TextualLink> {
+        links
+            .into_iter()
+            .map(|link| match link {
+                textual::UnitLink::Def { declaration, attributes } => {
+                    TextualLink::Def { declaration, attributes }
+                }
+                textual::UnitLink::Module(walk) => TextualLink::Module(unit_place[walk as usize]),
+            })
+            .collect()
+    };
+    let textual = placed(own.remove(&None).unwrap_or_default());
+    for (walk, links) in own {
+        if let Some(walk) = walk {
+            units[unit_place[walk as usize] as usize].textual = placed(links);
+        }
+    }
     let items: Vec<(u32, u32)> = found.iter().map(|f| f.item).collect();
     let derive_spans: Vec<Vec<(u32, u32)>> = found.iter().map(|f| f.derives.clone()).collect();
     let positions: Vec<(u32, u32)> =
@@ -677,6 +717,7 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
         let mut hash = Fnv::new();
         hash.attributes(&read.attributes);
         hash.u64(u64::from(read.open));
+        hash.textual(&textual);
         hash.u64(units.len() as u64);
         for u in &units {
             hash.str(&u.name);
@@ -685,6 +726,7 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
             hash.visibility(&u.visibility);
             hash.attributes(&u.attributes);
             hash.u64(u64::from(u.open));
+            hash.textual(&u.textual);
         }
         hash.u64(declarations.len() as u64);
         for d in &declarations {
@@ -772,6 +814,7 @@ pub fn summarize(lang: &EmbeddedLang, text: &str) -> Summary {
         offers: Offers {
             attributes: read.attributes,
             open: read.open,
+            textual,
             units,
             declarations,
             reexports,
@@ -1039,6 +1082,23 @@ impl Fnv {
         for a in attributes {
             self.path(&a.path);
             self.u64(u64::from(a.conditional));
+        }
+    }
+
+    fn textual(&mut self, links: &[TextualLink]) {
+        self.u64(links.len() as u64);
+        for link in links {
+            match link {
+                TextualLink::Def { declaration, attributes } => {
+                    self.u64(0);
+                    self.u64(u64::from(*declaration));
+                    self.attributes(attributes);
+                }
+                TextualLink::Module(unit) => {
+                    self.u64(1);
+                    self.u64(u64::from(*unit));
+                }
+            }
         }
     }
 

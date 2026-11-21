@@ -6,8 +6,8 @@ use std::sync::OnceLock;
 use qana_grammar::green::ERROR_NT;
 use qana_grammar::{GreenChild, GreenNode};
 use qana_index::{
-    summarize, summary_key, Attribute, EscapingName, Impl, Import, Path, Root, Summary, TypeRef,
-    Unit, Visibility,
+    summarize, summary_key, Attribute, EscapingName, Impl, Import, Path, Root, Summary,
+    TextualLink, TypeRef, Unit, Visibility,
 };
 use qana_lang::EmbeddedLang;
 
@@ -299,15 +299,25 @@ fn a_rust_files_summary_holds_its_units_imports_reexports_visibilities_and_impls
         visibility,
         attributes: Vec::new(),
         open: false,
+        textual: Vec::new(),
     };
     assert_eq!(
         offers.units(),
         [
-            unit("geo", None, true, Visibility::Public),
+            // Its textual scope holds `inner`, which may carry its macros out.
+            Unit {
+                textual: vec![TextualLink::Module(1)],
+                ..unit("geo", None, true, Visibility::Public)
+            },
             unit("inner", Some(0), true, Visibility::Within(path(Some(Root::Unit(1)), &[]))),
             unit("shapes", None, false, private()),
             unit("util", None, false, Visibility::Within(path(Some(Root::Crate), &[]))),
         ]
+    );
+    // The file's own, its child modules in its order.
+    assert_eq!(
+        offers.textual(),
+        [TextualLink::Module(2), TextualLink::Module(3), TextualLink::Module(0)]
     );
 
     let point = path(None, &["geo", "Point"]);
@@ -434,7 +444,7 @@ fn parses_cleanly(text: &str) -> bool {
 }
 
 fn attribute(segments: &[&str], conditional: bool) -> Attribute {
-    Attribute { path: path(None, segments), conditional }
+    Attribute { path: path(None, segments), conditional, args: Vec::new() }
 }
 
 const ATTRIBUTES: &str = "//! A crate.
@@ -458,6 +468,7 @@ use prelude::rust_2024::*;
 
 #[macro_use]
 extern crate alloc;
+#[macro_use(vec, format,)]
 extern crate std as realstd;
 extern crate self as core;
 pub use ::core as __core;
@@ -535,6 +546,14 @@ fn an_imports_attributes_are_its_items_and_extern_crate_loads() {
     );
     let realstd = named("realstd").expect("extern crate std as realstd");
     assert_eq!((&realstd.path, realstd.loads), (&path(Some(Root::Global), &["std"]), true));
+    assert_eq!(
+        realstd.attributes,
+        [Attribute {
+            args: vec![path(None, &["vec"]), path(None, &["format"])],
+            ..attribute(&["macro_use"], false)
+        }],
+        "an attribute's arguments, where the grammar reads them"
+    );
     let core = named("core").expect("extern crate self as core");
     assert_eq!((&core.path, core.loads), (&path(Some(Root::Crate), &[]), true));
     let reexport =

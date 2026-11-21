@@ -87,6 +87,30 @@ pub struct CrateInfo {
     /// trait: Rust's prelude holds `Debug` and `Hash` as derive macros, not
     /// traits.
     pub derive_traits: Vec<(String, crate::Path)>,
+    /// The attributes that carry a module's textual definitions (Rust's
+    /// `macro_rules!`, `@def(x, textual)`) out of it, to be seen after its
+    /// declaration in the module it is declared in (`#[macro_use] mod m;`);
+    /// said of an import that loads a crate at the crate's root, they bring
+    /// that crate's root's textual names into every module of this one
+    /// (`#[macro_use] extern crate log;`).
+    #[serde(default)]
+    pub macro_use: Vec<crate::Path>,
+    /// The attributes that put a textual definition among its crate's
+    /// root's names, wherever it is defined (`#[macro_export]`): a path
+    /// from the root names it (`crate::m!`, `other::m!`).
+    #[serde(default)]
+    pub macro_export: Vec<crate::Path>,
+    /// The crates whose roots' textual names every module of the crate may
+    /// use after its own names, each by a path from the crate's root (Rust
+    /// writes `#[macro_use] extern crate std;` into every crate: `::std`).
+    #[serde(default)]
+    pub macro_prelude: Vec<crate::Path>,
+    /// The attributes under which what they are said of may not be (Rust's
+    /// `cfg`, which a summary does not decide): a textual definition under
+    /// one does not hide an earlier one of its name, which may be the one
+    /// a name sees.
+    #[serde(default)]
+    pub conditions: Vec<crate::Path>,
 }
 
 /// Where a crate comes from.

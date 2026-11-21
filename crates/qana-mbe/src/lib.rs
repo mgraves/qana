@@ -34,6 +34,7 @@
 //! entries.
 
 mod driver;
+mod format;
 mod input;
 mod matcher;
 mod parsed;
@@ -106,6 +107,9 @@ pub fn expand(
     input: &TokenStream,
     mark: u32,
 ) -> Result<TokenStream, Error> {
+    if rules.format_args {
+        return format::read(input, mark);
+    }
     let (arm, matches) = matcher::match_arms(lang, rules, input)?;
     transcribe::transcribe(rules, arm, &matches, mark)
 }

@@ -28,9 +28,30 @@ pub struct MacroRules {
     /// Whether the macros it invokes by a name alone are its crate's
     /// (`#[macro_export(local_inner_macros)]`).
     pub(crate) local_inner: bool,
+    /// Whether it is the compiler's `format_args!`, which has no arms: its
+    /// expansion is what it reads ([`MacroRules::format_args`]).
+    pub(crate) format_args: bool,
 }
 
 impl MacroRules {
+    /// The compiler's `format_args!` (and `format_args_nl!`,
+    /// `const_format_args!`), as what it reads of its input: an expression
+    /// holding its arguments' expressions (a named argument's value, not
+    /// its name) and the names its format string captures (`{x}`, `{x:?}`,
+    /// a width or precision parameter `{:w$}`, `{:.p$}`), each at its
+    /// place in the string, where it is no named argument's. A format that
+    /// is no string literal (`concat!(…)`) is read as an expression too.
+    /// The driver expands it as it does any macro, and the invocations its
+    /// arguments hold in turn.
+    pub fn format_args() -> MacroRules {
+        MacroRules {
+            arms: Vec::new(),
+            form: Form::MacroRules,
+            local_inner: false,
+            format_args: true,
+        }
+    }
+
     /// The same macro, exported with `local_inner_macros`: a macro its
     /// expansion invokes by a name alone that it writes (not one a
     /// fragment holds) is its crate's, as `$crate::name!` names it, which
@@ -168,7 +189,7 @@ impl MacroRules {
         if arms.is_empty() {
             return Err(Error::new("macros must contain at least one rule", first_origin));
         }
-        Ok(MacroRules { arms, form, local_inner: false })
+        Ok(MacroRules { arms, form, local_inner: false, format_args: false })
     }
 
     /// The syntax it was written in.

@@ -5,8 +5,8 @@
 use std::sync::OnceLock;
 
 use qana_index::{
-    expand_text, expanded_file, invocations, members, references, Edition, ExpandRequest,
-    ExpandedText, Form, InvocationAt, MacroSource, Path, Root, RECURSION_LIMIT,
+    expand_text, expanded_file, invocations, members, references, BuiltinMacro, Edition,
+    ExpandRequest, ExpandedText, Form, InvocationAt, MacroSource, Path, Root, RECURSION_LIMIT,
 };
 use qana_lang::EmbeddedLang;
 
@@ -45,6 +45,7 @@ fn expanded(
         local_inner: Vec::new(),
         of_crate: Vec::new(),
         itself: None,
+        names: Vec::new(),
     };
     expand_text(rust(), &request, table).expect("it expands")
 }
@@ -342,4 +343,121 @@ fn an_invocation_not_given_stays_tokens_and_is_said_again() {
         [at(NESTED, "b));", 0)],
         "`pair!`'s `b` is tokens"
     );
+}
+
+/// A stand-in for `assert!` as a model writes one: the condition, and the
+/// message formatted by `format_args!`, named alone.
+const ASSERT: &str = " {
+    ($cond:expr $(,)?) => {{ if !$cond {} }};
+    ($cond:expr, $($arg:tt)+) => {{ if !$cond { format_args!($($arg)+); } }};
+}";
+
+const ASSERTS: &str = "fn h(c: Cell, n: u8, x: u8) {
+    assert!(c.width() > 0, \"too small: {c:?} {} {wide:w$}\", n, wide = x, w = n);
+    let _ = crate::fmt!(\"{n}\");
+}
+";
+
+/// `inv`, an invocation of `file`, expanded by a built-in the model says
+/// (`macro_`), with `names`.
+fn built_in(
+    file: &str,
+    inv: &InvocationAt,
+    macro_: BuiltinMacro,
+    names: Vec<(Path, Vec<MacroSource>)>,
+) -> ExpandedText {
+    let request = ExpandRequest {
+        definition: MacroSource::Builtin { macro_, condition: None },
+        site: file[inv.span.0 as usize..inv.span.1 as usize].to_string(),
+        site_edition: Edition::E2021,
+        input: None,
+        entry: inv.entry.clone(),
+        mark: 1,
+        limit: RECURSION_LIMIT as u32,
+        local_inner: Vec::new(),
+        of_crate: Vec::new(),
+        itself: None,
+        names,
+    };
+    expand_text(rust(), &request, &[]).expect("it expands")
+}
+
+fn format_args_named(root: Option<Root>, segments: &[&str]) -> (Path, Vec<MacroSource>) {
+    (
+        Path { root, segments: segments.iter().map(|s| s.to_string()).collect() },
+        vec![MacroSource::Builtin { macro_: BuiltinMacro::FormatArgs, condition: None }],
+    )
+}
+
+#[test]
+fn a_built_in_wants_the_macros_it_writes_and_reads_its_format_through_them() {
+    let found = invocations(rust(), ASSERTS);
+    let assert = &found[0];
+    let stand_in = BuiltinMacro::StandIn(ASSERT.to_string());
+    let first = built_in(ASSERTS, assert, stand_in.clone(), Vec::new());
+    assert_eq!(
+        first.wanted(),
+        [Path { root: None, segments: vec!["format_args".to_string()] }],
+        "`format_args!`, named alone, is looked up where the invocation stands"
+    );
+    let names = vec![format_args_named(None, &["format_args"])];
+    let made = built_in(ASSERTS, assert, stand_in, names);
+    assert!(made.wanted().is_empty(), "{:?}", made.wanted());
+    let file = expanded_file(rust(), ASSERTS, &[(assert.clone(), made)]);
+    let wanted: Vec<String> = ["c", "n", "x", "wide", "w"].iter().map(|s| s.to_string()).collect();
+    let refs = file.references(ASSERTS, references(rust(), file.text(), &wanted));
+    let placed: Vec<(&str, u32)> =
+        refs.iter().map(|r| (&ASSERTS[r.span.0 as usize..r.span.1 as usize], r.span.0)).collect();
+    assert_eq!(
+        placed,
+        [
+            ("c", at(ASSERTS, "c.width", 0)),
+            ("c", at(ASSERTS, "c:?}", 0)),
+            ("n", at(ASSERTS, "n, wide", 0)),
+            ("x", at(ASSERTS, "x, w =", 0)),
+            ("n", at(ASSERTS, "n);", 0)),
+        ],
+        "the condition; the message's arguments, a named one's value (not its name); and \\
+         the names the string captures, where it writes them: `w`'s `$` names the named \\
+         argument `w`, not a value"
+    );
+    let c = at(ASSERTS, "c: Cell", 0);
+    assert!(refs
+        .iter()
+        .filter(|r| ASSERTS[r.span.0 as usize..].starts_with('c'))
+        .all(|r| r.binds == Some((c, c + 1))));
+}
+
+#[test]
+fn a_macro_crates_path_of_several_names_is_wanted_as_written() {
+    let found = invocations(rust(), ASSERTS);
+    let fmt = &found[1];
+    let body = " { ($($t:tt)*) => { $crate::__export::format_args!($($t)*) }; }";
+    let first = expanded(ASSERTS, fmt, body, &[]);
+    assert_eq!(
+        first.wanted(),
+        [Path {
+            root: Some(Root::MacroCrate),
+            segments: vec!["__export".to_string(), "format_args".to_string()]
+        }]
+    );
+    let mut request_names =
+        vec![format_args_named(Some(Root::MacroCrate), &["__export", "format_args"])];
+    let request = ExpandRequest {
+        definition: text(body),
+        site: ASSERTS[fmt.span.0 as usize..fmt.span.1 as usize].to_string(),
+        site_edition: Edition::E2021,
+        input: None,
+        entry: fmt.entry.clone(),
+        mark: 1,
+        limit: RECURSION_LIMIT as u32,
+        local_inner: Vec::new(),
+        of_crate: Vec::new(),
+        itself: None,
+        names: std::mem::take(&mut request_names),
+    };
+    let made = expand_text(rust(), &request, &[]).expect("it expands");
+    let file = expanded_file(rust(), ASSERTS, &[(fmt.clone(), made)]);
+    let refs = file.references(ASSERTS, references(rust(), file.text(), &["n".to_string()]));
+    assert_eq!(refs.iter().map(|r| r.span.0).collect::<Vec<_>>(), [at(ASSERTS, "n}", 0)]);
 }

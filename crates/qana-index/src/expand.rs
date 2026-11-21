@@ -79,6 +79,15 @@ pub struct ExpandRequest {
     /// looked for where the invocation stands, whoever wrote it), unless an
     /// expansion between them binds the name, and is expanded with it.
     pub itself: Option<(String, Vec<MacroSource>)>,
+    /// For [`expand_text`](crate::expand_text): the macros other paths that
+    /// its expansions' invocations write name, as the index found them
+    /// (a `$crate` path in the table's crate, rooted at
+    /// [`Root::MacroCrate`]; any other where the request's invocation
+    /// stands, as rustc looks a macro's name up where the invocation is),
+    /// one by each answer: those an earlier expansion of the request said
+    /// it wanted ([`ExpandedText::wanted`](crate::ExpandedText::wanted)).
+    #[serde(default)]
+    pub names: Vec<(Path, Vec<MacroSource>)>,
 }
 
 /// A macro, as a worker is given it.
@@ -107,12 +116,57 @@ pub type MacroTable = [(Path, Vec<MacroSource>)];
 
 /// A macro the compiler defines, whose expansion the project model says
 /// ([`crate::CrateInfo::builtin_macros`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BuiltinMacro {
     /// Rust's `cfg_select!`: the items of each arm (`predicate => { … }`,
     /// `_ => { … }`), each under its condition, which a summary does not
     /// decide: all of them, every one an answer.
     CfgSelect,
+    /// Rust's `format_args!` (and `format_args_nl!`, `const_format_args!`),
+    /// as what it reads: its arguments, and the names its format string
+    /// captures, each where the string writes it
+    /// ([`MacroRules::format_args`]).
+    FormatArgs,
+    /// A macro expanded as the model says it reads, by a `macro_rules!`
+    /// body standing in for it (what follows the name, `{ arms }`, in the
+    /// 2021 edition): `assert!` read as the condition it tests and the
+    /// message it formats, `cfg!` as reading nothing.
+    StandIn(String),
+}
+
+/// `source`'s rules, as `lang`'s macros expand: a definition's arms, read;
+/// a built-in's (`format_args!`'s reading, a stand-in's arms). `cfg_select!`
+/// has none: its expansion is all its arms, which no rules write.
+pub(crate) fn rules_of(
+    lang: &EmbeddedLang,
+    source: &MacroSource,
+) -> Result<Arc<MacroRules>, String> {
+    let local = |rules: MacroRules, local_inner: bool| {
+        Arc::new(if local_inner { rules.local_inner() } else { rules })
+    };
+    match source {
+        MacroSource::Text { body, form, edition, local_inner } => {
+            TokenStream::lex(lang, body, 1, 0, *edition)
+                .and_then(|body| MacroRules::read(&body, *form))
+                .map(|rules| local(rules, *local_inner))
+                .map_err(|e| e.message)
+        }
+        MacroSource::Tokens { body, form, local_inner } => MacroRules::read(body, *form)
+            .map(|rules| local(rules, *local_inner))
+            .map_err(|e| e.message),
+        MacroSource::Builtin { macro_: BuiltinMacro::FormatArgs, .. } => {
+            Ok(Arc::new(MacroRules::format_args()))
+        }
+        MacroSource::Builtin { macro_: BuiltinMacro::StandIn(body), .. } => {
+            TokenStream::lex(lang, body, 1, 0, Edition::E2021)
+                .and_then(|body| MacroRules::read(&body, Form::MacroRules))
+                .map(Arc::new)
+                .map_err(|e| format!("the model's stand-in does not read: {}", e.message))
+        }
+        MacroSource::Builtin { macro_: BuiltinMacro::CfgSelect, .. } => {
+            Err("`cfg_select!` has no rules: its expansion is its arms".to_string())
+        }
+    }
 }
 
 /// An invocation's expansion, read: see the [module docs](self).
@@ -466,20 +520,7 @@ impl Job<'_> {
         if let Some(read) = self.rules.get(&which) {
             return read.clone();
         }
-        let read = match definition {
-            MacroSource::Text { body, form, edition, local_inner } => {
-                TokenStream::lex(self.lang, body, 1, 0, *edition)
-                    .and_then(|body| MacroRules::read(&body, *form))
-                    .map(|rules| if *local_inner { rules.local_inner() } else { rules })
-                    .map(Arc::new)
-                    .map_err(|e| e.message)
-            }
-            MacroSource::Tokens { body, form, local_inner } => MacroRules::read(body, *form)
-                .map(|rules| if *local_inner { rules.local_inner() } else { rules })
-                .map(Arc::new)
-                .map_err(|e| e.message),
-            MacroSource::Builtin { .. } => Err("a built-in macro has no rules".to_string()),
-        };
+        let read = rules_of(self.lang, definition);
         self.rules.insert(which, read.clone());
         read
     }
@@ -517,7 +558,12 @@ impl Job<'_> {
         let mut condition: Option<Path> = None;
         let mut local_inner = inherited.to_vec();
         let tokens = match definition {
-            MacroSource::Text { .. } | MacroSource::Tokens { .. } => {
+            MacroSource::Text { .. }
+            | MacroSource::Tokens { .. }
+            | MacroSource::Builtin {
+                macro_: BuiltinMacro::FormatArgs | BuiltinMacro::StandIn(_),
+                ..
+            } => {
                 let rules = self.rules(definition, which)?;
                 if rules.is_local_inner() {
                     local_inner.push(mark);

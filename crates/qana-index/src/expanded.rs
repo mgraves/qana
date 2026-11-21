@@ -33,7 +33,7 @@ use qana_mbe::{MacroRules, Nested, Outcome, Parsed, Token, TokenKind, TokenStrea
 use qana_sem::{SemDb, Target};
 use serde::{Deserialize, Serialize};
 
-use crate::expand::{BuiltinMacro, ExpandRequest, MacroSource, MacroTable};
+use crate::expand::{rules_of, BuiltinMacro, ExpandRequest, MacroSource, MacroTable};
 use crate::textual::{is_textual, replay};
 use crate::{outside_bodies, units, LineStarts, MemberAccess, Path, Reference, Root, Seen, URI};
 
@@ -99,6 +99,10 @@ pub struct ExpandedText {
     /// span of the request's `site`), or `None` where a macro writes it;
     /// and the expansion that wrote it (its mark: 0 for the site's).
     tokens: Vec<TextToken>,
+    /// The paths of the invocations in it that it holds unexpanded, each
+    /// once: those no macro the job was given names.
+    #[serde(default)]
+    wanted: Vec<Path>,
 }
 
 /// A token of an [`ExpandedText`]: its span in the text; where the site
@@ -120,6 +124,61 @@ impl ExpandedText {
     pub fn text(&self) -> &str {
         &self.text
     }
+
+    /// The paths of the invocations its expansions write that it holds
+    /// unexpanded, each once, as its job was given nothing they name: a
+    /// `$crate` path rooted at [`Root::MacroCrate`] (the table's crate), a
+    /// name alone or another path as written. Given their macros too
+    /// ([`ExpandRequest::names`]), the job expands them in their place.
+    pub fn wanted(&self) -> &[Path] {
+        &self.wanted
+    }
+}
+
+/// The path `tokens` write (an invocation's, before its `!`), as a summary
+/// says one: `$crate` rooted at the macro's crate, a leading `::` at the
+/// global root, `crate`, `self` and `super`s at theirs. `None` for tokens
+/// that are no path.
+fn path_of(tokens: &[Token]) -> Option<Path> {
+    // Names, each after a `::` but the first, which may follow one.
+    let mut names: Vec<&Token> = Vec::new();
+    let mut global = false;
+    let mut want_name = true;
+    for (k, t) in tokens.iter().enumerate() {
+        if t.kind == TokenKind::Punct && &*t.text == "::" {
+            if k == 0 {
+                global = true;
+            } else if want_name {
+                return None;
+            }
+            want_name = true;
+        } else if t.kind == TokenKind::Ident && want_name {
+            names.push(t);
+            want_name = false;
+        } else {
+            return None;
+        }
+    }
+    if want_name {
+        return None;
+    }
+    let mut names = names.as_slice();
+    let mut root = global.then_some(Root::Global);
+    if !global {
+        match names.first().map(|t| &*t.text) {
+            Some("$crate") => (root, names) = (Some(Root::MacroCrate), &names[1..]),
+            Some("crate") => (root, names) = (Some(Root::Crate), &names[1..]),
+            Some("self") => (root, names) = (Some(Root::Unit(0)), &names[1..]),
+            Some("super") => {
+                let up = names.iter().take_while(|t| &*t.text == "super").count();
+                (root, names) = (Some(Root::Unit(up as u32)), &names[up..]);
+            }
+            _ => {}
+        }
+    }
+    let segments: Vec<String> =
+        names.iter().map(|t| t.text.strip_prefix("r#").unwrap_or(&t.text).to_string()).collect();
+    (!segments.is_empty()).then_some(Path { root, segments })
 }
 
 /// Whether an expansion read at `entry` stands in its place in
@@ -147,36 +206,39 @@ pub fn expand_text(
         Some(input) => input.clone(),
         None => site.invocation().ok_or("the site is no invocation")?.1,
     };
-    let by_path: HashMap<&Path, usize> =
-        table.iter().enumerate().map(|(k, (path, _))| (path, k)).collect();
+    // The table's paths, then the request's names: each path's macros,
+    // the first of them read once.
+    let mut by_path: HashMap<&Path, usize> = HashMap::new();
+    let known: Vec<&(Path, Vec<MacroSource>)> = table.iter().chain(&request.names).collect();
+    for (k, (path, _)) in known.iter().enumerate() {
+        by_path.entry(path).or_insert(k);
+    }
     let itself = request.itself.as_ref();
-    let mut read: HashMap<(usize, usize), Option<Arc<MacroRules>>> = HashMap::new();
-    let mut rules_of = |which: (usize, usize), source: &MacroSource| -> Option<Arc<MacroRules>> {
-        read.entry(which).or_insert_with(|| rules(lang, source).ok()).clone()
+    let mut read: HashMap<usize, Option<Arc<MacroRules>>> = HashMap::new();
+    let mut rules_once = |which: usize, source: &MacroSource| -> Option<Arc<MacroRules>> {
+        read.entry(which).or_insert_with(|| rules_of(lang, source).ok()).clone()
     };
-    let mut resolve = |path: &[Token]| -> Option<Arc<MacroRules>> {
-        let texts: Vec<&str> = path.iter().map(|t| &*t.text).collect();
-        match texts.as_slice() {
-            ["$crate", "::", name] => {
-                let path = Path { root: Some(Root::MacroCrate), segments: vec![name.to_string()] };
-                let &k = by_path.get(&path)?;
-                rules_of((k, 0), table[k].1.first()?)
+    let mut resolve = |tokens: &[Token]| -> Option<Arc<MacroRules>> {
+        let path = path_of(tokens)?;
+        // The invocation's own name alone names its macro, whoever wrote it.
+        if let (None, [name], Some((own, macros))) = (path.root, path.segments.as_slice(), itself) {
+            if name == own {
+                return rules_once(usize::MAX, macros.first()?);
             }
-            [name] => {
-                let (own, macros) = itself?;
-                (*name == own.as_str() && path[0].kind == TokenKind::Ident)
-                    .then(|| macros.first())
-                    .flatten()
-                    .and_then(|m| rules_of((usize::MAX, 0), m))
-            }
-            _ => None,
         }
+        let &k = by_path.get(&path)?;
+        rules_once(k, known[k].1.first()?)
     };
     let limit = request.limit as usize;
-    let mut out = ExpandedText { text: String::new(), tokens: Vec::new() };
+    let mut out = ExpandedText { text: String::new(), tokens: Vec::new(), wanted: Vec::new() };
     match &request.definition {
-        MacroSource::Text { .. } | MacroSource::Tokens { .. } => {
-            let rules = self::rules(lang, &request.definition)?;
+        MacroSource::Text { .. }
+        | MacroSource::Tokens { .. }
+        | MacroSource::Builtin {
+            macro_: BuiltinMacro::FormatArgs | BuiltinMacro::StandIn(_),
+            ..
+        } => {
+            let rules = rules_of(lang, &request.definition)?;
             let expansion = qana_mbe::expand_nested(
                 lang,
                 &rules,
@@ -201,28 +263,17 @@ pub fn expand_text(
     Ok(out)
 }
 
-/// A definition's rules: a file's (its body's text), an expansion's (its
-/// tokens). A built-in has none.
-fn rules(lang: &EmbeddedLang, source: &MacroSource) -> Result<Arc<MacroRules>, String> {
-    match source {
-        MacroSource::Text { body, form, edition, local_inner } => {
-            TokenStream::lex(lang, body, 1, 0, *edition)
-                .and_then(|body| MacroRules::read(&body, *form))
-                .map(|rules| if *local_inner { rules.local_inner() } else { rules })
-                .map(Arc::new)
-                .map_err(|e| e.message)
-        }
-        MacroSource::Tokens { body, form, local_inner } => MacroRules::read(body, *form)
-            .map(|rules| if *local_inner { rules.local_inner() } else { rules })
-            .map(Arc::new)
-            .map_err(|e| e.message),
-        MacroSource::Builtin { .. } => Err("a built-in macro has no rules".to_string()),
-    }
-}
-
 /// `parsed`'s text into `out`, each expanded invocation of `nested` in its
-/// place (rendered the same way), the rest as written.
+/// place (rendered the same way), the rest as written; the paths of those
+/// nothing named, wanted.
 fn render(parsed: &Parsed, nested: &[Nested], out: &mut ExpandedText) {
+    for n in nested {
+        if let (Outcome::Unresolved, Some(path)) = (&n.outcome, path_of(&n.path)) {
+            if !out.wanted.contains(&path) {
+                out.wanted.push(path);
+            }
+        }
+    }
     let mut expanded: Vec<(&Nested, &qana_mbe::Expansion)> = nested
         .iter()
         .filter_map(|n| match &n.outcome {

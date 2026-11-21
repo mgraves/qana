@@ -142,6 +142,7 @@ fn request(body: &str, form: Form, site: &str, entry: &str) -> ExpandRequest {
         local_inner: Vec::new(),
         of_crate: Vec::new(),
         itself: None,
+        names: Vec::new(),
     }
 }
 

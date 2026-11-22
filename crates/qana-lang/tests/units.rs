@@ -1,7 +1,8 @@
 //! The binding annotations a project index reads units, paths,
-//! visibility, imports, attributes and impl blocks from (`@unit`, `@root`,
-//! `@vis`, `@visibility`, `@import`, `@import_glob`, `@import_prefix`,
-//! `@loads`, `@attribute`, `@attributes`, `@impl`):
+//! visibility, imports, attributes, conditions and impl blocks from
+//! (`@unit`, `@root`, `@vis`, `@visibility`, `@import`, `@import_glob`,
+//! `@import_prefix`, `@loads`, `@attribute`, `@attributes`, `@condition`,
+//! `@predicate`, `@predicates`, `@predicate_literal`, `@impl`):
 //! what each compiles to, what a path spells, and what each refuses.
 //! Unitlang (`examples/units`) is their language; qana-index's tests read
 //! its summaries.
@@ -248,3 +249,54 @@ fn the_path_at_a_name_says_whether_an_import_names_it() {
     assert_eq!(imported("v)"), Some(true), "a visibility's path");
     assert_eq!(imported("b;"), Some(false), "a path in a body");
 }
+
+/// A language whose attributes say conditions, as Rust's `cfg` and
+/// `cfg_attr` do.
+const CONDITIONAL: &str = r#"language Conditional
+token WS = /\s+/ @trivia
+token IDENT = /[a-z_]+/ @specialize
+token STR = /"[^"]*"/
+token LPAREN = "("
+token RPAREN = ")"
+token COMMA = ","
+token EQ = "="
+keywords IDENT = when cfg item
+start file
+rule file = File: a:attr* i:"item" @attributes(a, i)
+rule attr =
+  | Cfg:  k:"cfg" "(" p:pred ")" @attribute(k) @condition(p)
+  | When: k:"when" "(" p:pred "," a:attr* ")" @attribute(k) @attributes(a) @condition(p)
+rule pred =
+  | Opt:  n:IDENT @predicate(n)
+  | Val:  n:IDENT "=" v:STR @predicate(n, v)
+  | List: n:IDENT "(" l:pred* ")" @predicates(n, l)
+  | Lit:  l:STR @predicate_literal(l)
+"#;
+
+#[test]
+fn a_condition_and_its_predicates_compile_into_the_binding() {
+    let out = compile_source(&QanaToolchain::new(), CONDITIONAL);
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    let b = &out.def.binding;
+    let prod = |name: &str| {
+        (0..out.def.sg.prods.len()).find(|&i| out.def.sg.prod_name(i) == name).unwrap() as u16
+    };
+    assert!(b.conditions.iter().any(|e| e.1 == prod("Cfg")));
+    assert!(b.conditions.iter().any(|e| e.1 == prod("When")), "a conditional attribute's too");
+    assert!(b.predicates.iter().any(|e| e.1 == prod("Opt") && e.3.is_none()));
+    assert!(b.predicates.iter().any(|e| e.1 == prod("Val") && e.3.is_some()));
+    assert!(b.predicate_lists.iter().any(|e| e.1 == prod("List")));
+    assert!(b.predicate_literals.iter().any(|e| e.1 == prod("Lit")));
+}
+
+#[test]
+fn a_condition_and_a_predicate_take_their_labels() {
+    refused("rule file = File: p:IDENT @condition()", "@condition takes the label");
+    refused("rule file = File: p:IDENT @condition(p) @condition(p)", "duplicate @condition");
+    refused("rule file = File: p:IDENT @condition(q)", "no symbol labeled `q`");
+    refused("rule file = File: n:IDENT @predicate()", "@predicate takes");
+    refused("rule file = File: n:IDENT v:IDENT @predicate(n, v, v)", "@predicate takes");
+    refused("rule file = File: n:IDENT @predicates(n)", "@predicates takes");
+    refused("rule file = File: n:IDENT @predicate_literal(n, n)", "@predicate_literal takes");
+}
+

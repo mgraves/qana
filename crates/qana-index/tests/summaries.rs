@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use qana_grammar::green::ERROR_NT;
 use qana_grammar::{GreenChild, GreenNode};
 use qana_index::{
-    summarize, summary_key, Attribute, EscapingName, Impl, Import, Path, Root, Summary,
+    summarize, summary_key, Attribute, Condition, EscapingName, Impl, Import, Path, Root, Summary,
     TextualLink, TypeRef, Unit, Visibility,
 };
 use qana_lang::EmbeddedLang;
@@ -300,6 +300,7 @@ fn a_rust_files_summary_holds_its_units_imports_reexports_visibilities_and_impls
         attributes: Vec::new(),
         open: false,
         textual: Vec::new(),
+        condition: None,
     };
     assert_eq!(
         offers.units(),
@@ -334,18 +335,21 @@ fn a_rust_files_summary_holds_its_units_imports_reexports_visibilities_and_impls
                 )),
                 trait_path: Some(path(None, &["Display"])),
                 generics: vec!["T".to_string()],
+                condition: None,
             },
             Impl {
                 unit: None,
                 self_type: Some(written(point.clone(), Vec::new())),
                 trait_path: None,
                 generics: Vec::new(),
+                condition: None,
             },
             Impl {
                 unit: None,
                 self_type: Some(written(point.clone(), Vec::new())),
                 trait_path: Some(path(None, &["fmt", "Debug"])),
                 generics: Vec::new(),
+                condition: None,
             },
         ],
         "an impl block's type is as written, its generic parameters beside it"
@@ -359,6 +363,7 @@ fn a_rust_files_summary_holds_its_units_imports_reexports_visibilities_and_impls
         visibility: private(),
         attributes: Vec::new(),
         loads: false,
+        condition: None,
     };
     assert_eq!(
         offers.reexports(),
@@ -444,7 +449,22 @@ fn parses_cleanly(text: &str) -> bool {
 }
 
 fn attribute(segments: &[&str], conditional: bool) -> Attribute {
-    Attribute { path: path(None, segments), conditional, args: Vec::new() }
+    assert!(!conditional, "an attribute held under a condition says it: `under`");
+    Attribute { path: path(None, segments), conditional, args: Vec::new(), condition: None }
+}
+
+/// An attribute a conditional attribute holds, under `condition`.
+fn under(segments: &[&str], condition: Condition) -> Attribute {
+    Attribute {
+        path: path(None, segments),
+        conditional: true,
+        args: Vec::new(),
+        condition: Some(condition),
+    }
+}
+
+fn option(name: &str) -> Condition {
+    Condition::Option(name.into())
 }
 
 const ATTRIBUTES: &str = "//! A crate.
@@ -492,6 +512,11 @@ fn cfg_attr(x: u8) -> u8 {
 }
 ";
 
+/// `not(feature = "std")`.
+fn not_std() -> Condition {
+    Condition::Not(Box::new(Condition::Value("feature".into(), "std".into())))
+}
+
 #[test]
 fn a_files_inner_attributes_are_its_own_units_and_a_conditional_ones_hold_under_it() {
     assert!(parses_cleanly(ATTRIBUTES), "`cfg_attr` names a function, a method and a call too");
@@ -501,11 +526,14 @@ fn a_files_inner_attributes_are_its_own_units_and_a_conditional_ones_hold_under_
         [
             attribute(&["no_std"], false),
             attribute(&["cfg_attr"], false),
-            attribute(&["no_core"], true),
-            attribute(&["allow"], true),
+            under(&["no_core"], not_std()),
+            under(&["allow"], not_std()),
             attribute(&["cfg_attr"], false),
-            attribute(&["cfg_attr"], true),
-            attribute(&["feature"], true),
+            under(&["cfg_attr"], option("docsrs")),
+            under(
+                &["feature"],
+                Condition::All(vec![option("docsrs"), Condition::All(Vec::new())])
+            ),
             attribute(&["doc"], false),
         ],
         "a struct's, a field's and an impl block's attributes are not the file's"
@@ -524,7 +552,7 @@ fn a_modules_attributes_are_its_items_then_its_bodys() {
     assert_eq!(of("inner"), Some(Vec::new()), "what a module says is not its children's");
     assert_eq!(
         of("declared"),
-        Some(vec![attribute(&["cfg_attr"], false), attribute(&["no_implicit_prelude"], true)])
+        Some(vec![attribute(&["cfg_attr"], false), under(&["no_implicit_prelude"], option("test"))])
     );
 }
 

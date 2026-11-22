@@ -243,8 +243,9 @@ fn what_the_crates_registry_found() {
     assert!(stmt("if let Some(&c @ b'0'..=b'9') = s {}")
         .contains("(RefPat & (BindPat c @ (RangeInclPat b'0' . . = b'9')))"));
     assert!(stmt("match t { (11, ..26) => {} _ => {} }").contains("(RangeToExclPat . . 26)"));
-    // Outer attributes on call arguments, array and tuple elements.
-    assert_eq!(stmt("f(#[cfg(unix)] a, b);"), "(ExprStmt (SCall f ( (Args (AttrElem (OuterAttr # [ (Attr cfg (ParenTt ( unix ))) ]) a) , b) )) ;)");
+    // Outer attributes on call arguments, array and tuple elements: a
+    // `cfg` one is its own attribute, its predicate read.
+    assert_eq!(stmt("f(#[cfg(unix)] a, b);"), "(ExprStmt (SCall f ( (Args (AttrElem (OuterAttr # [ (Cfg cfg ( unix )) ]) a) , b) )) ;)");
     // An inherent impl on a trait object with bounds.
     parses("impl dyn Io + Send {}");
     // `impl <` begins generics; an impl on a qualified path with none is

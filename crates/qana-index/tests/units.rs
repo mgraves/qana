@@ -40,6 +40,7 @@ fn unit(name: &str, parent: Option<u32>, inline: bool, visibility: Visibility) -
         attributes: Vec::new(),
         open: false,
         textual: Vec::new(),
+        condition: None,
     }
 }
 
@@ -124,13 +125,15 @@ fn impl_blocks_say_what_they_are_of_and_which_trait() {
                 unit: None,
                 self_type: Some(spelled(point.clone())),
                 trait_path: None,
-                generics: Vec::new()
+                generics: Vec::new(),
+                condition: None,
             },
             Impl {
                 unit: None,
                 self_type: Some(spelled(point)),
                 trait_path: Some(path(None, &["Display"])),
                 generics: Vec::new(),
+                condition: None,
             },
         ]
     );
@@ -147,6 +150,7 @@ fn imports_are_paths_after_their_groups_prefix_and_a_public_one_is_offered() {
         visibility,
         attributes: Vec::new(),
         loads: false,
+        condition: None,
     };
     assert_eq!(
         summary.offers().reexports(),

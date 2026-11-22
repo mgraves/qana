@@ -600,7 +600,8 @@ impl Job<'_> {
         let mut summary = summarize_tree(lang, &parsed.text, parsed.tree.clone());
         let mut changed = false;
         if let Some(condition) = condition {
-            let under = Attribute { path: condition, conditional: false, args: Vec::new() };
+            let under =
+                Attribute { path: condition, conditional: false, args: Vec::new(), condition: None };
             let mark = |links: &mut Vec<TextualLink>| {
                 for link in links {
                     if let TextualLink::Def { attributes, .. } = link {

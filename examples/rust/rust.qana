@@ -143,6 +143,7 @@ token KW_DEFAULT = /default(?=\s+(fn|type|const|unsafe|async|impl|extern)\s)/ @s
 token KW_RAW     = /raw(?=\s+(const|mut)\s)/                           @style(keyword)
 token KW_SAFE    = /safe(?=\s+(fn|static)\s)/                          @style(keyword)
 token KW_CFG_ATTR = /cfg_attr(?=\s*\()/                               @style(variable)
+token KW_CFG      = /cfg(?=\s*\()/                                    @style(variable)
 token KW_DERIVE   = /derive(_const)?(?=\s*\()/                                 @style(variable)
 token KW_MACRO_USE = /macro_use(?=\s*\()/                            @style(variable)
 token KW_MACRO_EXPORT = /macro_export(?=\s*\()/                      @style(variable)
@@ -337,15 +338,15 @@ rule items_opt = item*
 rule item =
   | Item:      a:outer_attrs_opt k:item_kind @attributes(a, k)
   | PubItem:   a:outer_attrs_opt v:vis k:vis_item_kind @visibility(v, k) @attributes(a, k)
-  | ImplItem:  outer_attrs_opt impl_def
+  | ImplItem:  a:outer_attrs_opt k:impl_def @attributes(a, k)
 
 // An item in a block. A macro invocation there is a statement (`m! { … }`,
 // `m!(…);`), as rustc reads it; a macro definition is an item.
 rule stmt_item =
-  | StmtItem:        outer_attrs_opt vis_item_kind
-  | StmtPubItem:     outer_attrs_opt v:vis k:vis_item_kind @visibility(v, k)
-  | StmtImplItem:    outer_attrs_opt impl_def
-  | StmtMacroDef:    outer_attrs_opt macro_def
+  | StmtItem:        a:outer_attrs_opt k:vis_item_kind @attributes(a, k)
+  | StmtPubItem:     a:outer_attrs_opt v:vis k:vis_item_kind @visibility(v, k) @attributes(a, k)
+  | StmtImplItem:    a:outer_attrs_opt k:impl_def @attributes(a, k)
+  | StmtMacroDef:    a:outer_attrs_opt k:macro_def @attributes(a, k)
 
 // ---- attributes ----
 
@@ -361,13 +362,16 @@ rule inner_attr = InnerAttr: h:HASH_BANG b:BANG o:"[" a:attr c:"]" @style(decora
 // macro) is defined in no Rust file this grammar reads: its path stands in
 // the `attribute` namespace, where nothing is defined, and escapes. A
 // conditional attribute (`cfg_attr(pred, attrs)`) holds its attributes
-// under its predicate, which is not decided here. A derive's paths name
-// derive macros, in the `derive` namespace, where nothing is defined
-// either.
+// under its predicate, and `cfg(pred)` says the construct it is said of is
+// under its predicate (`@condition`), which a project index decides in a
+// crate's configuration. A derive's paths name derive macros, in the
+// `derive` namespace, where nothing is defined either.
 rule attr =
   | Attr:       p:attr_path attr_input_opt @style(inherit, p) @ns(attribute, p) @attribute(p)
   | UnsafeAttr: "unsafe" "(" p:attr_path attr_input_opt ")" @style(inherit, p) @ns(attribute, p) @attribute(p)
-  | CfgAttr:    k:KW_CFG_ATTR "(" cfg_meta "," a:cfg_attrs_opt ")" @style(inherit, k, a) @attribute(k) @attributes(a)
+  | CfgAttr:    k:KW_CFG_ATTR "(" p:cfg_meta "," a:cfg_attrs_opt ")" @style(inherit, k, a) @attribute(k) @attributes(a) @condition(p)
+  | Cfg:        k:KW_CFG "(" p:cfg_meta ")" @style(inherit, k) @attribute(k) @condition(p)
+  | CfgTrail:   k:KW_CFG "(" p:cfg_meta "," ")" @style(inherit, k) @attribute(k) @condition(p)
   | Derive:     k:KW_DERIVE "(" d:derives_opt ")" @style(inherit, k) @attribute(k) @ns(derive, d)
   | MacroUse:   k:KW_MACRO_USE "(" n:macro_use_names_opt ")" @style(inherit, k) @attribute(k, n)
   | MacroExport: k:KW_MACRO_EXPORT "(" a:macro_export_args_opt ")" @style(inherit, k) @attribute(k, a)
@@ -419,12 +423,12 @@ rule cfg_attr_list = attr+ % ","
 // `version("1.80")`), as a meta item; or a literal (`true`).
 rule cfg_meta =
   | CfgPred: cfg_pred
-  | CfgLit:  literal
+  | CfgLit:  l:literal @predicate_literal(l)
 
 rule cfg_pred =
-  | CfgOption: name
-  | CfgValue:  name EQ literal
-  | CfgList:   name "(" cfg_metas_opt ")"
+  | CfgOption: n:name @predicate(n)
+  | CfgValue:  n:name EQ v:literal @predicate(n, v)
+  | CfgList:   n:name "(" l:cfg_metas_opt ")" @predicates(n, l)
 
 rule cfg_metas_opt =
   | CfgMetasNone:
@@ -488,7 +492,7 @@ rule tt_token =
   | TtRaw3Open: RAW3_OPEN | TtPRaw3Open: PRAW3_OPEN | TtR3Close: R3_CLOSE | TtR3Quote: R3_QUOTE
   | TtR3Text: R3_TEXT
   | TtUnion: KW_UNION | TtAuto: KW_AUTO | TtDefault: KW_DEFAULT | TtRaw: KW_RAW
-  | TtSafe: KW_SAFE | TtCfgAttr: KW_CFG_ATTR | TtDerive: KW_DERIVE
+  | TtSafe: KW_SAFE | TtCfgAttr: KW_CFG_ATTR | TtCfg: KW_CFG | TtDerive: KW_DERIVE
   | TtMacroUse: KW_MACRO_USE | TtMacroExport: KW_MACRO_EXPORT
   | TtEqEq: EQ_EQ | TtEqArrow: EQ_ARROW | TtEq: EQ | TtBangEq: BANG_EQ
   | TtBang: BANG | TtLtShlEq: LT_SHLEQ | TtLtShl: LT_SHL | TtLtLe: LT_LE
@@ -523,6 +527,7 @@ rule name =
   | Name:    t:IDENT @style(inherit, t)
   | RawName: t:RAW_IDENT @style(inherit, t)
   | CfgAttrName: t:KW_CFG_ATTR @style(inherit, t)
+  | CfgName: t:KW_CFG @style(inherit, t)
   | DeriveName: t:KW_DERIVE @style(inherit, t)
   | MacroUseKwName: t:KW_MACRO_USE @style(inherit, t)
   | MacroExportKwName: t:KW_MACRO_EXPORT @style(inherit, t)
@@ -531,7 +536,7 @@ rule name =
 rule ident_fragment =
   | IdentFragment: IDENT | RawIdentFragment: RAW_IDENT
   | UnionFragment: KW_UNION | AutoFragment: KW_AUTO | DefaultFragment: KW_DEFAULT
-  | RawFragment: KW_RAW | SafeFragment: KW_SAFE | CfgAttrFragment: KW_CFG_ATTR
+  | RawFragment: KW_RAW | SafeFragment: KW_SAFE | CfgAttrFragment: KW_CFG_ATTR | CfgFragment: KW_CFG
   | DeriveFragment: KW_DERIVE | MacroUseFragment: KW_MACRO_USE
   | MacroExportFragment: KW_MACRO_EXPORT
   | AsFragment: "as" | BreakFragment: "break" | ConstFragment: "const"
@@ -763,7 +768,7 @@ rule vis_item_kind =
   | Static:       static_def
   | TypeAlias:    type_alias
   | Trait:        trait_head n:name generics_opt s:colon_bounds_opt where_opt open:"{" b:assoc_body "}" @outline(n, class) @fold(block, open) @style(type, n) @def(n, hoisted, open) @module(b) @scope @bounds(s)
-  | ExternBlock:  extern_head open:"{" inner_attrs_opt foreign_items_opt "}" @fold(block, open)
+  | ExternBlock:  extern_head open:"{" a:inner_attrs_opt f:foreign_items_opt "}" @fold(block, open) @attributes(a, f)
   | ExternCrate:  "extern" "crate" n:name ";" @outline(n, module) @def(n, hoisted, open) @root(global, n) @import @loads
   | ExternCrateAs: "extern" "crate" n:name "as" r:name ";" @outline(n, module) @def(r, hoisted, open) @root(global, n) @import @loads
   | ExternSelfAs: "extern" "crate" "self" "as" r:name ";" @def(r, hoisted, open) @root(crate) @import @loads
@@ -862,10 +867,10 @@ rule params_opt =
 rule param_list = param+ % ","
 
 rule param =
-  | SelfParam:     outer_attrs_opt self_param
-  | Param:         outer_attrs_opt p:pat_no_alt COLON t:type @typed(p, t)
-  | VariadicParam: outer_attrs_opt DOT_DOT DOT_DOT DOT
-  | NamedVariadic: outer_attrs_opt pat_no_alt COLON DOT_DOT DOT_DOT DOT
+  | SelfParam:     a:outer_attrs_opt s:self_param @attributes(a, s)
+  | Param:         a:outer_attrs_opt p:pat_no_alt COLON t:type @typed(p, t) @attributes(a, p)
+  | VariadicParam: a:outer_attrs_opt d:DOT_DOT DOT_DOT DOT @attributes(a, d)
+  | NamedVariadic: a:outer_attrs_opt p:pat_no_alt COLON DOT_DOT DOT_DOT DOT @attributes(a, p)
 
 rule self_param =
   | SelfValue:      s:"self" @def(s) @self_value
@@ -898,7 +903,7 @@ rule fields_opt =
 
 rule field_list = field+ % ","
 
-rule field = Field: outer_attrs_opt v:vis_opt n:name COLON t:type @outline(n, field) @def(n, hoisted) @visibility(v, n) @typed(n, t)
+rule field = Field: a:outer_attrs_opt v:vis_opt n:name COLON t:type @outline(n, field) @def(n, hoisted) @visibility(v, n) @typed(n, t) @attributes(a, n)
 
 // A tuple field: after `pub (`, the next token tells a restricted
 // visibility (`crate`, `self`, `super`, `in`) from a tuple type, where
@@ -911,13 +916,13 @@ rule tuple_fields_opt =
 rule tuple_field_list = tuple_field+ % ","
 
 rule tuple_field =
-  | TupleField:        outer_attrs_opt type
-  | TupleFieldPub:     outer_attrs_opt "pub" type_np
-  | TupleFieldPubParen: outer_attrs_opt "pub" "(" paren_type_rest
-  | TupleFieldPubCrate: outer_attrs_opt "pub" "(" "crate" ")" type
-  | TupleFieldPubSelf:  outer_attrs_opt "pub" "(" "self" ")" type
-  | TupleFieldPubSuper: outer_attrs_opt "pub" "(" "super" ")" type
-  | TupleFieldPubIn:    outer_attrs_opt "pub" "(" "in" plain_path ")" type
+  | TupleField:        a:outer_attrs_opt t:type @attributes(a, t)
+  | TupleFieldPub:     a:outer_attrs_opt "pub" t:type_np @attributes(a, t)
+  | TupleFieldPubParen: a:outer_attrs_opt "pub" "(" t:paren_type_rest @attributes(a, t)
+  | TupleFieldPubCrate: a:outer_attrs_opt "pub" "(" "crate" ")" t:type @attributes(a, t)
+  | TupleFieldPubSelf:  a:outer_attrs_opt "pub" "(" "self" ")" t:type @attributes(a, t)
+  | TupleFieldPubSuper: a:outer_attrs_opt "pub" "(" "super" ")" t:type @attributes(a, t)
+  | TupleFieldPubIn:    a:outer_attrs_opt "pub" "(" "in" plain_path ")" t:type @attributes(a, t)
 
 // Enums.
 // Variants are members: `E::A`, or `A` after `use E::*`.
@@ -929,9 +934,9 @@ rule variants_opt =
 rule variant_list = variant+ % ","
 
 rule variant =
-  | Variant:       outer_attrs_opt vis_opt n:name discriminant_opt @outline(n, constant) @def(n, hoisted)
-  | TupleVariant:  outer_attrs_opt vis_opt n:name open:"(" f:tuple_fields_opt close:")" discriminant_opt @outline(n, constant) @fold(list, open, close) @def(n, hoisted) @positional(f)
-  | StructVariant: outer_attrs_opt vis_opt n:name open:"{" fields_opt close:"}" discriminant_opt @outline(n, constant) @fold(block, open, close) @def(n, hoisted)
+  | Variant:       a:outer_attrs_opt vis_opt n:name discriminant_opt @outline(n, constant) @def(n, hoisted) @attributes(a, n)
+  | TupleVariant:  a:outer_attrs_opt vis_opt n:name open:"(" f:tuple_fields_opt close:")" discriminant_opt @outline(n, constant) @fold(list, open, close) @def(n, hoisted) @positional(f) @attributes(a, n)
+  | StructVariant: a:outer_attrs_opt vis_opt n:name open:"{" fields_opt close:"}" discriminant_opt @outline(n, constant) @fold(block, open, close) @def(n, hoisted) @attributes(a, n)
 
 rule discriminant_opt = discriminant?
 
@@ -1020,10 +1025,10 @@ rule assoc_body = AssocBody: inner_attrs_opt assoc_items_opt @scope(members)
 rule assoc_items_opt = assoc_item*
 
 rule assoc_item =
-  | AssocItem:    outer_attrs_opt assoc_vis_kind
-  | PubAssocItem: outer_attrs_opt v:vis k:assoc_vis_kind @visibility(v, k)
-  | AssocMacro:   outer_attrs_opt m:item_macro @expansion(assoc_items_opt, m)
-  | AssocMacroDef: outer_attrs_opt macro_def
+  | AssocItem:    a:outer_attrs_opt k:assoc_vis_kind @attributes(a, k)
+  | PubAssocItem: a:outer_attrs_opt v:vis k:assoc_vis_kind @visibility(v, k) @attributes(a, k)
+  | AssocMacro:   a:outer_attrs_opt m:item_macro @expansion(assoc_items_opt, m) @attributes(a, m)
+  | AssocMacroDef: a:outer_attrs_opt k:macro_def @attributes(a, k)
 
 rule assoc_vis_kind =
   | AssocFn:     fn_def
@@ -1038,9 +1043,9 @@ rule extern_head =
 rule foreign_items_opt = foreign_item*
 
 rule foreign_item =
-  | ForeignItem:    outer_attrs_opt foreign_vis_kind
-  | PubForeignItem: outer_attrs_opt v:vis k:foreign_vis_kind @visibility(v, k)
-  | ForeignMacro:   outer_attrs_opt m:item_macro @expansion(foreign_items_opt, m)
+  | ForeignItem:    a:outer_attrs_opt k:foreign_vis_kind @attributes(a, k)
+  | PubForeignItem: a:outer_attrs_opt v:vis k:foreign_vis_kind @visibility(v, k) @attributes(a, k)
+  | ForeignMacro:   a:outer_attrs_opt m:item_macro @expansion(foreign_items_opt, m) @attributes(a, m)
 
 rule foreign_vis_kind =
   | ForeignFn:      fn_def
@@ -1083,9 +1088,9 @@ rule generics =
 rule generic_param_list = generic_param+ % ","
 
 rule generic_param =
-  | LifetimeParam: outer_attrs_opt l:lifetime lifetime_bounds_opt @def(l, hoisted) @ns(lifetime)
-  | TypeParam:     outer_attrs_opt n:name colon_bounds_opt type_default_opt @style(type, n) @def(n, hoisted, open) @generic
-  | ConstParam:    outer_attrs_opt "const" n:name COLON type const_default_opt @def(n, hoisted) @generic
+  | LifetimeParam: a:outer_attrs_opt l:lifetime lifetime_bounds_opt @def(l, hoisted) @ns(lifetime) @attributes(a, l)
+  | TypeParam:     a:outer_attrs_opt n:name colon_bounds_opt type_default_opt @style(type, n) @def(n, hoisted, open) @generic @attributes(a, n)
+  | ConstParam:    a:outer_attrs_opt "const" n:name COLON type const_default_opt @def(n, hoisted) @generic @attributes(a, n)
 
 rule lifetime_bounds_opt = lifetime_bounds?
 
@@ -1235,10 +1240,10 @@ rule fn_ptr_params_opt =
 rule fn_ptr_param_list = fn_ptr_param+ % ","
 
 rule fn_ptr_param =
-  | FnPtrParam:      outer_attrs_opt type
-  | FnPtrNamedParam: outer_attrs_opt name COLON type
-  | FnPtrUnnamedParam: outer_attrs_opt "_" COLON type
-  | FnPtrVariadic:   outer_attrs_opt DOT_DOT DOT_DOT DOT
+  | FnPtrParam:      a:outer_attrs_opt t:type @attributes(a, t)
+  | FnPtrNamedParam: a:outer_attrs_opt n:name COLON type @attributes(a, n)
+  | FnPtrUnnamedParam: a:outer_attrs_opt u:"_" COLON type @attributes(a, u)
+  | FnPtrVariadic:   a:outer_attrs_opt d:DOT_DOT DOT_DOT DOT @attributes(a, d)
 
 rule amp =
   | Amp:    AMP
@@ -1335,12 +1340,12 @@ rule pat_fields_opt =
 rule pat_field_list = pat_field+ % ","
 
 rule pat_field =
-  | PatFieldShort:       outer_attrs_opt n:name @def(n)
-  | PatFieldMutShort:    outer_attrs_opt "mut" n:name @def(n)
-  | PatFieldRefShort:    outer_attrs_opt "ref" n:name @def(n)
-  | PatFieldRefMutShort: outer_attrs_opt "ref" "mut" n:name @def(n)
-  | PatField:            outer_attrs_opt name COLON pat
-  | PatFieldIndex:       outer_attrs_opt INT COLON pat
+  | PatFieldShort:       a:outer_attrs_opt n:name @def(n) @attributes(a, n)
+  | PatFieldMutShort:    a:outer_attrs_opt "mut" n:name @def(n) @attributes(a, n)
+  | PatFieldRefShort:    a:outer_attrs_opt "ref" n:name @def(n) @attributes(a, n)
+  | PatFieldRefMutShort: a:outer_attrs_opt "ref" "mut" n:name @def(n) @attributes(a, n)
+  | PatField:            a:outer_attrs_opt n:name COLON pat @attributes(a, n)
+  | PatFieldIndex:       a:outer_attrs_opt i:INT COLON pat @attributes(a, i)
 
 // ---- literals ----
 
@@ -1401,31 +1406,31 @@ rule block_stmts = BlockStmts: stmts_opt stmts_tail_opt
 
 rule stmts_tail_opt = stmts_tail?
 
-rule stmts_tail = StmtsTail: outer_attrs_opt e:stmt_expr @expansion(block_stmts, e)
+rule stmts_tail = StmtsTail: a:outer_attrs_opt e:stmt_expr @expansion(block_stmts, e) @attributes(a, e)
 
 // An expression with outer attributes before it, as rustc's parser reads an
 // expression fragment (`$e:expr`) and an expression macro's expansion
 // (`#[allow(…)] unsafe { … }`).
-rule attrs_expr = AttrsExpr: outer_attrs_opt expr
+rule attrs_expr = AttrsExpr: a:outer_attrs_opt e:expr @attributes(a, e)
 
 // What `$s:stmt` matches: a statement without its trailing `;`, or a `;`
 // alone (an empty statement).
 rule stmt_fragment =
   | EmptyStmtFragment: ";"
   | ItemStmtFragment:  stmt_item
-  | LetStmtFragment:   outer_attrs_opt "let" pat_no_alt type_ann_opt let_init_opt
-  | ExprStmtFragment:  outer_attrs_opt stmt_expr
-  | BlockStmtFragment: outer_attrs_opt block_like
+  | LetStmtFragment:   a:outer_attrs_opt "let" p:pat_no_alt type_ann_opt let_init_opt @attributes(a, p)
+  | ExprStmtFragment:  a:outer_attrs_opt e:stmt_expr @attributes(a, e)
+  | BlockStmtFragment: a:outer_attrs_opt b:block_like @attributes(a, b)
 
 // The expression a block ends with, without `;`.
-rule tail = Tail: outer_attrs_opt e:stmt_expr @value(same, e)
+rule tail = Tail: a:outer_attrs_opt e:stmt_expr @value(same, e) @attributes(a, e)
 
 rule stmt =
   | EmptyStmt:  ";"
   | ItemStmt:   stmt_item
-  | LetStmt:    outer_attrs_opt "let" p:pat_no_alt a:type_ann_opt i:let_init_opt ";" @defer(p) @typed(p, a) @inits(p, i)
-  | ExprStmt:   outer_attrs_opt e:stmt_expr ";" @expansion(block_stmts, e)
-  | BlockStmt:  outer_attrs_opt b:block_like @expansion(block_stmts, b)
+  | LetStmt:    at:outer_attrs_opt "let" p:pat_no_alt a:type_ann_opt i:let_init_opt ";" @defer(p) @typed(p, a) @inits(p, i) @attributes(at, p)
+  | ExprStmt:   a:outer_attrs_opt e:stmt_expr ";" @expansion(block_stmts, e) @attributes(a, e)
+  | BlockStmt:  a:outer_attrs_opt b:block_like @expansion(block_stmts, b) @attributes(a, b)
 
 rule type_ann_opt = type_ann?
 
@@ -1480,11 +1485,11 @@ rule arms_opt =
 rule arm_list = arm+
 
 rule arm =
-  | ArmBlock:      outer_attrs_opt pat guard_opt EQ_ARROW GT block_like @scope
-  | ArmBlockComma: outer_attrs_opt pat guard_opt EQ_ARROW GT block_like "," @scope
-  | ArmExpr:       outer_attrs_opt pat guard_opt EQ_ARROW GT stmt_expr "," @scope
+  | ArmBlock:      a:outer_attrs_opt p:pat guard_opt EQ_ARROW GT block_like @scope @attributes(a, p)
+  | ArmBlockComma: a:outer_attrs_opt p:pat guard_opt EQ_ARROW GT block_like "," @scope @attributes(a, p)
+  | ArmExpr:       a:outer_attrs_opt p:pat guard_opt EQ_ARROW GT stmt_expr "," @scope @attributes(a, p)
 
-rule arm_last = ArmLast: outer_attrs_opt pat guard_opt EQ_ARROW GT stmt_expr @scope
+rule arm_last = ArmLast: a:outer_attrs_opt p:pat guard_opt EQ_ARROW GT stmt_expr @scope @attributes(a, p)
 
 rule guard_opt = guard?
 
@@ -1518,7 +1523,7 @@ rule expr_list = elem+ % ","
 // allows there.
 rule elem =
   | Elem:     e:expr @value(same, e)
-  | AttrElem: outer_attrs e:expr @value(same, e)
+  | AttrElem: a:outer_attrs e:expr @value(same, e) @attributes(a, e)
 
 rule outer_attrs = outer_attr+
 
@@ -1542,9 +1547,9 @@ rule struct_fields_opt =
 rule struct_field_list = struct_field+ % ","
 
 rule struct_field =
-  | FieldInit:      outer_attrs_opt name COLON expr
-  | FieldIndexInit: outer_attrs_opt INT COLON expr
-  | FieldShort:     outer_attrs_opt n:name @ref(n, escaping)
+  | FieldInit:      a:outer_attrs_opt n:name COLON expr @attributes(a, n)
+  | FieldIndexInit: a:outer_attrs_opt i:INT COLON expr @attributes(a, i)
+  | FieldShort:     a:outer_attrs_opt n:name @ref(n, escaping) @attributes(a, n)
 
 rule closure_params =
   | ClosureNoParams: PIPE_PIPE PIPE
@@ -1554,8 +1559,8 @@ rule closure_params =
 rule closure_param_list = closure_param+ % ","
 
 rule closure_param =
-  | ClosureParam:      outer_attrs_opt pat_no_alt
-  | ClosureParamTyped: outer_attrs_opt p:pat_no_alt COLON t:type @typed(p, t)
+  | ClosureParam:      a:outer_attrs_opt p:pat_no_alt @attributes(a, p)
+  | ClosureParamTyped: a:outer_attrs_opt p:pat_no_alt COLON t:type @typed(p, t) @attributes(a, p)
 
 rule closure_head =
   | ClosureHead:      closure_params

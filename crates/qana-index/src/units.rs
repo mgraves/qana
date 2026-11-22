@@ -25,7 +25,7 @@ use qana_sem::{
 };
 use qana_services::OutlineConfig;
 
-use crate::{Attribute, Impl, Import, TypeRef, Unit, Visibility, FUNCTION};
+use crate::{Attribute, Condition, Impl, Import, TypeRef, Unit, Visibility, FUNCTION};
 
 /// What the binding says of one production, gathered from the config's
 /// tables once, so the walk asks each node once.
@@ -56,6 +56,14 @@ pub(crate) struct Roles {
     /// `@attributes(attrs[, item])`: the attributes child, and the item
     /// child.
     pub(crate) attribute_list: Option<(usize, Option<usize>)>,
+    /// `@condition(pred)`: the predicate child.
+    pub(crate) condition: Option<usize>,
+    /// `@predicate(name[, value])`: the name child, and the value child.
+    pub(crate) predicate: Option<(usize, Option<usize>)>,
+    /// `@predicates(name, list)`: the name child, and the list child.
+    pub(crate) predicate_list: Option<(usize, usize)>,
+    /// `@predicate_literal(literal)`: the literal child.
+    pub(crate) predicate_literal: Option<usize>,
     /// `@expands`: an invocation whose expansion may declare names.
     pub(crate) expands: bool,
     /// `@type_ref(form, …)`: a type as written.
@@ -148,6 +156,18 @@ fn roles(cfg: &BindingConfig, outline: &OutlineConfig) -> HashMap<(u16, u16), Ro
     }
     for &(nt, prod, attrs, item) in &cfg.attribute_lists {
         map.entry((nt, prod)).or_default().attribute_list = Some((attrs, item));
+    }
+    for &(nt, prod, predicate) in &cfg.conditions {
+        map.entry((nt, prod)).or_default().condition = Some(predicate);
+    }
+    for &(nt, prod, name, value) in &cfg.predicates {
+        map.entry((nt, prod)).or_default().predicate = Some((name, value));
+    }
+    for &(nt, prod, name, list) in &cfg.predicate_lists {
+        map.entry((nt, prod)).or_default().predicate_list = Some((name, list));
+    }
+    for &(nt, prod, literal) in &cfg.predicate_literals {
+        map.entry((nt, prod)).or_default().predicate_literal = Some(literal);
     }
     for &(nt, prod) in &cfg.expands {
         map.entry((nt, prod)).or_default().expands = true;
@@ -339,6 +359,14 @@ pub(crate) struct InvocationRead {
     pub item: Span,
 }
 
+/// What reading a list of attributes gathers: the attributes, what they
+/// derive, and the conditions they say.
+struct AttributesRead<'a> {
+    found: &'a mut Vec<Attribute>,
+    derives: &'a mut Vec<Derive>,
+    conditions: &'a mut Vec<Condition>,
+}
+
 /// A macro's definition: its name's span, its body's (what follows the
 /// name), whether it is textual (`macro_rules!`), the attributes said of
 /// it.
@@ -403,6 +431,10 @@ pub(crate) struct FileUnits {
     pub all_invocations: Vec<AnyInvocation>,
     /// The macros defined outside bodies, in the file's order.
     pub macro_defs: Vec<MacroDefRead>,
+    /// Each construct under a condition its attributes say (`@condition`
+    /// among those `@attributes` gives it), bodies' too, in the file's
+    /// order: its span, and its own condition (not those around it).
+    pub regions: Vec<(Span, Condition)>,
 }
 
 impl FileUnits {
@@ -482,6 +514,7 @@ pub(crate) fn read(tree: &GreenNode, cfg: &BindingConfig, outline: &OutlineConfi
             invocations: Vec::new(),
             all_invocations: Vec::new(),
             macro_defs: Vec::new(),
+            regions: Vec::new(),
         },
         scopes: 0,
         typed_defs: HashMap::new(),
@@ -743,7 +776,12 @@ impl Walk<'_> {
         // without an item child, the unit the node stands in.
         let attributes_given = match (roles.attribute_list, roles.attribute) {
             (Some((attrs, item)), None) => {
-                let (attributes, derives) = self.attributes_at(n, base, attrs);
+                let (attributes, derives, condition) = self.attributes_at(n, base, attrs);
+                if let Some(condition) = condition {
+                    // From its first token, its trivia before it left out.
+                    let start = base + leading_trivia(n);
+                    self.out.regions.push(((start, whole.1), condition));
+                }
                 Some((attributes, derives, item))
             }
             _ => None,
@@ -1011,6 +1049,7 @@ impl Walk<'_> {
                     }),
                     trait_path: tr.and_then(|tr| Path::of_child(n, tr, self.g.cfg)),
                     generics,
+                    condition: None,
                 },
                 whole,
                 (exact_span(n, base, ty), tr.and_then(|tr| exact_span(n, base, tr))),
@@ -1061,6 +1100,7 @@ impl Walk<'_> {
                     attributes: attributes_here(*span),
                     open: false,
                     textual: Vec::new(),
+                    condition: None,
                 },
                 *span,
                 cx.item.unwrap_or(whole),
@@ -1111,7 +1151,16 @@ impl Walk<'_> {
                 };
                 let loads = roles.loads;
                 self.out.imports.push((
-                    Import { unit: cx.unit, path: full, name, glob, visibility, attributes, loads },
+                    Import {
+                        unit: cx.unit,
+                        path: full,
+                        name,
+                        glob,
+                        visibility,
+                        attributes,
+                        loads,
+                        condition: None,
+                    },
                     whole,
                 ));
             }
@@ -1211,27 +1260,42 @@ impl Walk<'_> {
 
     /// The attributes in the subtree of child `k` of `n` (which starts at
     /// `base`), in the file's order: each attribute's, and those an
-    /// attribute holds, under its condition; and what they derive
-    /// (`@derives`), with where.
-    fn attributes_at(&self, n: &GreenNode, base: u32, k: usize) -> (Vec<Attribute>, Vec<Derive>) {
-        let (mut found, mut derives) = (Vec::new(), Vec::new());
+    /// attribute holds, under its condition; what they derive
+    /// (`@derives`), with where; and the condition they put what they are
+    /// said of under (each condition attribute's, all of them; one a
+    /// conditional attribute holds, `cfg_attr(p, cfg(c))`, only where `p`
+    /// does: `any(not(p), c)`).
+    fn attributes_at(
+        &self,
+        n: &GreenNode,
+        base: u32,
+        k: usize,
+    ) -> (Vec<Attribute>, Vec<Derive>, Option<Condition>) {
+        let (mut found, mut derives, mut conditions) = (Vec::new(), Vec::new(), Vec::new());
         if let Some((child, at)) = symbol_child_at(n, k, base) {
-            self.attributes_in(child, at, false, &mut found, &mut derives);
+            let mut read = AttributesRead {
+                found: &mut found,
+                derives: &mut derives,
+                conditions: &mut conditions,
+            };
+            self.attributes_in(child, at, None, &mut read);
         }
-        (found, derives)
+        (found, derives, Condition::all_of(conditions))
     }
 
+    /// The attributes in `node`'s subtree (which starts at `base`), each
+    /// holding under `under` (the conditions of the conditional attributes
+    /// around it, all of them).
     fn attributes_in(
         &self,
         node: &GreenNode,
         base: u32,
-        conditional: bool,
-        found: &mut Vec<Attribute>,
-        derives: &mut Vec<Derive>,
+        under: Option<&Condition>,
+        read: &mut AttributesRead<'_>,
     ) {
         let roles = self.g.roles.get(&(node.nt, node.prod));
         if let Some(k) = roles.and_then(|r| r.derives) {
-            derives.extend(self.derive_at(node, base, k));
+            read.derives.extend(self.derive_at(node, base, k));
             return;
         }
         if let Some(k) = roles.and_then(|r| r.attribute) {
@@ -1243,23 +1307,103 @@ impl Walk<'_> {
                 {
                     paths_in(held, self.g.cfg, &mut args);
                 }
-                found.push(Attribute { path, conditional, args });
+                read.found.push(Attribute {
+                    path,
+                    conditional: under.is_some(),
+                    args,
+                    condition: under.cloned(),
+                });
             }
+            let predicate = roles
+                .and_then(|r| r.condition)
+                .map(|p| self.predicate_at(node, p));
             let held = roles
                 .and_then(|r| r.attribute_list)
                 .and_then(|(a, _)| symbol_child_at(node, a, base));
-            if let Some((held, at)) = held {
-                self.attributes_in(held, at, true, found, derives);
-            } else {
-                // What an attribute derives is in its arguments.
-                for (m, at) in child_nodes(node, base) {
-                    self.derives_in(m, at, derives);
+            match (held, predicate) {
+                // A conditional attribute: what it holds holds under its
+                // predicate too, one the grammar does not say (no
+                // `@condition`) being one the index does not read.
+                (Some((held, at)), predicate) => {
+                    let predicate = predicate.unwrap_or(Condition::Unread);
+                    let inner = match under {
+                        Some(u) => Condition::All(vec![u.clone(), predicate]),
+                        None => predicate,
+                    };
+                    self.attributes_in(held, at, Some(&inner), read);
+                }
+                // A condition: what it is said of is under it, where the
+                // conditional attributes around it hold.
+                (None, Some(predicate)) => read.conditions.push(match under {
+                    None => predicate,
+                    Some(u) => Condition::Any(vec![Condition::Not(Box::new(u.clone())), predicate]),
+                }),
+                (None, None) => {
+                    // What an attribute derives is in its arguments.
+                    for (m, at) in child_nodes(node, base) {
+                        self.derives_in(m, at, read.derives);
+                    }
                 }
             }
             return;
         }
         for (m, at) in child_nodes(node, base) {
-            self.attributes_in(m, at, conditional, found, derives);
+            self.attributes_in(m, at, under, read);
+        }
+    }
+
+    /// The predicate in `n`'s `k`th child, as its `@predicate`,
+    /// `@predicates` and `@predicate_literal` nodes say it; one written
+    /// any other way, [`Condition::Unread`].
+    fn predicate_at(&self, n: &GreenNode, k: usize) -> Condition {
+        match symbol_child(n, k) {
+            Some(child) => self.predicate_in(child).unwrap_or(Condition::Unread),
+            None => Condition::Unread,
+        }
+    }
+
+    /// The first predicate in `node`'s subtree, not one inside it.
+    fn predicate_in(&self, node: &GreenNode) -> Option<Condition> {
+        let roles = self.g.roles.get(&(node.nt, node.prod));
+        if let Some((name, value)) = roles.and_then(|r| r.predicate) {
+            let name = child_text(node, name)?;
+            return Some(match value {
+                None => Condition::Option(name),
+                Some(v) => Condition::value(&name, &child_text(node, v)?),
+            });
+        }
+        if let Some((name, list)) = roles.and_then(|r| r.predicate_list) {
+            let name = child_text(node, name)?;
+            let mut predicates = Vec::new();
+            if let Some(list) = symbol_child(node, list) {
+                self.predicates_in(list, &mut predicates);
+            }
+            return Some(Condition::list(&name, predicates));
+        }
+        if let Some(literal) = roles.and_then(|r| r.predicate_literal) {
+            return Some(Condition::literal(&child_text(node, literal)?));
+        }
+        node.children.iter().find_map(|c| match c {
+            GreenChild::Node(m) => self.predicate_in(m),
+            GreenChild::Token(_) => None,
+        })
+    }
+
+    /// The predicates in `node`'s subtree, in order, not those inside
+    /// them.
+    fn predicates_in(&self, node: &GreenNode, out: &mut Vec<Condition>) {
+        let roles = self.g.roles.get(&(node.nt, node.prod));
+        let is_predicate = roles.is_some_and(|r| {
+            r.predicate.is_some() || r.predicate_list.is_some() || r.predicate_literal.is_some()
+        });
+        if is_predicate {
+            out.extend(self.predicate_in(node));
+            return;
+        }
+        for c in &node.children {
+            if let GreenChild::Node(m) = c {
+                self.predicates_in(m, out);
+            }
         }
     }
 
@@ -1395,6 +1539,32 @@ fn leading_trivia(n: &GreenNode) -> u32 {
         }
     }
     width
+}
+
+/// The text of `n`'s `k`th symbol child, a token or a node (its tokens
+/// that are no trivia, joined): a name, a literal.
+pub(crate) fn child_text(n: &GreenNode, k: usize) -> Option<String> {
+    fn tokens(node: &GreenNode, out: &mut String) {
+        for c in &node.children {
+            match c {
+                GreenChild::Node(m) => tokens(m, out),
+                GreenChild::Token(t) if !t.trivia => out.push_str(&t.text),
+                GreenChild::Token(_) => {}
+            }
+        }
+    }
+    n.children
+        .iter()
+        .zip(symbol_indices(n))
+        .find_map(|(c, index)| match (c, index == Some(k)) {
+            (GreenChild::Token(t), true) => Some(t.text.clone()),
+            (GreenChild::Node(m), true) => {
+                let mut text = String::new();
+                tokens(m, &mut text);
+                Some(text)
+            }
+            _ => None,
+        })
 }
 
 /// The `k`th symbol child of `n`, when it is a node.

@@ -48,6 +48,7 @@ use qana_lang::{EmbeddedLang, GrammarArtifact};
 use qana_sem::{SemDb, Target};
 use serde::{Deserialize, Serialize};
 
+pub use conditions::{Condition, Configuration, Holds};
 pub use expand::{
     expand, BuiltinMacro, ExpandRequest, ExpansionSummary, MacroSource, MacroTable,
     NestedExpansion, SitePlace,
@@ -66,6 +67,7 @@ pub use references::{escaping, references, Reference};
 pub use resolve::{Implementation, MacroResolution, Resolution, Resolver, RootMacros};
 pub use textual::{is_textual, seen_here, textual_at, Seen, TextualLink};
 
+mod conditions;
 mod expand;
 mod expanded;
 mod graph;
@@ -251,6 +253,11 @@ pub struct Declaration {
     /// lines up with them.
     #[serde(default)]
     pub params: Vec<Option<TypeRef>>,
+    /// The condition it is under: those of the constructs holding it
+    /// (Rust's `#[cfg]`s), all of them as one; `None` where it is under
+    /// none.
+    #[serde(default)]
+    pub condition: Option<Condition>,
 }
 
 /// A type as a declaration writes it: read, never inferred, its paths
@@ -327,6 +334,11 @@ pub struct Unit {
     /// Its textual links, in its order, where its body is here (see
     /// [`Offers::textual`]).
     pub textual: Vec<TextualLink>,
+    /// The condition it is under: those of the constructs holding it
+    /// (Rust's `#[cfg]`s), all of them as one; `None` where it is under
+    /// none.
+    #[serde(default)]
+    pub condition: Option<Condition>,
 }
 
 /// An attribute said of a unit or an import: the path that names it,
@@ -343,6 +355,12 @@ pub struct Attribute {
     /// `b`. Empty where it has none, or where the grammar reads none.
     #[serde(default)]
     pub args: Vec<Path>,
+    /// The condition it holds under, where it holds only under one (a
+    /// conditional attribute's predicate: Rust's `cfg_attr(pred, …)`, all
+    /// of them where one holds another); `None` where it holds wherever
+    /// what it is said of is.
+    #[serde(default)]
+    pub condition: Option<Condition>,
 }
 
 /// An invocation among a unit's items, or an impl block's or a trait's,
@@ -385,6 +403,11 @@ pub struct Invocation {
     /// Its index among the invocations of the text it stands in (the
     /// file's, or its expansion's).
     pub index: u32,
+    /// The condition it is under: those of the constructs holding it
+    /// (Rust's `#[cfg]`s), all of them as one; `None` where it is under
+    /// none.
+    #[serde(default)]
+    pub condition: Option<Condition>,
 }
 
 /// A macro the file defines outside bodies (Rust's `macro_rules!`, and a
@@ -403,6 +426,11 @@ pub struct MacroDef {
     pub within: Vec<(u32, u32)>,
     /// Its index among the macros of the text it stands in.
     pub index: u32,
+    /// The condition it is under: those of the constructs holding it
+    /// (Rust's `#[cfg]`s), all of them as one; `None` where it is under
+    /// none.
+    #[serde(default)]
+    pub condition: Option<Condition>,
 }
 
 /// What a unit imports: one declaration, under a name, or every name of a
@@ -428,6 +456,11 @@ pub struct Import {
     /// crate`): made at a crate's root, its name is one every module of
     /// the crate may use.
     pub loads: bool,
+    /// The condition it is under: those of the constructs holding it
+    /// (Rust's `#[cfg]`s), all of them as one; `None` where it is under
+    /// none.
+    #[serde(default)]
+    pub condition: Option<Condition>,
 }
 
 /// An impl block: what it is of, and of which trait. Its items, and the
@@ -448,6 +481,11 @@ pub struct Impl {
     /// [`Declaration::generics`] (`impl<'a, T> Iterator for Iter<'a, T>`:
     /// `T`).
     pub generics: Vec<String>,
+    /// The condition it is under: those of the constructs holding it
+    /// (Rust's `#[cfg]`s), all of them as one; `None` where it is under
+    /// none.
+    #[serde(default)]
+    pub condition: Option<Condition>,
 }
 
 /// What only a file depends on: what it imports for itself, and the names
@@ -518,6 +556,8 @@ pub struct Locations {
     macro_bodies: Vec<(u32, u32)>,
     declared_by: Vec<Option<u32>>,
     words: Vec<String>,
+    #[serde(default)]
+    condition_regions: Vec<((u32, u32), Condition)>,
     fingerprint: u64,
 }
 
@@ -633,6 +673,20 @@ impl Locations {
     /// search for a name's uses looks first.
     pub fn words(&self) -> &[String] {
         &self.words
+    }
+
+    /// Each construct of the file under a condition its attributes say,
+    /// bodies' too, in the file's order: its byte span, and its own
+    /// condition (those around it are the regions holding it).
+    pub fn condition_regions(&self) -> &[((u32, u32), Condition)] {
+        &self.condition_regions
+    }
+
+    /// The condition what stands at byte span `span` is under: those of
+    /// the regions holding it, outermost first, all of them as one; `None`
+    /// where none holds it.
+    pub fn condition_at(&self, span: (u32, u32)) -> Option<Condition> {
+        condition_at(&self.condition_regions, span)
     }
 
     /// A hash of the locations and words.
@@ -798,6 +852,7 @@ pub(crate) fn summarize_tree(
                     bounds: place.bounds.clone(),
                     positional: place.positional.clone(),
                     params: place.params.clone(),
+                    condition: None,
                 },
                 name: symbol.selection,
                 item: symbol.span,
@@ -921,6 +976,7 @@ pub(crate) fn summarize_tree(
             attributes: inv.attributes.clone(),
             within: Vec::new(),
             index: index as u32,
+            condition: None,
         });
         invocation_spans.push(inv.span);
         invocation_paths.push(inv.path_span);
@@ -944,6 +1000,7 @@ pub(crate) fn summarize_tree(
                 attributes: def.attributes.clone(),
                 within: Vec::new(),
                 index: 0,
+                condition: None,
             };
             Some((macro_def, def.body))
         })
@@ -952,6 +1009,37 @@ pub(crate) fn summarize_tree(
     let (mut macros, macro_bodies): (Vec<MacroDef>, Vec<(u32, u32)>) = defined.into_iter().unzip();
     for (index, def) in macros.iter_mut().enumerate() {
         def.index = index as u32;
+    }
+
+    // What each offered item is under: the regions holding it.
+    let regions = read.regions;
+    let under = |span: (u32, u32)| condition_at(&regions, span);
+    for (u, span) in units.iter_mut().zip(&unit_spans) {
+        u.condition = under(*span);
+    }
+    let mut declarations = declarations;
+    for (d, span) in declarations.iter_mut().zip(&names) {
+        d.condition = under(*span);
+    }
+    let mut reexports = reexports;
+    for (i, span) in reexports.iter_mut().zip(&reexport_spans) {
+        i.condition = under(*span);
+    }
+    let mut imports = imports;
+    for (i, span) in imports.iter_mut().zip(&import_spans) {
+        i.condition = under(*span);
+    }
+    let mut impls = impls;
+    for (i, span) in impls.iter_mut().zip(&impl_spans) {
+        i.condition = under(*span);
+    }
+    for (i, span) in invocations.iter_mut().zip(&invocation_spans) {
+        i.condition = under(*span);
+    }
+    for m in &mut macros {
+        m.condition = names
+            .get(m.declaration as usize)
+            .and_then(|&span| under(span));
     }
 
     let names_count = names.len();
@@ -989,11 +1077,24 @@ pub(crate) fn summarize_tree(
             macro_bodies,
             declared_by: vec![None; names_count],
             words,
+            condition_regions: regions,
             fingerprint: 0,
         },
     };
     summary.fingerprint();
     summary
+}
+
+/// The condition what stands at `span` is under, of `regions` (each a
+/// span and its own condition, in the file's order): those holding it,
+/// outermost first, all of them as one.
+fn condition_at(regions: &[((u32, u32), Condition)], span: (u32, u32)) -> Option<Condition> {
+    let mut holding: Vec<&((u32, u32), Condition)> = regions
+        .iter()
+        .filter(|(region, _)| region.0 <= span.0 && span.1 <= region.1)
+        .collect();
+    holding.sort_by_key(|(region, _)| (region.0, std::cmp::Reverse(region.1)));
+    Condition::all_of(holding.into_iter().map(|(_, c)| c.clone()).collect())
 }
 
 impl Summary {
@@ -1023,6 +1124,7 @@ impl Offers {
             hash.attributes(&u.attributes);
             hash.u64(u64::from(u.open));
             hash.textual(&u.textual);
+            hash.condition_opt(u.condition.as_ref());
         }
         hash.u64(self.declarations.len() as u64);
         for d in &self.declarations {
@@ -1047,6 +1149,7 @@ impl Offers {
             hash.strs(&d.generics);
             hash.types(&d.bounds);
             hash.types(&d.positional);
+            hash.condition_opt(d.condition.as_ref());
         }
         hash.imports(&self.reexports);
         hash.u64(self.impls.len() as u64);
@@ -1055,6 +1158,7 @@ impl Offers {
             hash.type_opt(i.self_type.as_ref());
             hash.path_opt(i.trait_path.as_ref());
             hash.strs(&i.generics);
+            hash.condition_opt(i.condition.as_ref());
         }
         hash.finish()
     }
@@ -1120,6 +1224,12 @@ impl Locations {
         }
         for w in &self.words {
             hash.str(w);
+        }
+        hash.u64(self.condition_regions.len() as u64);
+        for ((start, end), condition) in &self.condition_regions {
+            hash.u64(u64::from(*start));
+            hash.u64(u64::from(*end));
+            hash.condition(condition);
         }
         hash.finish()
     }
@@ -1301,6 +1411,54 @@ impl Fnv {
             self.visibility(&i.visibility);
             self.attributes(&i.attributes);
             self.u64(u64::from(i.loads));
+            self.condition_opt(i.condition.as_ref());
+        }
+    }
+
+    fn condition_opt(&mut self, condition: Option<&Condition>) {
+        match condition {
+            None => self.u64(0),
+            Some(c) => {
+                self.u64(1);
+                self.condition(c);
+            }
+        }
+    }
+
+    fn condition(&mut self, condition: &Condition) {
+        match condition {
+            Condition::Option(name) => {
+                self.u64(0);
+                self.str(name);
+            }
+            Condition::Value(name, value) => {
+                self.u64(1);
+                self.str(name);
+                self.str(value);
+            }
+            Condition::All(all) => {
+                self.u64(2);
+                self.u64(all.len() as u64);
+                for c in all {
+                    self.condition(c);
+                }
+            }
+            Condition::Any(any) => {
+                self.u64(3);
+                self.u64(any.len() as u64);
+                for c in any {
+                    self.condition(c);
+                }
+            }
+            Condition::Not(c) => {
+                self.u64(4);
+                self.condition(c);
+            }
+            Condition::Literal(b) => {
+                self.u64(5);
+                self.u64(u64::from(*b));
+            }
+            Condition::Unread => self.u64(6),
         }
     }
 
@@ -1377,6 +1535,7 @@ impl Fnv {
             for arg in &a.args {
                 self.path(arg);
             }
+            self.condition_opt(a.condition.as_ref());
         }
     }
 
@@ -1398,6 +1557,7 @@ impl Fnv {
                 self.u64(u64::from(which));
             }
             self.u64(u64::from(i.index));
+            self.condition_opt(i.condition.as_ref());
         }
     }
 
@@ -1417,6 +1577,7 @@ impl Fnv {
                 self.u64(u64::from(which));
             }
             self.u64(u64::from(m.index));
+            self.condition_opt(m.condition.as_ref());
         }
     }
 

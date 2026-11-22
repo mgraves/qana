@@ -1179,6 +1179,10 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
             let mut pending_visibility: Option<usize> = None;
             let mut pending_attribute: Option<usize> = None;
             let mut pending_attributes: Option<usize> = None;
+            let mut pending_condition: Option<usize> = None;
+            let mut pending_predicate: Option<usize> = None;
+            let mut pending_predicates: Option<usize> = None;
+            let mut pending_predicate_literal: Option<usize> = None;
             let mut pending_loads: Option<(u32, u32)> = None;
             let mut seen_expands = false;
             let mut seen_expansion = false;
@@ -1590,6 +1594,41 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                             error(d, a.name_span, "@attributes takes the label of the attributes and an optional label of what they are said of".into());
                         } else if pending_attributes.replace(ai).is_some() {
                             error(d, a.name_span, "duplicate @attributes".into());
+                        }
+                    }
+                    "condition" => {
+                        // `@condition(pred)`: the attribute is a condition,
+                        // whose predicate is at `pred`.
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@condition takes the label of its predicate".into());
+                        } else if pending_condition.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @condition".into());
+                        }
+                    }
+                    "predicate" => {
+                        // `@predicate(name[, value])`: an option, set, or
+                        // set to the literal at `value`.
+                        if a.args.is_empty() || a.args.len() > 2 {
+                            error(d, a.name_span, "@predicate takes the label of an option's name and an optional label of its value".into());
+                        } else if pending_predicate.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @predicate".into());
+                        }
+                    }
+                    "predicates" => {
+                        // `@predicates(name, list)`: the predicate `name`
+                        // names, of the predicates in `list`.
+                        if a.args.len() != 2 {
+                            error(d, a.name_span, "@predicates takes the labels of a predicate's name and of the predicates it is of".into());
+                        } else if pending_predicates.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @predicates".into());
+                        }
+                    }
+                    "predicate_literal" => {
+                        // `@predicate_literal(literal)`: a literal predicate.
+                        if a.args.len() != 1 {
+                            error(d, a.name_span, "@predicate_literal takes the label of a literal".into());
+                        } else if pending_predicate_literal.replace(ai).is_some() {
+                            error(d, a.name_span, "duplicate @predicate_literal".into());
                         }
                     }
                     "loads" => {
@@ -2184,6 +2223,46 @@ pub fn compile(tree: &GreenNode, p: &QanaProds) -> (LangDef, Vec<QanaDiag>) {
                 };
                 if let (Some(attrs), Some(item)) = (attrs, item) {
                     binding.attribute_lists.push((nt, prod, attrs, item));
+                }
+            }
+            let label = |d: &mut Vec<QanaDiag>, arg: &(String, (u32, u32), bool)| -> Option<usize> {
+                match positions.get(arg.0.as_str()) {
+                    Some(&k) => Some(k),
+                    None => {
+                        error(d, arg.1, format!("no symbol labeled `{}` in this alternative", arg.0));
+                        None
+                    }
+                }
+            };
+            if let Some(ai) = pending_condition {
+                let a = &alt.attrs[ai];
+                if let Some(k) = rule_pos_of(d, &positions, &sg, prod, &a.args[0]) {
+                    binding.conditions.push((nt, prod, k));
+                }
+            }
+            if let Some(ai) = pending_predicate {
+                let a = &alt.attrs[ai];
+                let name = label(d, &a.args[0]);
+                let value = match a.args.get(1) {
+                    None => Some(None),
+                    Some(arg) => label(d, arg).map(Some),
+                };
+                if let (Some(name), Some(value)) = (name, value) {
+                    binding.predicates.push((nt, prod, name, value));
+                }
+            }
+            if let Some(ai) = pending_predicates {
+                let a = &alt.attrs[ai];
+                let name = label(d, &a.args[0]);
+                let list = rule_pos_of(d, &positions, &sg, prod, &a.args[1]);
+                if let (Some(name), Some(list)) = (name, list) {
+                    binding.predicate_lists.push((nt, prod, name, list));
+                }
+            }
+            if let Some(ai) = pending_predicate_literal {
+                let a = &alt.attrs[ai];
+                if let Some(k) = label(d, &a.args[0]) {
+                    binding.predicate_literals.push((nt, prod, k));
                 }
             }
             if let Some(ai) = pending_visibility {

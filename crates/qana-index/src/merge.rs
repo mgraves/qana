@@ -11,6 +11,9 @@
 //! where the file's invocation writes it (what it passes, forwarded), or
 //! at its macro's path, the call, where a macro writes it.
 //!
+//! What an expansion declares is under its invocation's condition (Rust's
+//! `#[cfg]` on the call) and under its own.
+//!
 //! What `$crate` names, the expansion's definition says: a path rooted at
 //! it ([`Root::MacroCrate`]) is rooted at the root the index gives
 //! ([`Root::CrateAt`]).
@@ -24,8 +27,8 @@ use std::rc::Rc;
 
 use crate::expand::SitePlace;
 use crate::{
-    Declaration, ExpansionSummary, Impl, Import, Invocation, MacroDef, Path, Root, Summary,
-    TextualLink, TypeRef, Unit, Visibility,
+    Condition, Declaration, ExpansionSummary, Impl, Import, Invocation, MacroDef, Path, Root,
+    Summary, TextualLink, TypeRef, Unit, Visibility,
 };
 
 /// An invocation's expansions, as [`merge`] asks for them: given the
@@ -136,12 +139,18 @@ fn splice(merged: &mut Summary, at: usize, expansions: &Expansions) -> bool {
             TextualLink::Invocation(i) => TextualLink::Invocation(base_invocation + i),
         };
         let rooted = Rooted(crate_root);
+        // What the expansion declares is under its invocation's condition
+        // and under its own.
+        let under = |own: &Option<Condition>| {
+            Condition::all_of(site.condition.iter().chain(own.iter()).cloned().collect())
+        };
 
         for (k, u) in offers.units.iter().enumerate() {
             merged.offers.units.push(Unit {
                 parent: unit(u.parent),
                 textual: u.textual.iter().map(link).collect(),
                 visibility: rooted.visibility(&u.visibility),
+                condition: under(&u.condition),
                 ..u.clone()
             });
             merged.locations.units.push(place(&placed.units[k]).0);
@@ -153,6 +162,7 @@ fn splice(merged: &mut Summary, at: usize, expansions: &Expansions) -> bool {
                 self_type: block.self_type.as_ref().map(|t| rooted.ty(t)),
                 trait_path: block.trait_path.as_ref().map(|p| rooted.path(p)),
                 generics: block.generics.clone(),
+                condition: under(&block.condition),
             });
             merged.locations.impls.push(place(&placed.impls[k]).0);
             let (ty, tr) = &placed.impl_heads[k];
@@ -175,6 +185,7 @@ fn splice(merged: &mut Summary, at: usize, expansions: &Expansions) -> bool {
                 bounds: d.bounds.iter().map(|t| rooted.ty(t)).collect(),
                 positional: d.positional.iter().map(|t| rooted.ty(t)).collect(),
                 params: d.params.iter().map(|t| t.as_ref().map(|t| rooted.ty(t))).collect(),
+                condition: under(&d.condition),
                 ..d.clone()
             });
             let (name, position) = place(&placed.names[k]);
@@ -185,11 +196,17 @@ fn splice(merged: &mut Summary, at: usize, expansions: &Expansions) -> bool {
             merged.locations.declared_by.push(Some(top as u32));
         }
         for (k, import) in offers.reexports.iter().enumerate() {
-            merged.offers.reexports.push(rooted.import(import, unit(import.unit)));
+            merged.offers.reexports.push(Import {
+                condition: under(&import.condition),
+                ..rooted.import(import, unit(import.unit))
+            });
             merged.locations.reexports.push(place(&placed.reexports[k]).0);
         }
         for (k, import) in needs.imports.iter().enumerate() {
-            merged.needs.imports.push(rooted.import(import, unit(import.unit)));
+            merged.needs.imports.push(Import {
+                condition: under(&import.condition),
+                ..rooted.import(import, unit(import.unit))
+            });
             merged.locations.imports.push(place(&placed.imports[k]).0);
         }
         for (k, inv) in offers.invocations.iter().enumerate() {
@@ -203,6 +220,7 @@ fn splice(merged: &mut Summary, at: usize, expansions: &Expansions) -> bool {
                 path: inv.path.as_ref().map(|p| rooted.path(p)),
                 within: chain.clone(),
                 index: k as u32,
+                condition: under(&inv.condition),
                 ..inv.clone()
             });
             merged.locations.invocations.push(place(&placed.invocations[k]).0);
@@ -220,6 +238,7 @@ fn splice(merged: &mut Summary, at: usize, expansions: &Expansions) -> bool {
                 declaration: base_declaration + m.declaration,
                 within: chain.clone(),
                 index: k as u32,
+                condition: under(&m.condition),
                 ..m.clone()
             });
             merged.locations.macro_bodies.push(place(&placed.macro_bodies[k]).0);

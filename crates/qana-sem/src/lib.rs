@@ -230,6 +230,29 @@ pub struct BindingConfig {
     /// `cfg_attr(pred, attrs)`), they are said of what those are said of,
     /// under a condition.
     pub attribute_lists: Vec<(u16, u16, usize, Option<usize>)>,
+    /// (nt, prod, predicate child) — the attribute is a condition
+    /// (`@condition(pred)`), whose predicate is at `predicate child`: with
+    /// no attributes of its own, the construct the attributes it stands
+    /// among are said of is under it (Rust's `cfg`); holding attributes
+    /// (`@attributes` inside it), those hold under it (Rust's `cfg_attr`).
+    #[serde(default)]
+    pub conditions: Vec<(u16, u16, usize)>,
+    /// (nt, prod, name child, value child) — the node is a predicate
+    /// (`@predicate(name[, value])`): the option the `name child` names,
+    /// set, or set to the literal at `value child` (Rust's `test`,
+    /// `feature = "std"`).
+    #[serde(default)]
+    pub predicates: Vec<(u16, u16, usize, Option<usize>)>,
+    /// (nt, prod, name child, list child) — the node is a predicate over
+    /// others (`@predicates(name, list)`): the one the `name child` names
+    /// (`all`, `any`, `not`), of the predicates in the subtree of the
+    /// `list child`.
+    #[serde(default)]
+    pub predicate_lists: Vec<(u16, u16, usize, usize)>,
+    /// (nt, prod, literal child) — the node is a literal predicate
+    /// (`@predicate_literal(literal)`: Rust's `true`, `false`).
+    #[serde(default)]
+    pub predicate_literals: Vec<(u16, u16, usize)>,
     /// (nt, prod) — the import the production makes loads the library its
     /// path names (`@loads`: Rust's `extern crate`). Made at a crate's
     /// root, its name is one every module of the crate may use.
@@ -490,6 +513,18 @@ pub fn compose_binding(
     }
     for &(nt, prod, attrs, item) in &guest.attribute_lists {
         out.attribute_lists.push((nt + nts, prod + prods, attrs, item));
+    }
+    for &(nt, prod, predicate) in &guest.conditions {
+        out.conditions.push((nt + nts, prod + prods, predicate));
+    }
+    for &(nt, prod, name, value) in &guest.predicates {
+        out.predicates.push((nt + nts, prod + prods, name, value));
+    }
+    for &(nt, prod, name, list) in &guest.predicate_lists {
+        out.predicate_lists.push((nt + nts, prod + prods, name, list));
+    }
+    for &(nt, prod, literal) in &guest.predicate_literals {
+        out.predicate_literals.push((nt + nts, prod + prods, literal));
     }
     for &(nt, prod) in &guest.loads {
         out.loads.push((nt + nts, prod + prods));

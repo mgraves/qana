@@ -445,6 +445,20 @@ find.
   unit the node stands in; what they mean is the project model's.
   `@loads`: the import loads the library its path names (Rust's `extern
   crate`).
+- `@condition(pred)`: the attribute is a condition, its predicate at
+  `pred`. With no attributes of its own, the construct the attributes it
+  stands among are said of (`@attributes`) is under it (Rust's
+  `#[cfg(…)]`); holding attributes, those hold under it (Rust's
+  `cfg_attr(pred, …)`). A summary keeps each construct's, bodies' too
+  (`Locations::condition_regions`), and what each offered item is under
+  (its `condition`); a project model says each crate's configuration,
+  which decides them (`qana_index::Condition::holds`).
+- How a predicate reads: `@predicate(name)`, an option (`test`);
+  `@predicate(name, value)`, an option with a string value (`feature =
+  "std"`); `@predicates(name, list)`, the predicate `name` names over
+  those in `list` (`all`, `any`, `not`; Rust's `target(os = "…")`, its
+  `target_`-prefixed options); `@predicate_literal(literal)`, `true` or
+  `false`. Any other is one the index does not read, which may hold.
 - `@def(name, textual)`: a definition seen in textual order, as Rust's
   `macro_rules!` is: after it, into the modules declared after it, out
   of a module whose attributes the model says carry it out (Rust's

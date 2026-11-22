@@ -326,6 +326,7 @@ fn a_unit_graph_places_each_file_in_its_crates_at_its_module_path() {
         builtin_macros: Vec::new(),
         local_inner_macros: Vec::new(),
         recursion_limit: None,
+        configuration: Default::default(),
     };
     let mut graph = UnitGraph::new();
     let lib = graph.add_crate(krate("geo", "lib", "/p/src/lib.rs"));

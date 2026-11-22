@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use qana_index::{
-    expand, merge, summarize, Condition, Edition, ExpandRequest, Form, MacroSource, Summary,
-    RECURSION_LIMIT,
+    expand, merge, summarize, Condition, Configuration, CrateInfo, CrateSource, Edition,
+    ExpandRequest, Form, Holds, MacroSource, Summary, RECURSION_LIMIT,
 };
 use qana_lang::EmbeddedLang;
 
@@ -322,4 +322,69 @@ fn what_an_expansion_declares_is_under_its_invocations_condition() {
         "its invocation's, then its own"
     );
     assert_eq!(of("always"), Some(option("test")));
+}
+
+fn krate(configuration: Configuration) -> CrateInfo {
+    CrateInfo {
+        name: "geo".into(),
+        kind: "lib".into(),
+        root: "/p/src/lib.rs".into(),
+        edition: "2021".into(),
+        dependencies: Vec::new(),
+        loadable: Vec::new(),
+        source: CrateSource::Workspace,
+        preludes: Vec::new(),
+        builtins: Vec::new(),
+        closed_by: Vec::new(),
+        inert: Vec::new(),
+        imports_from_root: false,
+        unindexed: Vec::new(),
+        deref_trait: None,
+        try_trait: None,
+        derive_traits: Vec::new(),
+        macro_use: Vec::new(),
+        macro_export: Vec::new(),
+        macro_prelude: Vec::new(),
+        conditions: Vec::new(),
+        builtin_attributes: Vec::new(),
+        builtin_macros: Vec::new(),
+        local_inner_macros: Vec::new(),
+        recursion_limit: None,
+        configuration,
+    }
+}
+
+#[test]
+fn a_crate_keeps_its_configuration_and_by_default_decides_nothing() {
+    let configuration = Configuration {
+        options: [
+            ("unix".to_string(), None),
+            ("feature".into(), Some("std".into())),
+        ]
+        .into(),
+        decided: ["unix", "windows", "feature"].map(String::from).into(),
+    };
+    let geo = krate(configuration.clone());
+    let bytes = postcard::to_allocvec(&geo).expect("a crate encodes");
+    let back: CrateInfo = postcard::from_bytes(&bytes).expect("and decodes");
+    assert_eq!(back.configuration, configuration);
+    assert_eq!(option("windows").holds(&back.configuration), Holds::No);
+    assert_eq!(
+        value("feature", "std").holds(&back.configuration),
+        Holds::Yes
+    );
+
+    let undecided = krate(Configuration::default());
+    for c in [
+        option("unix"),
+        not(option("unix")),
+        value("feature", "std"),
+        Condition::All(vec![option("test"), option("doc")]),
+    ] {
+        assert_eq!(c.holds(&undecided.configuration), Holds::Maybe, "{c:?}");
+    }
+    assert_eq!(
+        Condition::Literal(false).holds(&undecided.configuration),
+        Holds::No
+    );
 }

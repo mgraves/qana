@@ -565,6 +565,7 @@ fn krate(name: &str, root: &str, dependencies: Vec<(String, u32)>) -> CrateInfo 
         builtin_macros: Vec::new(),
         local_inner_macros: Vec::new(),
         recursion_limit: None,
+        configuration: Default::default(),
     }
 }
 

@@ -132,6 +132,12 @@ pub struct CrateInfo {
     /// ([`crate::RECURSION_LIMIT`]).
     #[serde(default)]
     pub recursion_limit: Option<u32>,
+    /// The configuration it is compiled in (Rust's features and `cfg`
+    /// options), which decides the conditions its code is under
+    /// ([`Condition::holds`](crate::Condition::holds)); by default, one
+    /// that decides nothing, so that every condition may hold.
+    #[serde(default)]
+    pub configuration: crate::Configuration,
 }
 
 /// Where a crate comes from.

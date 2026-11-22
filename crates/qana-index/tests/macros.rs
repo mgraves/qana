@@ -190,6 +190,7 @@ fn resolver() -> Resolver {
         builtin_macros: Vec::new(),
         local_inner_macros: Vec::new(),
         recursion_limit: None,
+        configuration: Default::default(),
     };
     let mut graph = UnitGraph::new();
     let alloc = graph.add_crate(krate("alloc", "/s/alloc/lib.rs", Vec::new()));

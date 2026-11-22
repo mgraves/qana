@@ -135,7 +135,7 @@ impl Condition {
     /// configuration predicates are written: `all`, `any`, `not` (of one),
     /// and Rust's `target(os = "…", …)`, each of whose options is a
     /// `target_`-prefixed one. Any other is [`Unread`](Condition::Unread).
-    pub(crate) fn list(name: &str, mut list: Vec<Condition>) -> Condition {
+    pub fn list(name: &str, mut list: Vec<Condition>) -> Condition {
         match name {
             "all" => Condition::All(list),
             "any" => Condition::Any(list),
@@ -159,7 +159,7 @@ impl Condition {
     /// A predicate written `name = value`, where `value` is a literal as
     /// written: a string's text (plain, with its escapes read, or raw).
     /// Any other literal is [`Unread`](Condition::Unread).
-    pub(crate) fn value(name: &str, literal: &str) -> Condition {
+    pub fn value(name: &str, literal: &str) -> Condition {
         match string_text(literal) {
             Some(value) => Condition::Value(name.to_string(), value),
             None => Condition::Unread,
@@ -168,7 +168,7 @@ impl Condition {
 
     /// A literal predicate: `true` or `false`; any other is
     /// [`Unread`](Condition::Unread).
-    pub(crate) fn literal(literal: &str) -> Condition {
+    pub fn literal(literal: &str) -> Condition {
         match literal {
             "true" => Condition::Literal(true),
             "false" => Condition::Literal(false),

@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use qana_index::{
-    expand, merge, summarize, Condition, Configuration, CrateInfo, CrateSource, Edition,
-    ExpandRequest, Form, Holds, MacroSource, Summary, RECURSION_LIMIT,
+    cfg_option_values, expand, merge, summarize, Condition, Configuration, CrateInfo, CrateSource,
+    Edition, ExpandRequest, Form, Holds, MacroSource, Summary, RECURSION_LIMIT,
 };
 use qana_lang::EmbeddedLang;
 
@@ -387,4 +387,29 @@ fn a_crate_keeps_its_configuration_and_by_default_decides_nothing() {
         Condition::Literal(false).holds(&undecided.configuration),
         Holds::No
     );
+}
+
+#[test]
+fn a_cfg_option_value_is_its_name_its_value_and_where_its_contents_are() {
+    let text = "#[cfg(feature = \"std\")]\nfn a() {}\n\
+                fn b() -> bool { cfg!(any(feature = r#\"no-std\"#, feature = \"a\\x62\")) }\n";
+    let found = cfg_option_values(rust(), text, Edition::E2021).expect("it lexes");
+    let read: Vec<(&str, &str, &str)> = found
+        .iter()
+        .map(|((start, end), name, value)| {
+            (&text[*start as usize..*end as usize], name.as_str(), value.as_str())
+        })
+        .collect();
+    assert_eq!(
+        read,
+        [("std", "feature", "std"), ("no-std", "feature", "no-std"), ("a\\x62", "feature", "ab"),],
+        "a raw string's contents inside its fence; an escaped one's as written"
+    );
+    assert!(
+        cfg_option_values(rust(), "#[cfg(feature = 1)] fn c() {}", Edition::E2021)
+            .expect("it lexes")
+            .is_empty(),
+        "a value that is no string"
+    );
+    assert!(cfg_option_values(rust(), "fn d() { (", Edition::E2021).is_err(), "unbalanced");
 }

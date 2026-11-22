@@ -315,6 +315,40 @@ impl fmt::Display for Condition {
 
 /// The text of the string literal `literal` (`"std"`, `r"std"`,
 /// `r#"std"#`), its escapes read; `None` for any other literal.
+/// A `name = "value"` a cfg predicate writes: the span of the value's
+/// contents (inside its quotes), the name, and the value.
+pub type CfgOptionValue = ((u32, u32), String, String);
+
+/// Each `name = "value"` the cfg predicates of `text` write
+/// ([`TokenStream::cfg_option_literals`](qana_mbe::TokenStream::cfg_option_literals)),
+/// lexed by `lang` as written in `edition` ([`CfgOptionValue`]). A literal that is
+/// no string (`feature = 1`, which rustc refuses) is none. An error where
+/// the text does not lex as rustc's tokens (an unbalanced delimiter, an
+/// unterminated literal).
+pub fn cfg_option_values(
+    lang: &qana_lang::EmbeddedLang,
+    text: &str,
+    edition: qana_mbe::Edition,
+) -> Result<Vec<CfgOptionValue>, String> {
+    let stream = qana_mbe::TokenStream::lex(lang, text, 0, 0, edition).map_err(|e| e.message)?;
+    Ok(stream
+        .cfg_option_literals()
+        .into_iter()
+        .filter_map(|(name, literal)| {
+            let value = string_text(&literal.text)?;
+            // The opening quote, after a raw string's `r` and fence, and
+            // the closing quote and fence.
+            let fence = match literal.text.strip_prefix('r') {
+                Some(raw) => raw.len() - raw.trim_start_matches('#').len(),
+                None => 0,
+            } as u32;
+            let opening = if fence > 0 || literal.text.starts_with("r\"") { 2 + fence } else { 1 };
+            let (start, end) = (literal.origin.start, literal.origin.end);
+            Some(((start + opening, end - 1 - fence), name, value))
+        })
+        .collect())
+}
+
 fn string_text(literal: &str) -> Option<String> {
     if let Some(raw) = literal.strip_prefix('r') {
         let hashes = raw.len() - raw.trim_start_matches('#').len();

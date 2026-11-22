@@ -382,6 +382,25 @@ impl TokenStream {
         Ok(arms)
     }
 
+    /// Each `name = literal` a cfg predicate in the stream writes, as rustc
+    /// reads cfg predicates in tokens: the option's name, and its literal's
+    /// token. A predicate is:
+    /// - the group after `cfg` (`cfg(…)`: an attribute's, and one in any
+    ///   tokens, as `doc(cfg(…))` and a macro's body write them);
+    /// - the group after `cfg!`;
+    /// - the group after `cfg_attr` up to its first `,` (the attributes
+    ///   after it are read for those they hold);
+    /// - each arm's predicate after `cfg_select!` (its body is read for those
+    ///   it holds). Arms that do not read (rustc would refuse them) are read
+    ///   as any other tokens.
+    ///
+    /// Within a predicate, lists (`any(…)`, `all(…)`, `not(…)`) nest.
+    pub fn cfg_option_literals(&self) -> Vec<(String, Token)> {
+        let mut out = Vec::new();
+        cfg_options_in(&self.trees, &mut out);
+        out
+    }
+
     /// The texts of its tokens and brackets in order, a fragment's tokens
     /// without the invisible group around them, as rustc's `trace_macros`
     /// prints a stream.
@@ -405,6 +424,81 @@ impl TokenStream {
         let mut out = Vec::new();
         go(&self.trees, &mut out);
         out
+    }
+}
+
+/// The `name = literal`s of the cfg predicates in `trees`, wherever they
+/// are ([`TokenStream::cfg_option_literals`]).
+fn cfg_options_in(trees: &[Tree], out: &mut Vec<(String, Token)>) {
+    let visible = |g: &Group| !matches!(g.delim, Delim::Invisible(_));
+    let mut i = 0usize;
+    while i < trees.len() {
+        let name = match &trees[i] {
+            Tree::Token(t) => t.ident().filter(|(_, raw)| !raw).map(|(name, _)| name),
+            Tree::Group(_) => None,
+        };
+        let bang = matches!(trees.get(i + 1), Some(Tree::Token(t)) if t.is_punct("!"));
+        match (name, trees.get(i + 1), trees.get(i + 2)) {
+            (Some("cfg"), Some(Tree::Group(g)), _) if g.delim == Delim::Paren => {
+                predicate_options(&g.trees, out);
+                i += 2;
+            }
+            (Some("cfg_attr"), Some(Tree::Group(g)), _) if g.delim == Delim::Paren => {
+                let comma =
+                    g.trees.iter().position(|t| matches!(t, Tree::Token(t) if t.is_punct(",")));
+                let (predicate, attributes) = match comma {
+                    Some(c) => (&g.trees[..c], &g.trees[c + 1..]),
+                    None => (&g.trees[..], &[][..]),
+                };
+                predicate_options(predicate, out);
+                cfg_options_in(attributes, out);
+                i += 2;
+            }
+            (Some("cfg"), _, Some(Tree::Group(g))) if bang && visible(g) => {
+                predicate_options(&g.trees, out);
+                i += 3;
+            }
+            (Some("cfg_select"), _, Some(Tree::Group(g))) if bang && visible(g) => {
+                match TokenStream::new(g.trees.to_vec()).cfg_select_arms() {
+                    Ok(arms) => {
+                        for (predicate, body) in arms {
+                            if let Some(predicate) = predicate {
+                                predicate_options(&predicate.trees, out);
+                            }
+                            cfg_options_in(&body.trees, out);
+                        }
+                    }
+                    Err(_) => cfg_options_in(&g.trees, out),
+                }
+                i += 3;
+            }
+            _ => {
+                if let Tree::Group(g) = &trees[i] {
+                    cfg_options_in(&g.trees, out);
+                }
+                i += 1;
+            }
+        }
+    }
+}
+
+/// The `name = literal`s of a predicate's tokens, its nested lists'
+/// included.
+fn predicate_options(trees: &[Tree], out: &mut Vec<(String, Token)>) {
+    for (k, tree) in trees.iter().enumerate() {
+        match tree {
+            Tree::Token(t) => {
+                let Some((name, false)) = t.ident() else { continue };
+                if let (Some(Tree::Token(eq)), Some(Tree::Token(literal))) =
+                    (trees.get(k + 1), trees.get(k + 2))
+                {
+                    if eq.is_punct("=") && literal.kind == TokenKind::Literal {
+                        out.push((name.to_string(), literal.clone()));
+                    }
+                }
+            }
+            Tree::Group(g) => predicate_options(&g.trees, out),
+        }
     }
 }
 

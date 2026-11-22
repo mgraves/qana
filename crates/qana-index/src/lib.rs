@@ -48,7 +48,7 @@ use qana_lang::{EmbeddedLang, GrammarArtifact};
 use qana_sem::{SemDb, Target};
 use serde::{Deserialize, Serialize};
 
-pub use conditions::{Condition, Configuration, Holds};
+pub use conditions::{cfg_option_values, CfgOptionValue, Condition, Configuration, Holds};
 pub use expand::{
     expand, BuiltinMacro, ExpandRequest, ExpansionSummary, MacroSource, MacroTable,
     NestedExpansion, SitePlace,

@@ -72,3 +72,58 @@ fn cfg_select_arms_are_its_predicates_and_braced_items() {
     }
     assert!(TokenStream::default().cfg_select_arms().expect("none").is_empty());
 }
+
+/// The options `text`'s cfg predicates write: each name and its literal's
+/// text.
+fn options(text: &str) -> Vec<(String, String)> {
+    lex(text, 0)
+        .cfg_option_literals()
+        .into_iter()
+        .map(|(name, literal)| (name, literal.text.to_string()))
+        .collect()
+}
+
+fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+    list.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+}
+
+#[test]
+fn cfg_predicates_name_their_options_wherever_rustc_reads_one() {
+    assert_eq!(
+        options(
+            "#[cfg(any(feature = \"a\", all(unix, not(feature = r#\"b\"#))))]\nfn f() {}\n\
+             #![cfg(target_os = \"linux\")]"
+        ),
+        pairs(&[("feature", "\"a\""), ("feature", "r#\"b\"#"), ("target_os", "\"linux\"")]),
+        "attributes, nested lists, raw strings"
+    );
+    assert_eq!(
+        options(
+            "#[cfg_attr(feature = \"c\", derive(Debug), cfg_attr(feature = \"d\", x = \"no\"))]"
+        ),
+        pairs(&[("feature", "\"c\""), ("feature", "\"d\"")]),
+        "a `cfg_attr`'s predicate, not its attributes' `name = value`s, but a nested one's"
+    );
+    assert_eq!(
+        options("fn g() -> bool { cfg!(feature = \"e\") && h(x = \"no\") }"),
+        pairs(&[("feature", "\"e\"")]),
+        "`cfg!`, and no other call's arguments"
+    );
+    assert_eq!(
+        options(
+            "cfg_select! { feature = \"f\" => { const X: &str = \"no\"; let y = \"no\"; } \
+             _ => { #[cfg(feature = \"g\")] fn i() {} } }"
+        ),
+        pairs(&[("feature", "\"f\""), ("feature", "\"g\"")]),
+        "`cfg_select!`'s predicates, and what its bodies hold"
+    );
+    assert_eq!(
+        options(
+            "#[cfg_attr(docsrs, doc(cfg(feature = \"h\")))]\n\
+             macro_rules! m { () => { #[cfg(feature = \"i\")] fn j() {} }; }"
+        ),
+        pairs(&[("feature", "\"h\""), ("feature", "\"i\"")]),
+        "`doc(cfg(…))`, and a macro's body"
+    );
+    assert!(options("#[path = \"x.rs\"] mod x; fn cfg(a: u8) {}").is_empty());
+}

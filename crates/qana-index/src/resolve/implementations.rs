@@ -112,7 +112,8 @@ impl Resolver {
     /// implements, in [`Declaration::derives`](crate::Declaration::derives)'
     /// order, each by its file and index: what the derive's path names, or
     /// the built-in derive's, by its name (see
-    /// [`CrateInfo::derive_traits`](crate::CrateInfo::derive_traits)).
+    /// [`CrateInfo::derive_traits`](crate::CrateInfo::derive_traits)). A
+    /// derive that is there in no crate the file is in implements none.
     pub fn derived_traits(&self, file: &FilePath, declaration: u32) -> Vec<Vec<(PathBuf, u32)>> {
         let Some(&id) = self.ids.get(file) else {
             return Vec::new();
@@ -124,7 +125,10 @@ impl Resolver {
         declared
             .derives
             .iter()
-            .map(|path| {
+            .map(|(path, condition)| {
+                if !self.there_anywhere(id, condition.as_ref()) {
+                    return Vec::new();
+                }
                 self.derive_implements((id, declaration), path)
                     .into_iter()
                     .map(|t| (self.files[t.0 as usize].clone(), t.1))

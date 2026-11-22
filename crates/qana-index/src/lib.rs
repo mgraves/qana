@@ -60,12 +60,12 @@ pub use graph::{CrateInfo, CrateSource, UnitGraph};
 pub use members::{
     member_at, member_at_in, members, members_in, path_at, MemberAccess, MemberKind, Receiver,
 };
-pub use merge::{merge, Expansions};
+pub use merge::{merge, merge_where, Expansions};
 pub use qana_mbe::{Edition, Form, TokenStream, RECURSION_LIMIT};
 pub use qana_sem::{Path, Root};
 pub use references::{escaping, references, Reference};
 pub use resolve::{Implementation, MacroResolution, Resolution, Resolver, RootMacros};
-pub use textual::{is_textual, seen_here, textual_at, Seen, TextualLink};
+pub use textual::{is_textual, place_condition, seen_here, textual_at, Seen, TextualLink};
 
 mod conditions;
 mod expand;
@@ -234,8 +234,10 @@ pub struct Declaration {
     /// The type a call of it gives, as written (a function's return
     /// type); `None` where none is written.
     pub returns: Option<TypeRef>,
-    /// What it derives (Rust's `#[derive(…)]`), by the paths written.
-    pub derives: Vec<Path>,
+    /// What it derives (Rust's `#[derive(…)]`), by the paths written, each
+    /// with the condition it is derived under beside the declaration's own
+    /// (a `#[cfg_attr(p, derive(…))]`'s), if any.
+    pub derives: Vec<(Path, Option<Condition>)>,
     /// Its generic parameters' names, in order: types' and constants',
     /// not lifetimes' (`struct Grid<'a, T, const N: usize>`: `T`, `N`), as
     /// [`TypeRef::Path`]'s arguments are.
@@ -847,7 +849,11 @@ pub(crate) fn summarize_tree(
                     impl_block: place.impl_block.map(|i| impl_place[i as usize]),
                     ty: place.ty.clone(),
                     returns: place.returns.clone(),
-                    derives: place.derives.iter().map(|(path, _)| path.clone()).collect(),
+                    derives: place
+                        .derives
+                        .iter()
+                        .map(|(path, _, c)| (path.clone(), c.clone()))
+                        .collect(),
                     generics: place.generics.clone(),
                     bounds: place.bounds.clone(),
                     positional: place.positional.clone(),
@@ -856,7 +862,7 @@ pub(crate) fn summarize_tree(
                 },
                 name: symbol.selection,
                 item: symbol.span,
-                derives: place.derives.iter().map(|&(_, span)| span).collect(),
+                derives: place.derives.iter().map(|&(_, span, _)| span).collect(),
             });
         }
     }
@@ -1037,9 +1043,7 @@ pub(crate) fn summarize_tree(
         i.condition = under(*span);
     }
     for m in &mut macros {
-        m.condition = names
-            .get(m.declaration as usize)
-            .and_then(|&span| under(span));
+        m.condition = names.get(m.declaration as usize).and_then(|&span| under(span));
     }
 
     let names_count = names.len();
@@ -1089,10 +1093,8 @@ pub(crate) fn summarize_tree(
 /// span and its own condition, in the file's order): those holding it,
 /// outermost first, all of them as one.
 fn condition_at(regions: &[((u32, u32), Condition)], span: (u32, u32)) -> Option<Condition> {
-    let mut holding: Vec<&((u32, u32), Condition)> = regions
-        .iter()
-        .filter(|(region, _)| region.0 <= span.0 && span.1 <= region.1)
-        .collect();
+    let mut holding: Vec<&((u32, u32), Condition)> =
+        regions.iter().filter(|(region, _)| region.0 <= span.0 && span.1 <= region.1).collect();
     holding.sort_by_key(|(region, _)| (region.0, std::cmp::Reverse(region.1)));
     Condition::all_of(holding.into_iter().map(|(_, c)| c.clone()).collect())
 }
@@ -1143,8 +1145,9 @@ impl Offers {
             hash.type_opt(d.ty.as_ref());
             hash.type_opt(d.returns.as_ref());
             hash.u64(d.derives.len() as u64);
-            for path in &d.derives {
+            for (path, condition) in &d.derives {
                 hash.path(path);
+                hash.condition_opt(condition.as_ref());
             }
             hash.strs(&d.generics);
             hash.types(&d.bounds);

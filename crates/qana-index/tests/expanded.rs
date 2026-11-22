@@ -368,7 +368,7 @@ fn built_in(
     names: Vec<(Path, Vec<MacroSource>, u32)>,
 ) -> ExpandedText {
     let request = ExpandRequest {
-        definition: MacroSource::Builtin { macro_, condition: None },
+        definition: MacroSource::Builtin { macro_, configuration: Default::default() },
         site: file[inv.span.0 as usize..inv.span.1 as usize].to_string(),
         site_edition: Edition::E2021,
         input: None,
@@ -387,7 +387,10 @@ fn built_in(
 fn format_args_named(root: Option<Root>, segments: &[&str]) -> (Path, Vec<MacroSource>, u32) {
     (
         Path { root, segments: segments.iter().map(|s| s.to_string()).collect() },
-        vec![MacroSource::Builtin { macro_: BuiltinMacro::FormatArgs, condition: None }],
+        vec![MacroSource::Builtin {
+            macro_: BuiltinMacro::FormatArgs,
+            configuration: Default::default(),
+        }],
         0,
     )
 }

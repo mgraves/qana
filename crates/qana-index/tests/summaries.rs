@@ -838,8 +838,15 @@ fn a_declaration_holds_its_type_its_return_type_and_its_derives_as_written() {
     assert_eq!(declared(&[], "Cells").ty, Some(named(&["Vec"], vec![plain("Cell")])));
     assert_eq!(
         declared(&[], "Grid").derives,
-        [path(None, &["Debug"]), path(None, &["Clone"]), path(None, &["serde", "Serialize"])],
-        "a conditional derive is an answer too"
+        [
+            (path(None, &["Debug"]), None),
+            (path(None, &["Clone"]), None),
+            (
+                path(None, &["serde", "Serialize"]),
+                Some(Condition::Value("feature".into(), "serde".into()))
+            )
+        ],
+        "a conditional derive is an answer too, under its `cfg_attr`'s predicate"
     );
     assert!(declared(&[], "SIZE").derives.is_empty());
 }
@@ -966,7 +973,7 @@ fn positional_fields_are_held_in_order() {
 fn const_impl_blocks_and_const_derives_are_held_like_others() {
     let summary = summarize(rust(), "#[derive_const(PartialEq, Default)]\npub struct S;\n\nimpl const Clone for S {\n    fn clone(&self) -> Self { S }\n}\n\nconst impl S {\n    pub fn new() -> Self { S }\n}\n");
     let s = summary.offers().declarations().iter().find(|d| d.name == "S").unwrap();
-    assert_eq!(s.derives, [path(None, &["PartialEq"]), path(None, &["Default"])]);
+    assert_eq!(s.derives, [(path(None, &["PartialEq"]), None), (path(None, &["Default"]), None)]);
     let blocks: Vec<Option<Path>> =
         summary.offers().impls().iter().map(|i| i.trait_path.clone()).collect();
     assert_eq!(blocks, [None, Some(path(None, &["Clone"]))], "in their fixed order");

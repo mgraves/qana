@@ -21,7 +21,9 @@
 //! A unit is open while an invocation among its items is not expanded, or
 //! failed to by each of its macros' alternatives (a crate that compiles
 //! takes one that expands): the file's own summary says a unit with any
-//! invocation is.
+//! invocation is. An invocation that is not there where it stands (under a
+//! condition that does not hold: [`merge_where`]) writes nothing, and
+//! leaves its unit closed.
 
 use std::rc::Rc;
 
@@ -42,11 +44,22 @@ pub type Expansions<'a> =
 /// `own`, a file's summary, merged with its invocations' expansions as
 /// `expansions` gives them: see the [module docs](self).
 pub fn merge(own: &Summary, expansions: &Expansions) -> Summary {
+    merge_where(own, expansions, &|_| true)
+}
+
+/// [`merge`], each invocation `there` says is not (one under a condition
+/// that does not hold, where it stands) writing nothing: none of its
+/// expansions is asked for, and its unit is not open for it.
+pub fn merge_where(
+    own: &Summary,
+    expansions: &Expansions,
+    there: &dyn Fn(&Invocation) -> bool,
+) -> Summary {
     let mut merged = own.clone();
     let mut complete: Vec<bool> = Vec::new();
     let mut at = 0usize;
     while at < merged.offers.invocations.len() {
-        let done = splice(&mut merged, at, expansions);
+        let done = !there(&merged.offers.invocations[at]) || splice(&mut merged, at, expansions);
         complete.push(done);
         at += 1;
     }
@@ -181,7 +194,7 @@ fn splice(merged: &mut Summary, at: usize, expansions: &Expansions) -> bool {
                 visibility: rooted.visibility(&d.visibility),
                 ty: d.ty.as_ref().map(|t| rooted.ty(t)),
                 returns: d.returns.as_ref().map(|t| rooted.ty(t)),
-                derives: d.derives.iter().map(|p| rooted.path(p)).collect(),
+                derives: d.derives.iter().map(|(p, c)| (rooted.path(p), c.clone())).collect(),
                 bounds: d.bounds.iter().map(|t| rooted.ty(t)).collect(),
                 positional: d.positional.iter().map(|t| rooted.ty(t)).collect(),
                 params: d.params.iter().map(|t| t.as_ref().map(|t| rooted.ty(t))).collect(),

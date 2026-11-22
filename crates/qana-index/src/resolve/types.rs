@@ -179,7 +179,7 @@ impl Resolver {
         // step down from each, known: then no summary holds the member.
         let (mut typed, mut known) = (false, true);
         for (krate, _) in self.graph.places(file) {
-            let at = Module { krate, file: id, unit: self.unit_named(id, &access.units) };
+            let at = Module { krate, file: id, unit: self.unit_named(krate, id, &access.units) };
             let generics = access.generics.iter().map(|g| (g.clone(), Vec::new())).collect();
             let scope = Rc::new(Scope { at, generics, self_type: Vec::new() });
             let types = self.value_types(&scope, &access.receiver, 0);
@@ -893,15 +893,16 @@ impl Resolver {
         self.summaries[block.0 as usize].offers().impls()[block.1 as usize].trait_path.is_none()
     }
 
-    /// The items of impl block `block`, as indexes into its file's
-    /// declarations.
+    /// The items of impl block `block` that are there in one crate its file
+    /// is in, as indexes into its file's declarations.
     pub(super) fn items_of_block(&self, block: (u32, u32)) -> Rc<[u32]> {
         let file = self.block_items.borrow().get(&block.0).cloned();
         let file = file.unwrap_or_else(|| {
             let mut by_block: HashMap<u32, Vec<u32>> = HashMap::new();
             let declarations = self.summaries[block.0 as usize].offers().declarations();
             for (i, d) in declarations.iter().enumerate() {
-                if let Some(b) = d.impl_block {
+                let Some(b) = d.impl_block else { continue };
+                if self.there_anywhere(block.0, d.condition.as_ref()) {
                     by_block.entry(b).or_default().push(i as u32);
                 }
             }
@@ -1420,10 +1421,12 @@ impl Resolver {
         found
     }
 
-    /// The traits type `d` derives, its derive paths read where it is.
+    /// The traits type `d` derives, its derive paths read where it is: by
+    /// the derives there in one crate its file is in.
     pub(super) fn derived(&self, d: (u32, u32)) -> Vec<(u32, u32)> {
         let mut found = Vec::new();
-        for path in &self.declaration(d).derives {
+        let derives = self.declaration(d).derives.iter();
+        for (path, _) in derives.filter(|(_, c)| self.there_anywhere(d.0, c.as_ref())) {
             for t in self.derive_implements(d, path) {
                 if !found.contains(&t) {
                     found.push(t);
@@ -1637,9 +1640,10 @@ impl Resolver {
     }
 
     /// Where what declaration `d` writes is read, in each crate its file is
-    /// in: its module; the generic parameters of it and of what it is in
-    /// (its impl block, the type or trait it is declared inside), each with
-    /// the types `bound` gives it; and `self_type` for `Self`.
+    /// in where it is there: its module; the generic parameters of it and of
+    /// what it is in (its impl block, the type or trait it is declared
+    /// inside), each with the types `bound` gives it; and `self_type` for
+    /// `Self`.
     fn scopes_of(
         &self,
         d: (u32, u32),
@@ -1658,6 +1662,7 @@ impl Resolver {
         self.graph
             .places(&self.files[d.0 as usize])
             .iter()
+            .filter(|&&(krate, _)| self.there(krate, d.0, declaration.condition.as_ref()))
             .map(|&(krate, _)| {
                 Rc::new(Scope {
                     at: Module { krate, file: d.0, unit: declaration.unit },
@@ -1669,7 +1674,7 @@ impl Resolver {
     }
 
     /// Where impl block `block` writes its type, in each crate its file is
-    /// in, its parameters as `bound` gives them.
+    /// in where it is there, its parameters as `bound` gives them.
     fn block_scopes(
         &self,
         block: (u32, u32),
@@ -1685,6 +1690,7 @@ impl Resolver {
         self.graph
             .places(&self.files[block.0 as usize])
             .iter()
+            .filter(|&&(krate, _)| self.there(krate, block.0, of.condition.as_ref()))
             .map(|&(krate, _)| {
                 Rc::new(Scope {
                     at: Module { krate, file: block.0, unit: of.unit },

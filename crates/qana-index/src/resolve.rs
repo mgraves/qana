@@ -77,6 +77,19 @@
 //! under [`CrateInfo::macro_use`]), then in the preludes; a path, as any
 //! path is.
 //!
+//! **What is there** in a crate is decided by its configuration
+//! ([`CrateInfo::configuration`]): a declaration, an import, a unit, an
+//! impl block, a derive, a textual definition, whose condition does not
+//! hold ([`Holds::No`]) in the configuration of the crate it is compiled
+//! in, is not there, and neither is anything in a file declared through a
+//! unit that is not. One that may hold is there, as one under no condition
+//! is. What is found by its file alone (a type's fields and variants, a
+//! trait's items, impl blocks) is there where it is in one crate its file
+//! is in. A resolver over a graph whose crates decide nothing
+//! ([`UnitGraph::undecided`]) reads every condition as one that may hold.
+//!
+//! [`CrateInfo::configuration`]: crate::CrateInfo::configuration
+//! [`UnitGraph::undecided`]: crate::UnitGraph::undecided
 //! [`CrateInfo::macro_export`]: crate::CrateInfo::macro_export
 //! [`CrateInfo::macro_prelude`]: crate::CrateInfo::macro_prelude
 //! [`CrateInfo::macro_use`]: crate::CrateInfo::macro_use
@@ -90,7 +103,10 @@ use std::collections::HashMap;
 use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
 
-use crate::{Attribute, Declaration, Import, Path, Root, Summary, TypeRef, UnitGraph, Visibility};
+use crate::{
+    Attribute, Condition, Declaration, Holds, Import, Path, Root, Summary, TypeRef, UnitGraph,
+    Visibility,
+};
 
 mod implementations;
 mod macros;
@@ -167,9 +183,9 @@ pub struct Resolver {
     grew: Cell<bool>,
     /// How many provisional answers have been made: their order.
     made: Cell<u64>,
-    /// Each file-and-unit's items by name, as indexes into its summary's
-    /// declarations.
-    items: RefCell<HashMap<(u32, Option<u32>), Items>>,
+    /// Each crate-file-and-unit's items by name, as indexes into its
+    /// summary's declarations: those there in the crate.
+    items: RefCell<HashMap<UnitIn, Items>>,
     /// Each impl block by the last name of its type's path, and the names
     /// imports give what they import under another name, once gathered.
     impl_names: RefCell<Option<Rc<ImplNames>>>,
@@ -228,6 +244,11 @@ pub struct Resolver {
     root_macros: RefCell<HashMap<(u32, String), RootMacros>>,
     /// Each crate's files, once gathered.
     crate_files: RefCell<Option<CrateFiles>>,
+    /// Whether each file is there in each crate it is in, by the units it is
+    /// declared through: by (crate, file).
+    chains: RefCell<HashMap<(u32, u32), Holds>>,
+    /// Each file's crates, each with whether the file is there in it.
+    file_crates: RefCell<HashMap<u32, FileCrates>>,
 }
 
 /// Each crate's files, by their indices in a resolver.
@@ -292,6 +313,13 @@ struct Provisional {
 
 /// A unit's items by name, as indexes into its file's declarations.
 type Items = Rc<HashMap<String, Vec<u32>>>;
+
+/// A unit in a crate: the crate, the file, and the unit there (`None` for
+/// the file's own).
+type UnitIn = (u32, u32, Option<u32>);
+
+/// A file's crates, each with whether the file is there in it.
+type FileCrates = Rc<[(u32, Holds)]>;
 
 /// A type's impl blocks: (file, impl index).
 type ImplBlocks = Rc<Vec<(u32, u32)>>;
@@ -407,6 +435,8 @@ impl Resolver {
             exported: RefCell::default(),
             root_macros: RefCell::default(),
             crate_files: RefCell::default(),
+            chains: RefCell::default(),
+            file_crates: RefCell::default(),
         }
     }
 
@@ -430,7 +460,7 @@ impl Resolver {
         let mut furthest = 0;
         let mut failed: Vec<(Module, usize)> = Vec::new();
         for (krate, _) in self.graph.places(file) {
-            let at = Module { krate, file: id, unit: self.unit_named(id, units) };
+            let at = Module { krate, file: id, unit: self.unit_named(krate, id, units) };
             match self.walk(at, path) {
                 Ok(targets) => {
                     let before = declarations.len() + modules.len();
@@ -519,17 +549,46 @@ impl Resolver {
     }
 
     /// The unit of `file` the chain of names `units` leads to, from the
-    /// file's own: as far as the summary has them.
-    fn unit_named(&self, file: u32, units: &[String]) -> Option<u32> {
+    /// file's own, in crate `krate`: as far as the summary has them. Of
+    /// namesakes (alternatives under conditions), the first there in the
+    /// crate, else the first.
+    fn unit_named(&self, krate: u32, file: u32, units: &[String]) -> Option<u32> {
         let all = self.summaries[file as usize].offers().units();
         let mut at: Option<u32> = None;
         for name in units {
-            match all.iter().position(|u| u.inline && u.parent == at && u.name == *name) {
+            let named = |u: &&crate::Unit| u.inline && u.parent == at && u.name == *name;
+            let mut namesakes = all.iter().enumerate().filter(|(_, u)| named(u));
+            let first = namesakes.clone().next().map(|(i, _)| i);
+            let there = namesakes
+                .find(|(_, u)| self.there(krate, file, u.condition.as_ref()))
+                .map(|(i, _)| i);
+            match there.or(first) {
                 Some(i) => at = Some(i as u32),
                 None => break,
             }
         }
         at
+    }
+
+    /// Whether the place in `file` under `condition` (its regions', as
+    /// [`Locations::condition_at`](crate::Locations::condition_at) says
+    /// them) is compiled, with the units its file is declared through: where
+    /// it holds in one crate the file is in, it holds; where it does not in
+    /// each, it does not; otherwise it may. A file no crate holds, nothing
+    /// decides.
+    pub fn holds_at(&self, file: &FilePath, condition: Option<&Condition>) -> Holds {
+        let Some(&id) = self.ids.get(file) else {
+            return Holds::Maybe;
+        };
+        let crates = self.file_crates(id);
+        if crates.is_empty() {
+            return Holds::Maybe;
+        }
+        crates
+            .iter()
+            .map(|&(krate, chain)| chain.and(self.holds_in(krate, condition)))
+            .reduce(Holds::or)
+            .unwrap_or(Holds::Maybe)
     }
 
     // ------------------------------------------------------------------
@@ -657,6 +716,9 @@ impl Resolver {
             Some(ns) if !ns.is_empty() => return false,
             // Nor are the members of the type `Self` is, here.
             _ if path.root == Some(Root::SelfType) => return false,
+            // Nor the names of the crate a `$crate` no definition places is
+            // (one a macro's body holds, which an expansion wrote).
+            _ if path.root == Some(Root::MacroCrate) => return false,
             // An import's last name may name a macro.
             None if last => return false,
             _ => {}
@@ -840,7 +902,8 @@ impl Resolver {
     }
 
     /// The declarations made inside declaration `index` of `file`, not in an
-    /// impl block, as indexes into the file's declarations.
+    /// impl block, that are there in one crate the file is in, as indexes
+    /// into the file's declarations.
     fn items_inside(&self, file: u32, index: u32) -> Vec<u32> {
         let declarations = self.summaries[file as usize].offers().declarations();
         let owner = &declarations[index as usize];
@@ -852,7 +915,10 @@ impl Resolver {
             // container.
             let mut by_container: HashMap<Vec<String>, Vec<u32>> = HashMap::new();
             for (i, d) in declarations.iter().enumerate() {
-                if d.impl_block.is_none() && !d.container.is_empty() {
+                if d.impl_block.is_none()
+                    && !d.container.is_empty()
+                    && self.there_anywhere(file, d.condition.as_ref())
+                {
                     by_container.entry(d.container.clone()).or_default().push(i as u32);
                 }
             }
@@ -939,8 +1005,11 @@ impl Resolver {
             return closed;
         }
         let closers = &self.graph.crates()[module.krate as usize].closed_by;
+        // Said under no condition, or under one that holds.
         let says = |attributes: &[Attribute]| {
-            attributes.iter().any(|a| !a.conditional && closers.contains(&a.path))
+            attributes.iter().any(|a| {
+                closers.contains(&a.path) && self.attribute_holds(module.krate, a) == Holds::Yes
+            })
         };
         let closed = !closers.is_empty() && {
             let summary = &self.summaries[module.file as usize];
@@ -1023,10 +1092,11 @@ impl Resolver {
         Target { declaration: Some((file, index)), module }
     }
 
-    /// The items of `file`'s unit `unit` by name: its declarations made
-    /// directly in it, not inside another declaration.
-    fn items_of(&self, file: u32, unit: Option<u32>) -> Items {
-        if let Some(items) = self.items.borrow().get(&(file, unit)) {
+    /// The items of `file`'s unit `unit` by name, in crate `krate`: its
+    /// declarations made directly in it, not inside another declaration,
+    /// that are there in the crate.
+    fn items_of(&self, krate: u32, file: u32, unit: Option<u32>) -> Items {
+        if let Some(items) = self.items.borrow().get(&(krate, file, unit)) {
             return items.clone();
         }
         let summary = &self.summaries[file as usize];
@@ -1042,25 +1112,111 @@ impl Resolver {
         };
         let mut items: HashMap<String, Vec<u32>> = HashMap::new();
         for (i, d) in summary.offers().declarations().iter().enumerate() {
-            if d.unit == unit && d.impl_block.is_none() && d.container.len() == depth {
+            if d.unit == unit
+                && d.impl_block.is_none()
+                && d.container.len() == depth
+                && self.there(krate, file, d.condition.as_ref())
+            {
                 items.entry(d.name.clone()).or_default().push(i as u32);
             }
         }
         let items = Rc::new(items);
-        self.items.borrow_mut().insert((file, unit), items.clone());
+        self.items.borrow_mut().insert((krate, file, unit), items.clone());
         items
     }
 
-    /// The imports made in `module`: what it re-exports, then what it
-    /// imports for itself.
+    /// The imports made in `module` that are there in its crate: what it
+    /// re-exports, then what it imports for itself.
     fn imports_of(&self, module: Module) -> impl Iterator<Item = &Import> {
         let summary = &self.summaries[module.file as usize];
-        summary
-            .offers()
-            .reexports()
-            .iter()
-            .chain(summary.needs().imports())
-            .filter(move |i| i.unit == module.unit)
+        summary.offers().reexports().iter().chain(summary.needs().imports()).filter(move |i| {
+            i.unit == module.unit && self.there(module.krate, module.file, i.condition.as_ref())
+        })
+    }
+
+    // ------------------------------------------------------------------
+    // Conditions
+    // ------------------------------------------------------------------
+
+    /// Whether `condition` holds in crate `krate`'s configuration (none
+    /// holds).
+    fn holds_in(&self, krate: u32, condition: Option<&Condition>) -> Holds {
+        match condition {
+            None => Holds::Yes,
+            Some(c) => c.holds(&self.graph.crates()[krate as usize].configuration),
+        }
+    }
+
+    /// Whether attribute `a` is said, in crate `krate`: one said under no
+    /// condition is; one a conditional attribute holds is where its
+    /// condition holds, and may be where the summary says no condition.
+    fn attribute_holds(&self, krate: u32, a: &Attribute) -> Holds {
+        match (a.conditional, &a.condition) {
+            (false, _) => Holds::Yes,
+            (true, Some(c)) => self.holds_in(krate, Some(c)),
+            (true, None) => Holds::Maybe,
+        }
+    }
+
+    /// Whether `file` is there in crate `krate`, by the units it is declared
+    /// through, out to the crate's root. Once found, kept.
+    fn chain(&self, krate: u32, file: u32) -> Holds {
+        if let Some(&holds) = self.chains.borrow().get(&(krate, file)) {
+            return holds;
+        }
+        let mut holds = Holds::Yes;
+        let mut at = file;
+        // A file is a unit of a crate once at most, so the chain ends; a
+        // step for each file bounds it all the same.
+        for _ in 0..self.files.len() {
+            let Some((declaring, unit)) = self.graph.declared_by(krate, &self.files[at as usize])
+            else {
+                break;
+            };
+            let Some(&declaring) = self.ids.get(declaring) else { break };
+            let units = self.summaries[declaring as usize].offers().units();
+            let Some(of) = units.get(unit as usize) else { break };
+            holds = holds.and(self.holds_in(krate, of.condition.as_ref()));
+            if holds == Holds::No {
+                break;
+            }
+            at = declaring;
+        }
+        self.chains.borrow_mut().insert((krate, file), holds);
+        holds
+    }
+
+    /// The crates `file` is in, each with whether it is there in it. Once
+    /// found, kept.
+    fn file_crates(&self, file: u32) -> FileCrates {
+        if let Some(found) = self.file_crates.borrow().get(&file) {
+            return found.clone();
+        }
+        let found: FileCrates = self
+            .graph
+            .places(&self.files[file as usize])
+            .into_iter()
+            .map(|(krate, _)| (krate, self.chain(krate, file)))
+            .collect();
+        self.file_crates.borrow_mut().insert(file, found.clone());
+        found
+    }
+
+    /// Whether what stands in `file` under `condition` is there in crate
+    /// `krate`: it may hold there, and so may the units the file is
+    /// declared through.
+    fn there(&self, krate: u32, file: u32, condition: Option<&Condition>) -> bool {
+        self.chain(krate, file) != Holds::No && self.holds_in(krate, condition) != Holds::No
+    }
+
+    /// Whether what stands in `file` under `condition` is there in one
+    /// crate the file is in (in any, for a file no crate holds).
+    fn there_anywhere(&self, file: u32, condition: Option<&Condition>) -> bool {
+        let crates = self.file_crates(file);
+        crates.is_empty()
+            || crates.iter().any(|&(krate, chain)| {
+                chain != Holds::No && self.holds_in(krate, condition) != Holds::No
+            })
     }
 
     /// What `name` binds in `module`. See the [module docs](self).
@@ -1191,7 +1347,7 @@ impl Resolver {
         let summary = self.summaries[module.file as usize].clone();
         let declarations = summary.offers().declarations();
         let mut found: Vec<Binding> = Vec::new();
-        if let Some(items) = self.items_of(module.file, module.unit).get(name) {
+        if let Some(items) = self.items_of(module.krate, module.file, module.unit).get(name) {
             for &index in items {
                 let d: &Declaration = &declarations[index as usize];
                 found.push(Binding {
@@ -1401,7 +1557,11 @@ impl Resolver {
         }
         let mut names = ImplNames::default();
         for (file, summary) in self.summaries.iter().enumerate() {
+            let there = |condition: Option<&Condition>| self.there_anywhere(file as u32, condition);
             for (i, block) in summary.offers().impls().iter().enumerate() {
+                if !there(block.condition.as_ref()) {
+                    continue;
+                }
                 let at = (file as u32, i as u32);
                 let named = block.self_type.as_ref().and_then(TypeRef::path);
                 if let Some(last) = named.and_then(|t| t.segments.last()) {
@@ -1433,7 +1593,11 @@ impl Resolver {
                 }
             }
             for (i, d) in summary.offers().declarations().iter().enumerate() {
-                for last in d.derives.iter().filter_map(|p| p.segments.last()) {
+                if !there(d.condition.as_ref()) {
+                    continue;
+                }
+                let derived = d.derives.iter().filter(|(_, c)| there(c.as_ref()));
+                for last in derived.filter_map(|(p, _)| p.segments.last()) {
                     let derivers = names.derivers.entry(last.clone()).or_default();
                     if !derivers.contains(&(file as u32, i as u32)) {
                         derivers.push((file as u32, i as u32));
@@ -1452,7 +1616,7 @@ impl Resolver {
                 }
             }
             let imports = summary.offers().reexports().iter().chain(summary.needs().imports());
-            for import in imports.filter(|i| !i.glob) {
+            for import in imports.filter(|i| !i.glob && there(i.condition.as_ref())) {
                 if let (Some(name), Some(last)) = (&import.name, import.path.segments.last()) {
                     if name != last {
                         let renames = names.renames.entry(last.clone()).or_default();

@@ -125,7 +125,8 @@ fn a_macro_definitions_attributes_say_how_it_is_exported() {
 }
 
 use qana_index::{
-    expand, BuiltinMacro, Edition, ExpandRequest, MacroSource, Root, TypeRef, RECURSION_LIMIT,
+    expand, BuiltinMacro, Condition, Configuration, Edition, ExpandRequest, MacroSource, Root,
+    TypeRef, RECURSION_LIMIT,
 };
 
 /// A request to expand `site` (its invocation's own input) by a
@@ -377,23 +378,55 @@ fn an_impl_blocks_items_expand_as_its_members_and_cfg_select_as_each_arm() {
     let f = &e.offers().unwrap().declarations()[0];
     assert_eq!((f.name.as_str(), f.kind.as_str()), ("saturating_sub", "function"));
 
+    // Undecided, each arm that may be the one, every textual definition
+    // there under a condition that may hold.
+    let (units, reexports, m) = selected(Configuration::default());
+    assert_eq!(units, [("native".to_string(), false), ("os".to_string(), false)], "each arm's");
+    assert_eq!(reexports, 2, "and re-exports");
+    assert_eq!(m, Some(Some(Condition::Unread)), "a textual definition, under one that may hold");
+}
+
+/// What `cfg_select!` over a `unix` arm and a `_` one declares in
+/// `configuration`: its units (each with whether inline), how many
+/// re-exports, and the condition of the macro `m` the `unix` arm defines
+/// (`None` where it is not declared).
+fn selected(
+    configuration: Configuration,
+) -> (Vec<(String, bool)>, usize, Option<Option<Condition>>) {
     let site = "cfg_select! { unix => { mod native; pub use native::inner; macro_rules! m { () => {} } } _ => { mod os; pub use os::inner; } }";
     let mut select = request("", Form::Macro, site, "items_opt");
-    select.definition =
-        MacroSource::Builtin { macro_: BuiltinMacro::CfgSelect, condition: Some(path(&["cfg"])) };
+    select.definition = MacroSource::Builtin { macro_: BuiltinMacro::CfgSelect, configuration };
     let e = expand(rust(), &select, &[]);
     assert_eq!(e.error(), None);
     let offers = e.offers().unwrap();
-    let units: Vec<(&str, bool)> =
-        offers.units().iter().map(|u| (u.name.as_str(), u.inline)).collect();
-    assert_eq!(units, [("native", false), ("os", false)], "each arm's modules");
-    assert_eq!(offers.reexports().len(), 2, "and re-exports");
-    assert!(
-        offers.textual().iter().any(|link| matches!(link,
-            TextualLink::Def { attributes, .. } if attributes.iter().any(|a| a.path == path(&["cfg"])))),
-        "a textual definition in an arm is under its condition: {:?}",
-        offers.textual()
-    );
+    let units = offers.units().iter().map(|u| (u.name.clone(), u.inline)).collect();
+    let m = offers.textual().iter().find_map(|link| match link {
+        TextualLink::Def { declaration, .. } => {
+            Some(offers.declarations()[*declaration as usize].condition.clone())
+        }
+        _ => None,
+    });
+    (units, offers.reexports().len(), m)
+}
+
+fn decided(set: &[&str], decided: &[&str]) -> Configuration {
+    Configuration {
+        options: set.iter().map(|n| (n.to_string(), None)).collect(),
+        decided: decided.iter().map(|n| n.to_string()).collect(),
+    }
+}
+
+#[test]
+fn cfg_select_takes_the_first_arm_whose_predicate_holds_in_its_configuration() {
+    let (units, reexports, m) = selected(decided(&["unix"], &["unix", "windows"]));
+    assert_eq!(units, [("native".to_string(), false)], "on unix, its arm alone");
+    assert_eq!(reexports, 1);
+    assert_eq!(m, Some(None), "its textual definition, chosen: under no condition");
+
+    let (units, reexports, m) = selected(decided(&["windows"], &["unix", "windows"]));
+    assert_eq!(units, [("os".to_string(), false)], "elsewhere, `_`");
+    assert_eq!(reexports, 1);
+    assert_eq!(m, None, "the unix arm's macro is not there");
 }
 
 #[test]

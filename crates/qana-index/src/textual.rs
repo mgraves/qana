@@ -18,7 +18,7 @@ use qana_lang::EmbeddedLang;
 use serde::{Deserialize, Serialize};
 
 use crate::units::{self, Span, TextualEvent};
-use crate::Attribute;
+use crate::{Attribute, Condition};
 
 /// A link of a module's textual scope, as its summary keeps it: what is
 /// seen after it, in the module's order.
@@ -40,17 +40,20 @@ pub enum TextualLink {
 /// file's start (the nearest last): see [`textual_at`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Seen {
-    /// A textual definition in the file: its name, the name's span, and
-    /// the attributes said of it (a `#[cfg]` it may not be under).
-    Def { name: String, span: (u32, u32), attributes: Vec<Attribute> },
+    /// A textual definition in the file: its name, the name's span, the
+    /// attributes said of it, and the condition it is under (the regions
+    /// holding it), if any.
+    Def { name: String, span: (u32, u32), attributes: Vec<Attribute>, condition: Option<Condition> },
     /// An inline module that ends before the point: what it saw inside,
-    /// seen here where its attributes carry it out.
-    Module { attributes: Vec<Attribute>, seen: Vec<Seen> },
+    /// seen here where its attributes carry it out, and the condition it is
+    /// under.
+    Module { attributes: Vec<Attribute>, seen: Vec<Seen>, condition: Option<Condition> },
     /// A module whose body is another file, declared before the point: the
     /// units its name is under from the file's own (outermost first, its
     /// own last), and the attributes said of it. Its file's own links are
-    /// seen here where its attributes carry them out.
-    File { units: Vec<String>, attributes: Vec<Attribute> },
+    /// seen here where its attributes carry them out, under the condition
+    /// it is under.
+    File { units: Vec<String>, attributes: Vec<Attribute>, condition: Option<Condition> },
 }
 
 /// Each module's own textual links, module-level only (what a block holds
@@ -138,20 +141,35 @@ pub fn textual_at(doc: &mut LiveDoc, offset: u32, namespace: &str) -> Option<Vec
         return None;
     }
     let read = units::read(tree, &lang.binding, &lang.outline);
-    Some(replay(&read.textual, offset))
+    Some(replay(&read.textual, &read.regions, offset))
 }
 
-/// The textual log replayed up to byte `offset`.
-pub(crate) fn replay(events: &[TextualEvent], offset: u32) -> Vec<Seen> {
+/// The condition the place at byte `offset` of `doc`, as it is, stands
+/// under (Rust's `#[cfg]`s around it), as a summary's
+/// [`Locations::condition_at`](crate::Locations::condition_at) says it:
+/// `None` where it is under none, and where the document has no tree.
+pub fn place_condition(doc: &mut LiveDoc, offset: u32) -> Option<Condition> {
+    let (lang, tree) = doc.tree()?;
+    let read = units::read(tree, &lang.binding, &lang.outline);
+    crate::condition_at(&read.regions, (offset, offset))
+}
+
+/// The textual log replayed up to byte `offset`, each thing seen under the
+/// conditions of the `regions` holding it.
+pub(crate) fn replay(
+    events: &[TextualEvent],
+    regions: &[(Span, Condition)],
+    offset: u32,
+) -> Vec<Seen> {
     // The frames open: what each saw so far, and the module it is (with
-    // its name and attributes), or `None` for a scope.
+    // its name, attributes and condition), or `None` for a scope.
     struct Frame {
         seen: Vec<Seen>,
-        module: Option<(String, Vec<Attribute>)>,
+        module: Option<(String, Vec<Attribute>, Option<Condition>)>,
     }
     let mut stack: Vec<Frame> = vec![Frame { seen: Vec::new(), module: None }];
     let units_here = |stack: &[Frame]| -> Vec<String> {
-        stack.iter().filter_map(|f| f.module.as_ref().map(|(name, _)| name.clone())).collect()
+        stack.iter().filter_map(|f| f.module.as_ref().map(|(name, _, _)| name.clone())).collect()
     };
     for event in events {
         let at = match event {
@@ -171,25 +189,32 @@ pub(crate) fn replay(events: &[TextualEvent], offset: u32) -> Vec<Seen> {
                     name: name.clone(),
                     span: *span,
                     attributes: attributes.clone(),
+                    condition: crate::condition_at(regions, *span),
                 });
             }
-            TextualEvent::File { name, attributes, .. } => {
+            TextualEvent::File { name, attributes, at, .. } => {
                 let mut units = units_here(&stack);
                 units.push(name.clone());
                 let top = stack.last_mut().expect("the file's frame");
-                top.seen.push(Seen::File { units, attributes: attributes.clone() });
+                top.seen.push(Seen::File {
+                    units,
+                    attributes: attributes.clone(),
+                    condition: crate::condition_at(regions, (*at, *at)),
+                });
             }
-            TextualEvent::Open { module, .. } => stack.push(Frame {
+            TextualEvent::Open { module, span } => stack.push(Frame {
                 seen: Vec::new(),
-                module: module.as_ref().map(|m| (m.name.clone(), m.attributes.clone())),
+                module: module.as_ref().map(|m| {
+                    (m.name.clone(), m.attributes.clone(), crate::condition_at(regions, *span))
+                }),
             }),
             // What an expansion defines, a live document does not see.
             TextualEvent::Invocation { .. } => {}
             TextualEvent::Close { .. } => {
                 let frame = stack.pop().expect("an open frame");
-                if let Some((_, attributes)) = frame.module {
+                if let Some((_, attributes, condition)) = frame.module {
                     let top = stack.last_mut().expect("the file's frame");
-                    top.seen.push(Seen::Module { attributes, seen: frame.seen });
+                    top.seen.push(Seen::Module { attributes, seen: frame.seen, condition });
                 }
             }
         }

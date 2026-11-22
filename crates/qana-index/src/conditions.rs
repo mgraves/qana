@@ -13,6 +13,7 @@
 //! see it (a build script, a flag), so may hold.
 
 use std::collections::BTreeSet;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +40,7 @@ pub enum Condition {
 
 /// The configuration a crate is compiled in: the options that are set,
 /// and the names whose options it decides.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Configuration {
     /// The options set: a name alone (`test`), or a name and a value
     /// (`feature`, `"std"`).
@@ -68,9 +69,53 @@ impl Holds {
             Holds::Maybe => Holds::Maybe,
         }
     }
+
+    /// Whether both hold: not where one does not, yes where both do, and
+    /// otherwise may.
+    pub fn and(self, other: Holds) -> Holds {
+        match (self, other) {
+            (Holds::No, _) | (_, Holds::No) => Holds::No,
+            (Holds::Yes, Holds::Yes) => Holds::Yes,
+            _ => Holds::Maybe,
+        }
+    }
+
+    /// Whether one of them holds: yes where one does, not where neither
+    /// does, and otherwise may.
+    pub fn or(self, other: Holds) -> Holds {
+        match (self, other) {
+            (Holds::Yes, _) | (_, Holds::Yes) => Holds::Yes,
+            (Holds::No, Holds::No) => Holds::No,
+            _ => Holds::Maybe,
+        }
+    }
 }
 
 impl Configuration {
+    /// What holds in each of two builds, this one and `other`, as one
+    /// configuration (a site in two crates, a crate compiled for two
+    /// platforms): an option set in both is set, and a name both decide,
+    /// setting the same options of it, is decided. Any other option may
+    /// hold.
+    pub fn either(&self, other: &Configuration) -> Configuration {
+        let values = |c: &Configuration, name: &str| -> BTreeSet<Option<String>> {
+            c.options
+                .iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+                .collect()
+        };
+        Configuration {
+            options: self.options.intersection(&other.options).cloned().collect(),
+            decided: self
+                .decided
+                .intersection(&other.decided)
+                .filter(|name| values(self, name) == values(other, name))
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// Whether the option `name` (with `value`, where it has one) holds.
     pub fn option(&self, name: &str, value: Option<&str>) -> Holds {
         let key = (name.to_string(), value.map(str::to_string));
@@ -173,6 +218,97 @@ impl Condition {
             "true" => Condition::Literal(true),
             "false" => Condition::Literal(false),
             _ => Condition::Unread,
+        }
+    }
+
+    /// The predicate `tokens` write, each token's text as written (names,
+    /// literals with their quotes, `(`, `)`, `,` and `=`), read as Rust's
+    /// `cfg` reads one: `unix`, `feature = "std"`, `all(unix, not(test))`.
+    /// `None` where they write no predicate, or more than one.
+    pub fn read(tokens: &[&str]) -> Option<Condition> {
+        let mut at = 0;
+        let c = read_at(tokens, &mut at)?;
+        (at == tokens.len()).then_some(c)
+    }
+}
+
+/// The predicate that starts at `tokens[*at]`, `*at` moved past it.
+fn read_at(tokens: &[&str], at: &mut usize) -> Option<Condition> {
+    let name = *tokens.get(*at)?;
+    *at += 1;
+    if name == "true" || name == "false" {
+        return Some(Condition::literal(name));
+    }
+    let mut chars = name.chars();
+    let is_name = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_');
+    if !is_name {
+        return None;
+    }
+    match tokens.get(*at).copied() {
+        Some("=") => {
+            *at += 1;
+            let literal = *tokens.get(*at)?;
+            *at += 1;
+            Some(Condition::value(name, literal))
+        }
+        Some("(") => {
+            *at += 1;
+            if !matches!(name, "all" | "any" | "not" | "target") {
+                // A list this does not read (`version("1.80")`): to its
+                // closing bracket, unread.
+                let mut depth = 1;
+                while depth > 0 {
+                    match *tokens.get(*at)? {
+                        "(" => depth += 1,
+                        ")" => depth -= 1,
+                        _ => {}
+                    }
+                    *at += 1;
+                }
+                return Some(Condition::Unread);
+            }
+            let mut list = Vec::new();
+            loop {
+                if tokens.get(*at).copied() == Some(")") {
+                    *at += 1;
+                    break;
+                }
+                list.push(read_at(tokens, at)?);
+                match tokens.get(*at).copied() {
+                    Some(",") => *at += 1,
+                    Some(")") => {}
+                    _ => return None,
+                }
+            }
+            Some(Condition::list(name, list))
+        }
+        _ => Some(Condition::Option(name.to_string())),
+    }
+}
+
+/// A predicate as Rust writes one (`all(unix, not(feature = "std"))`); one
+/// the index does not read is `?`.
+impl fmt::Display for Condition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let list = |f: &mut fmt::Formatter<'_>, name: &str, list: &[Condition]| {
+            write!(f, "{name}(")?;
+            for (i, c) in list.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{c}")?;
+            }
+            write!(f, ")")
+        };
+        match self {
+            Condition::Option(name) => write!(f, "{name}"),
+            Condition::Value(name, value) => write!(f, "{name} = {value:?}"),
+            Condition::All(all) => list(f, "all", all),
+            Condition::Any(any) => list(f, "any", any),
+            Condition::Not(c) => write!(f, "not({c})"),
+            Condition::Literal(literal) => write!(f, "{literal}"),
+            Condition::Unread => write!(f, "?"),
         }
     }
 }
@@ -312,6 +448,80 @@ mod tests {
         assert_eq!(Condition::list("not", Vec::new()), Condition::Unread);
         assert_eq!(Condition::Unread.holds(&c), Holds::Maybe);
         assert_eq!(Condition::literal("false").holds(&c), Holds::No);
+    }
+
+    #[test]
+    fn a_predicate_reads_from_its_tokens_as_cfg_reads_one() {
+        let read = |text: &str| {
+            let tokens: Vec<&str> = text.split(' ').filter(|t| !t.is_empty()).collect();
+            Condition::read(&tokens)
+        };
+        assert_eq!(
+            read("all ( unix , not ( feature = \"std\" ) , )"),
+            Some(Condition::All(vec![
+                option("unix"),
+                Condition::Not(Box::new(Condition::Value("feature".into(), "std".into())))
+            ]))
+        );
+        assert_eq!(read("true"), Some(Condition::Literal(true)));
+        assert_eq!(
+            read("version ( \"1.80\" )"),
+            Some(Condition::Unread),
+            "a list it does not know"
+        );
+        assert_eq!(read("any ( unix"), None);
+        assert_eq!(read("unix windows"), None);
+        assert_eq!(read("= x"), None);
+    }
+
+    #[test]
+    fn two_holds_combine_three_valued() {
+        use Holds::{Maybe, No, Yes};
+        assert_eq!(Yes.and(Maybe), Maybe);
+        assert_eq!(Maybe.and(No), No);
+        assert_eq!(Yes.and(Yes), Yes);
+        assert_eq!(No.or(Maybe), Maybe);
+        assert_eq!(Maybe.or(Yes), Yes);
+        assert_eq!(No.or(No), No);
+    }
+
+    #[test]
+    fn what_holds_in_either_of_two_configurations() {
+        let mac = configuration(
+            &[("unix", None), ("target_os", Some("macos"))],
+            &["unix", "windows", "target_os"],
+        );
+        let linux = configuration(
+            &[("unix", None), ("target_os", Some("linux"))],
+            &["unix", "windows", "target_os"],
+        );
+        let both = mac.either(&linux);
+        assert_eq!(option("unix").holds(&both), Holds::Yes, "set in each");
+        assert_eq!(option("windows").holds(&both), Holds::No, "set in neither");
+        assert_eq!(
+            Condition::value("target_os", "\"macos\"").holds(&both),
+            Holds::Maybe
+        );
+        assert_eq!(
+            both.either(&Configuration::default()),
+            Configuration::default()
+        );
+    }
+
+    #[test]
+    fn a_condition_is_written_as_rust_writes_a_predicate() {
+        let c = Condition::All(vec![
+            option("unix"),
+            Condition::Not(Box::new(Condition::Value(
+                "feature".into(),
+                "a \"b\"".into(),
+            ))),
+            Condition::Any(vec![Condition::Literal(true), Condition::Unread]),
+        ]);
+        assert_eq!(
+            c.to_string(),
+            "all(unix, not(feature = \"a \\\"b\\\"\"), any(true, ?))"
+        );
     }
 
     #[test]

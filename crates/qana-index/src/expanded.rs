@@ -58,6 +58,10 @@ pub struct InvocationAt {
     pub seen: Option<Vec<Seen>>,
     /// Whether it stands among items, as one a summary records.
     pub among_items: bool,
+    /// The condition the place it stands in is under, if any (see
+    /// [`Reference::condition`](crate::Reference::condition)).
+    #[serde(default)]
+    pub condition: Option<crate::Condition>,
 }
 
 /// The invocations `text`, a file of `lang`'s language, writes, in the
@@ -82,8 +86,10 @@ pub fn invocations(lang: &EmbeddedLang, text: &str) -> Vec<InvocationAt> {
                 namespace: inv.namespace.clone(),
                 entry: lang.sg.nt_names[inv.entry as usize].clone(),
                 units,
-                seen: is_textual(lang, &inv.namespace).then(|| replay(&read.textual, at)),
+                seen: is_textual(lang, &inv.namespace)
+                    .then(|| replay(&read.textual, &read.regions, at)),
                 among_items: inv.among_items,
+                condition: crate::condition_at(&read.regions, inv.span),
             }
         })
         .collect()
@@ -270,9 +276,10 @@ pub fn expand_text(
             tags_of(&expansion.nested, &mut tags);
             render(&expansion.parsed, &expansion.nested, (&tags, krate), &mut out);
         }
-        MacroSource::Builtin { macro_: BuiltinMacro::CfgSelect, .. } => {
+        MacroSource::Builtin { macro_: BuiltinMacro::CfgSelect, configuration } => {
             let arms = input.cfg_select_arms().map_err(|e| e.message)?;
-            let stream = TokenStream::concat(arms.into_iter().map(|(_, body)| body));
+            let (chosen, _) = crate::expand::chosen_arms(arms, configuration);
+            let stream = TokenStream::concat(chosen);
             let (parsed, nested) =
                 qana_mbe::expand_all(lang, &stream, &request.entry, limit, &mut resolve)
                     .map_err(|e| e.message)?;
@@ -698,7 +705,7 @@ fn read_spliced(
                 .map(|(units, _, _)| units)
                 .unwrap_or_default();
             let seen = is_textual(lang, &inv.namespace)
-                .then(|| file.seen(replay(&read.textual, path_span.0)));
+                .then(|| file.seen(replay(&read.textual, &read.regions, path_span.0)));
             Some(InvocationAt {
                 span,
                 path_span: Some(in_file),
@@ -708,6 +715,7 @@ fn read_spliced(
                 units,
                 seen,
                 among_items: false,
+                condition: crate::condition_at(&read.regions, inv.span),
             })
         })
         .collect();
@@ -858,12 +866,12 @@ impl ExpandedFile {
     pub fn seen(&self, seen: Vec<Seen>) -> Vec<Seen> {
         seen.into_iter()
             .map(|s| match s {
-                Seen::Def { name, span, attributes } => {
+                Seen::Def { name, span, attributes, condition } => {
                     let span = self.in_file(span).map_or(span, |(span, _)| span);
-                    Seen::Def { name, span, attributes }
+                    Seen::Def { name, span, attributes, condition }
                 }
-                Seen::Module { attributes, seen } => {
-                    Seen::Module { attributes, seen: self.seen(seen) }
+                Seen::Module { attributes, seen, condition } => {
+                    Seen::Module { attributes, seen: self.seen(seen), condition }
                 }
                 file @ Seen::File { .. } => file,
             })

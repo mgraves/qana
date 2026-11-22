@@ -36,8 +36,8 @@ use qana_lang::EmbeddedLang;
 use qana_mbe::{Edition, Form, MacroRules, Parsed, TokenStream};
 
 use crate::{
-    summarize_tree, Attribute, Fnv, LineStarts, Locations, Needs, Offers, Path, Root, Summary,
-    TextualLink,
+    summarize_tree, Condition, Configuration, Fnv, Holds, LineStarts, Locations, Needs, Offers,
+    Path, Root, Summary, TextualLink,
 };
 
 /// What a worker is asked to expand.
@@ -110,10 +110,11 @@ pub enum MacroSource {
     /// written, and whether it is exported with `local_inner_macros`.
     Tokens { body: TokenStream, form: Form, local_inner: bool },
     /// A macro the compiler defines (its definition says no rules), whose
-    /// expansion the model says, with the attribute that puts what it
-    /// defines under a condition, where the expansion is a choice among
-    /// conditions (Rust's `cfg`).
-    Builtin { macro_: BuiltinMacro, condition: Option<Path> },
+    /// expansion the model says, with the configuration its invocation's
+    /// crate is compiled in, which decides an expansion that is a choice
+    /// among conditions (`cfg_select!`'s arms); one that decides nothing
+    /// takes every arm.
+    Builtin { macro_: BuiltinMacro, configuration: Configuration },
 }
 
 /// The macros an expansion's invocations may name that a worker expands
@@ -127,9 +128,9 @@ pub type MacroTable = [(Path, Vec<MacroSource>)];
 /// ([`crate::CrateInfo::builtin_macros`]).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BuiltinMacro {
-    /// Rust's `cfg_select!`: the items of each arm (`predicate => { … }`,
-    /// `_ => { … }`), each under its condition, which a summary does not
-    /// decide: all of them, every one an answer.
+    /// Rust's `cfg_select!`: the items of the first arm (`predicate => {
+    /// … }`, `_ => { … }`) whose predicate holds, in the configuration its
+    /// site is in ([`chosen_arms`]).
     CfgSelect,
     /// Rust's `format_args!` (and `format_args_nl!`, `const_format_args!`),
     /// as what it reads: its arguments, and the names its format string
@@ -141,6 +142,43 @@ pub enum BuiltinMacro {
     /// 2021 edition): `assert!` read as the condition it tests and the
     /// message it formats, `cfg!` as reading nothing.
     StandIn(String),
+}
+
+/// The arms of a `cfg_select!` its configuration `configuration` chooses,
+/// in order, and whether the choice is exact: an arm whose predicate does
+/// not hold is skipped, one that holds ends the choice, and one that may
+/// hold is taken and the choice goes on (`_` holds; a predicate written no
+/// way a predicate is, may). Exact where one arm is taken (or none), every
+/// arm before it skipped.
+pub(crate) fn chosen_arms(
+    arms: Vec<(Option<TokenStream>, TokenStream)>,
+    configuration: &Configuration,
+) -> (Vec<TokenStream>, bool) {
+    let mut chosen = Vec::new();
+    let mut exact = true;
+    for (predicate, body) in arms {
+        let condition = match &predicate {
+            None => Condition::Literal(true),
+            Some(tokens) => {
+                let texts = tokens.token_texts();
+                let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+                Condition::read(&texts).unwrap_or(Condition::Unread)
+            }
+        };
+        match condition.holds(configuration) {
+            Holds::No => {}
+            Holds::Yes => {
+                chosen.push(body);
+                break;
+            }
+            Holds::Maybe => {
+                chosen.push(body);
+                exact = false;
+            }
+        }
+    }
+    let exact = exact && chosen.len() <= 1;
+    (chosen, exact)
 }
 
 /// `source`'s rules, as `lang`'s macros expand, tagged `tag` where one is
@@ -570,7 +608,7 @@ impl Job<'_> {
         inherited: &[u32],
     ) -> Result<(Expanded, Vec<Wanted>, bool), String> {
         let lang = self.lang;
-        let mut condition: Option<Path> = None;
+        let mut exact = true;
         let mut local_inner = inherited.to_vec();
         let tokens = match definition {
             MacroSource::Text { .. }
@@ -585,33 +623,35 @@ impl Job<'_> {
                 }
                 qana_mbe::expand(lang, &rules, input, mark).map_err(|e| e.message)?
             }
-            MacroSource::Builtin { macro_: BuiltinMacro::CfgSelect, condition: cond } => {
+            MacroSource::Builtin { macro_: BuiltinMacro::CfgSelect, configuration } => {
                 let arms = input.cfg_select_arms().map_err(|e| e.message)?;
-                // A lone `_` arm holds whatever the conditions; any other arm
-                // holds under its own.
-                let chosen = !matches!(arms.as_slice(), [(None, _)]);
-                if chosen {
-                    condition = cond.clone();
-                }
-                TokenStream::concat(arms.into_iter().map(|(_, body)| body))
+                let chosen;
+                (chosen, exact) = chosen_arms(arms, configuration);
+                TokenStream::concat(chosen)
             }
         };
         let parsed = tokens.parse(lang, entry).map_err(|e| e.message)?;
         let mut summary = summarize_tree(lang, &parsed.text, parsed.tree.clone());
         let mut changed = false;
-        if let Some(condition) = condition {
-            let under =
-                Attribute { path: condition, conditional: false, args: Vec::new(), condition: None };
-            let mark = |links: &mut Vec<TextualLink>| {
-                for link in links {
-                    if let TextualLink::Def { attributes, .. } = link {
-                        attributes.push(under.clone());
-                    }
-                }
+        if !exact {
+            // Arms the configuration does not choose between: what each
+            // defines textually may not be, so hides none before it.
+            let mut defs: Vec<u32> = Vec::new();
+            let mut gather = |links: &[TextualLink]| {
+                defs.extend(links.iter().filter_map(|l| match l {
+                    TextualLink::Def { declaration, .. } => Some(*declaration),
+                    _ => None,
+                }));
             };
-            mark(&mut summary.offers.textual);
-            for unit in &mut summary.offers.units {
-                mark(&mut unit.textual);
+            gather(&summary.offers.textual);
+            for unit in &summary.offers.units {
+                gather(&unit.textual);
+            }
+            for d in defs {
+                let declared = &mut summary.offers.declarations[d as usize];
+                let own = declared.condition.take();
+                declared.condition =
+                    Condition::all_of(own.into_iter().chain([Condition::Unread]).collect());
             }
             changed = true;
         }

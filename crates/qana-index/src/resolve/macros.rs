@@ -8,12 +8,12 @@ use std::rc::Rc;
 use super::{
     CrateFiles, Exported, MacroResolution, Module, Resolution, Resolver, RootMacros, Start,
 };
-use crate::{Attribute, CrateInfo, Path, Root, Seen, TextualLink};
+use crate::{Attribute, Condition, CrateInfo, Holds, Path, Root, Seen, TextualLink};
 
 /// What a textual search has found, nearest first: definitions in the
 /// file the name stands in (by their names' spans) and declarations
 /// elsewhere ((file, declaration index)); and whether it is done, which
-/// one that surely is (under no condition) makes it.
+/// one that surely is (whose conditions hold) makes it.
 #[derive(Default)]
 struct Found {
     here: Vec<(u32, u32)>,
@@ -22,16 +22,21 @@ struct Found {
 }
 
 impl Found {
-    /// Take a definition in the file, under a condition or not.
-    fn here(&mut self, span: (u32, u32), conditional: bool) {
-        self.here.push(span);
-        self.done = !conditional;
+    /// Take a definition in the file, where it is there: whether it
+    /// `holds`.
+    fn here(&mut self, span: (u32, u32), holds: Holds) {
+        if holds != Holds::No {
+            self.here.push(span);
+            self.done = holds == Holds::Yes;
+        }
     }
 
-    /// Take a declaration, under a condition or not.
-    fn declared(&mut self, declaration: (u32, u32), conditional: bool) {
-        self.declared.push(declaration);
-        self.done = !conditional;
+    /// Take a declaration, where it is there: whether it `holds`.
+    fn declared(&mut self, declaration: (u32, u32), holds: Holds) {
+        if holds != Holds::No {
+            self.declared.push(declaration);
+            self.done = holds == Holds::Yes;
+        }
     }
 }
 
@@ -46,9 +51,11 @@ impl Resolver {
     /// unless exported); then in the macro prelude
     /// ([`CrateInfo::macro_prelude`], and the crates the root loads under
     /// [`CrateInfo::macro_use`]); then in the preludes. A textual
-    /// definition under a condition ([`CrateInfo::conditions`]) may not be,
-    /// so the search goes on past it: each one it meets is an answer, to
-    /// one that surely is ([`MacroResolution::Several`]). A path is
+    /// definition whose condition does not hold in its crate is not there;
+    /// one whose condition may hold may not be, so the search goes on past
+    /// it: each one it meets is an answer, to one that surely is
+    /// ([`MacroResolution::Several`]). One said under a condition the
+    /// summary does not read ([`CrateInfo::conditions`]) may hold. A path is
     /// resolved as [`resolve`](Self::resolve) resolves one, a crate's root
     /// having the textual definitions exported from anywhere in it
     /// ([`CrateInfo::macro_export`]). In a file no crate holds, a name
@@ -117,12 +124,13 @@ impl Resolver {
     ) -> Found {
         let info = &self.graph.crates()[krate as usize];
         let mut found = Found::default();
-        self.in_seen(krate, id, seen, name, info, false, &mut HashSet::new(), &mut found);
+        let under = Holds::Yes;
+        self.in_seen(krate, id, seen, name, info, under, &mut HashSet::new(), &mut found);
         if !found.done {
             self.outward(krate, id, name, info, &mut found);
         }
         if !found.done {
-            let at = Module { krate, file: id, unit: self.unit_named(id, units) };
+            let at = Module { krate, file: id, unit: self.unit_named(krate, id, units) };
             let named = self
                 .in_module(at, name, namespace, info)
                 .or_else(|| self.in_macro_prelude(krate, name, namespace, info))
@@ -393,7 +401,8 @@ impl Resolver {
             };
             if let Some(k) = links.iter().position(|l| *l == link) {
                 let mut visited = HashSet::new();
-                self.in_links(krate, file, &links[..k], name, info, false, &mut visited, found);
+                let under = Holds::Yes;
+                self.in_links(krate, file, &links[..k], name, info, under, &mut visited, found);
                 if found.done {
                     return;
                 }
@@ -414,9 +423,8 @@ impl Resolver {
 
     /// The textual definitions named `name` that `seen` holds, in file
     /// `file` of crate `krate`, nearest first, into `found`: those there,
-    /// and those a module there carries out; each under a condition where
-    /// `conditional`, or where it or a module it is carried out of is
-    /// under one.
+    /// and those a module there carries out; each where `under` holds, and
+    /// its own condition and those of the modules it is carried out of.
     #[allow(clippy::too_many_arguments)]
     fn in_seen(
         &self,
@@ -425,7 +433,7 @@ impl Resolver {
         seen: &[Seen],
         name: &str,
         info: &CrateInfo,
-        conditional: bool,
+        under: Holds,
         visited: &mut HashSet<u32>,
         found: &mut Found,
     ) {
@@ -434,25 +442,65 @@ impl Resolver {
                 return;
             }
             match s {
-                Seen::Def { name: n, span, attributes } if n == name => {
-                    found.here(*span, conditional || is_conditional(info, attributes));
+                Seen::Def { name: n, span, attributes, condition } if n == name => {
+                    let holds = self.said_holds(krate, condition.as_ref(), info, attributes);
+                    found.here(*span, under.and(holds));
                 }
                 Seen::Def { .. } => {}
-                Seen::Module { attributes, seen } => {
-                    let Some(maybe) = carries_out(info, attributes) else { continue };
-                    let conditional = conditional || maybe || is_conditional(info, attributes);
-                    self.in_seen(krate, file, seen, name, info, conditional, visited, found);
+                Seen::Module { attributes, seen, condition } => {
+                    let Some(holds) = self.carried(krate, condition.as_ref(), info, attributes)
+                    else {
+                        continue;
+                    };
+                    let under = under.and(holds);
+                    self.in_seen(krate, file, seen, name, info, under, visited, found);
                 }
-                Seen::File { units, attributes } => {
-                    let Some(maybe) = carries_out(info, attributes) else { continue };
+                Seen::File { units, attributes, condition } => {
+                    let Some(holds) = self.carried(krate, condition.as_ref(), info, attributes)
+                    else {
+                        continue;
+                    };
                     let Some(body) = self.body_of(krate, file, units) else { continue };
-                    let conditional = conditional || maybe || is_conditional(info, attributes);
                     let summary = self.summaries[body as usize].clone();
                     let links = summary.offers().textual();
-                    self.in_links(krate, body, links, name, info, conditional, visited, found);
+                    let under = under.and(holds);
+                    self.in_links(krate, body, links, name, info, under, visited, found);
                 }
             }
         }
+    }
+
+    /// Whether what is said under `condition` with `attributes` is there in
+    /// crate `krate`: where its condition holds; with none the summary
+    /// reads, where it holds no attribute the model says is a condition
+    /// ([`CrateInfo::conditions`]), and may where it does.
+    fn said_holds(
+        &self,
+        krate: u32,
+        condition: Option<&Condition>,
+        info: &CrateInfo,
+        attributes: &[Attribute],
+    ) -> Holds {
+        match condition {
+            Some(_) => self.holds_in(krate, condition),
+            None if is_conditional(info, attributes) => Holds::Maybe,
+            None => Holds::Yes,
+        }
+    }
+
+    /// Whether a module under `condition`, with `attributes`, carries its
+    /// textual definitions out of it in crate `krate`, and holds: `None`
+    /// where it does not carry them, or is not there.
+    fn carried(
+        &self,
+        krate: u32,
+        condition: Option<&Condition>,
+        info: &CrateInfo,
+        attributes: &[Attribute],
+    ) -> Option<Holds> {
+        let carrying = self.carries_out(krate, info, attributes)?;
+        let holds = carrying.and(self.said_holds(krate, condition, info, attributes));
+        (holds != Holds::No).then_some(holds)
     }
 
     /// The file the unit under `units` of `file` has its body in, where it
@@ -472,7 +520,7 @@ impl Resolver {
 
     /// The textual definitions named `name` in `links`, a module's own in
     /// `file`, nearest first, into `found`: among them, and those a child
-    /// module there carries out; under a condition as
+    /// module there carries out; each where it holds, as
     /// [`in_seen`](Self::in_seen) says.
     #[allow(clippy::too_many_arguments)]
     fn in_links(
@@ -482,7 +530,7 @@ impl Resolver {
         links: &[TextualLink],
         name: &str,
         info: &CrateInfo,
-        conditional: bool,
+        under: Holds,
         visited: &mut HashSet<u32>,
         found: &mut Found,
     ) {
@@ -497,19 +545,24 @@ impl Resolver {
                 // in a merged summary.
                 TextualLink::Invocation(_) => {}
                 TextualLink::Def { declaration, attributes } => {
-                    if offers.declarations()[*declaration as usize].name == name {
-                        let conditional = conditional || is_conditional(info, attributes);
-                        found.declared((file, *declaration), conditional);
+                    let declared = &offers.declarations()[*declaration as usize];
+                    if declared.name == name {
+                        let condition = declared.condition.as_ref();
+                        let holds = self.said_holds(krate, condition, info, attributes);
+                        found.declared((file, *declaration), under.and(holds));
                     }
                 }
                 TextualLink::Module(unit) => {
                     let unit_info = &offers.units()[*unit as usize];
-                    let Some(maybe) = carries_out(info, &unit_info.attributes) else { continue };
-                    let conditional =
-                        conditional || maybe || is_conditional(info, &unit_info.attributes);
+                    let condition = unit_info.condition.as_ref();
+                    let Some(holds) = self.carried(krate, condition, info, &unit_info.attributes)
+                    else {
+                        continue;
+                    };
+                    let under = under.and(holds);
                     if unit_info.inline {
                         let links = &unit_info.textual;
-                        self.in_links(krate, file, links, name, info, conditional, visited, found);
+                        self.in_links(krate, file, links, name, info, under, visited, found);
                         continue;
                     }
                     let Some(body) = self
@@ -526,7 +579,7 @@ impl Resolver {
                     }
                     let body_summary = self.summaries[body as usize].clone();
                     let links = body_summary.offers().textual();
-                    self.in_links(krate, body, links, name, info, conditional, visited, found);
+                    self.in_links(krate, body, links, name, info, under, visited, found);
                 }
             }
         }
@@ -555,7 +608,8 @@ impl Resolver {
                 if let Some(k) = links.iter().position(|l| *l == TextualLink::Module(child)) {
                     let mut visited = HashSet::new();
                     let before = &links[..k];
-                    self.in_links(krate, declaring, before, name, info, false, &mut visited, found);
+                    let under = Holds::Yes;
+                    self.in_links(krate, declaring, before, name, info, under, &mut visited, found);
                     if found.done {
                         return;
                     }
@@ -591,7 +645,7 @@ impl Resolver {
                 }
                 let made_here = file == module.file && d.unit == module.unit;
                 match (made_here, own.get(&index)) {
-                    (true, Some(attributes)) => exported(info, attributes),
+                    (true, Some(attributes)) => self.exported(module.krate, info, attributes),
                     _ => true,
                 }
             })
@@ -620,7 +674,7 @@ impl Resolver {
         }
         let imports: Vec<crate::Import> = self.imports_of(root).cloned().collect();
         for import in imports.iter().filter(|i| i.loads) {
-            let brings = match loaded(info, &import.attributes) {
+            let brings = match self.loaded(krate, info, &import.attributes) {
                 None => false,
                 Some(Loaded::All) => true,
                 Some(Loaded::Named(names)) => names.contains(&name),
@@ -707,9 +761,10 @@ impl Resolver {
             for &file in files.get(&krate).map(Vec::as_slice).unwrap_or_default() {
                 let offers = self.summaries[file as usize].offers();
                 for (index, attributes) in self.textual_defs(file) {
-                    if exported(info, &attributes) {
-                        let name = offers.declarations()[index as usize].name.clone();
-                        found.entry(name).or_default().push((file, index));
+                    let declared = &offers.declarations()[index as usize];
+                    let there = self.there(krate, file, declared.condition.as_ref());
+                    if there && self.exported(krate, info, &attributes) {
+                        found.entry(declared.name.clone()).or_default().push((file, index));
                     }
                 }
             }
@@ -739,18 +794,44 @@ impl Resolver {
     }
 }
 
-/// Whether `attributes`, a module's, carry its textual definitions out of
-/// it: one the model names, without arguments (which rustc refuses there).
-/// `Some(true)` where each that does holds only under a condition
-/// (`#[cfg_attr(test, macro_use)]`), `None` where none does.
-fn carries_out(info: &CrateInfo, attributes: &[Attribute]) -> Option<bool> {
-    let carrying =
-        attributes.iter().filter(|a| a.args.is_empty() && info.macro_use.contains(&a.path));
-    carrying.map(|a| a.conditional).reduce(|a, b| a && b)
+impl Resolver {
+    /// Whether `attributes`, a module's, carry its textual definitions out
+    /// of it in crate `krate`: one the model names, without arguments (which
+    /// rustc refuses there), where it is said (`#[cfg_attr(test,
+    /// macro_use)]` where `test` may hold: it may). `None` where none is.
+    fn carries_out(&self, krate: u32, info: &CrateInfo, attributes: &[Attribute]) -> Option<Holds> {
+        let carrying =
+            attributes.iter().filter(|a| a.args.is_empty() && info.macro_use.contains(&a.path));
+        let holds = carrying.map(|a| self.attribute_holds(krate, a)).reduce(Holds::or)?;
+        (holds != Holds::No).then_some(holds)
+    }
+
+    /// What `attributes`, a loading import's, bring of its crate's macros
+    /// in crate `krate`, those said there: `None` where no attribute the
+    /// model names is among them.
+    fn loaded<'a>(
+        &self,
+        krate: u32,
+        info: &CrateInfo,
+        attributes: &'a [Attribute],
+    ) -> Option<Loaded<'a>> {
+        let said: Vec<&'a Attribute> =
+            attributes.iter().filter(|a| self.attribute_holds(krate, a) != Holds::No).collect();
+        loaded(info, &said)
+    }
+
+    /// Whether `attributes` export a textual definition to its crate's root
+    /// in crate `krate`: one the model names, said there.
+    fn exported(&self, krate: u32, info: &CrateInfo, attributes: &[Attribute]) -> bool {
+        attributes.iter().any(|a| {
+            info.macro_export.contains(&a.path) && self.attribute_holds(krate, a) != Holds::No
+        })
+    }
 }
 
-/// Whether `attributes` put what they are said of under a condition, so
-/// that it may not be (Rust's `#[cfg]`, held or itself conditional).
+/// Whether `attributes` put what they are said of under a condition the
+/// summary does not read, so that it may not be (an attribute the model
+/// says is one, Rust's `#[cfg]`, where the grammar says no `@condition`).
 fn is_conditional(info: &CrateInfo, attributes: &[Attribute]) -> bool {
     attributes.iter().any(|a| info.conditions.contains(&a.path))
 }
@@ -766,9 +847,9 @@ enum Loaded<'a> {
 
 /// What `attributes`, a loading import's, bring of its crate's macros:
 /// `None` where no attribute the model names is among them.
-fn loaded<'a>(info: &CrateInfo, attributes: &'a [Attribute]) -> Option<Loaded<'a>> {
+fn loaded<'a>(info: &CrateInfo, attributes: &[&'a Attribute]) -> Option<Loaded<'a>> {
     let mut named: Option<Vec<&'a str>> = None;
-    for a in attributes.iter().filter(|a| info.macro_use.contains(&a.path)) {
+    for a in attributes.iter().copied().filter(|a| info.macro_use.contains(&a.path)) {
         if a.args.is_empty() {
             return Some(Loaded::All);
         }
@@ -780,9 +861,4 @@ fn loaded<'a>(info: &CrateInfo, attributes: &'a [Attribute]) -> Option<Loaded<'a
         }
     }
     named.map(Loaded::Named)
-}
-
-/// Whether `attributes` export a textual definition to its crate's root.
-fn exported(info: &CrateInfo, attributes: &[Attribute]) -> bool {
-    attributes.iter().any(|a| info.macro_export.contains(&a.path))
 }

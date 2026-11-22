@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::members::SelfPaths;
 use crate::textual::{is_textual, replay};
-use crate::{outside_bodies, units, LineStarts, Path, Seen, URI};
+use crate::{condition_at, outside_bodies, units, Condition, LineStarts, Path, Seen, URI};
 
 /// A reference to one of the names looked for. See the [module
 /// docs](self).
@@ -57,6 +57,11 @@ pub struct Reference {
     /// finds, not what it binds to (the file's binding reads a textual
     /// definition as seen from anywhere in its scope).
     pub textual: Option<Vec<Seen>>,
+    /// The condition the place it stands in is under (Rust's `#[cfg]`s
+    /// around it, as [`Locations::condition_at`](crate::Locations::condition_at)
+    /// says them), if any: where it does not hold, the name is not compiled.
+    #[serde(default)]
+    pub condition: Option<Condition>,
 }
 
 /// The references in `text`, a file of `lang`'s language, to any of
@@ -123,7 +128,9 @@ pub fn references(lang: &EmbeddedLang, text: &str, names: &[String]) -> Vec<Refe
             in_import: read.refs.get(&r.span).is_some_and(|place| place.imported),
             binds,
             local,
-            textual: is_textual(lang, &r.ns).then(|| replay(&read.textual, r.span.0)),
+            textual: is_textual(lang, &r.ns)
+                .then(|| replay(&read.textual, &read.regions, r.span.0)),
+            condition: condition_at(&read.regions, r.span),
         });
     }
     found.sort_by_key(|r| r.span);
@@ -187,7 +194,9 @@ pub fn escaping(lang: &EmbeddedLang, text: &str) -> Vec<Reference> {
             in_import: place.imported,
             binds: None,
             local: false,
-            textual: is_textual(lang, &r.ns).then(|| replay(&read.textual, r.span.0)),
+            textual: is_textual(lang, &r.ns)
+                .then(|| replay(&read.textual, &read.regions, r.span.0)),
+            condition: condition_at(&read.regions, r.span),
         });
     }
     found.sort_by_key(|r| r.span);

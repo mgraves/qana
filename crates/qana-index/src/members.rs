@@ -61,6 +61,10 @@ pub struct MemberAccess {
     /// it: a type written there that is one of them is that parameter, not
     /// a type a path names.
     pub generics: Vec<String>,
+    /// The condition the place it stands in is under, if any (see
+    /// [`Reference::condition`](crate::Reference::condition)).
+    #[serde(default)]
+    pub condition: Option<crate::Condition>,
 }
 
 /// How a member is used. See [`MemberAccess::kind`].
@@ -425,6 +429,7 @@ impl<'a> Reader<'a> {
             receiver,
             units: self.units_around(span),
             generics: cx.generics.as_ref().clone(),
+            condition: crate::condition_at(&self.read.regions, span),
         })
     }
 

@@ -387,8 +387,10 @@ pub(crate) struct TextualModule {
     pub unit: Option<u32>,
 }
 
-/// A derive's path (`@derives`), and its span.
-pub(crate) type Derive = (Path, Span);
+/// A derive's path (`@derives`), its span, and the conditions of the
+/// conditional attributes around it (`#[cfg_attr(p, derive(…))]`), all of
+/// them.
+pub(crate) type Derive = (Path, Span, Option<Condition>);
 
 /// The spans of what an impl block's head names: its type, and its trait.
 pub(crate) type ImplHead = (Option<Span>, Option<Span>);
@@ -1295,7 +1297,7 @@ impl Walk<'_> {
     ) {
         let roles = self.g.roles.get(&(node.nt, node.prod));
         if let Some(k) = roles.and_then(|r| r.derives) {
-            read.derives.extend(self.derive_at(node, base, k));
+            read.derives.extend(self.derive_at(node, base, k, under));
             return;
         }
         if let Some(k) = roles.and_then(|r| r.attribute) {
@@ -1314,9 +1316,7 @@ impl Walk<'_> {
                     condition: under.cloned(),
                 });
             }
-            let predicate = roles
-                .and_then(|r| r.condition)
-                .map(|p| self.predicate_at(node, p));
+            let predicate = roles.and_then(|r| r.condition).map(|p| self.predicate_at(node, p));
             let held = roles
                 .and_then(|r| r.attribute_list)
                 .and_then(|(a, _)| symbol_child_at(node, a, base));
@@ -1341,7 +1341,7 @@ impl Walk<'_> {
                 (None, None) => {
                     // What an attribute derives is in its arguments.
                     for (m, at) in child_nodes(node, base) {
-                        self.derives_in(m, at, read.derives);
+                        self.derives_in(m, at, under, read.derives);
                     }
                 }
             }
@@ -1408,22 +1408,34 @@ impl Walk<'_> {
     }
 
     /// What the `@derives` nodes in `node`'s subtree (which starts at
-    /// `base`) name, with where.
-    fn derives_in(&self, node: &GreenNode, base: u32, derives: &mut Vec<Derive>) {
+    /// `base`) name, with where, each under `under`.
+    fn derives_in(
+        &self,
+        node: &GreenNode,
+        base: u32,
+        under: Option<&Condition>,
+        derives: &mut Vec<Derive>,
+    ) {
         if let Some(k) = self.g.roles.get(&(node.nt, node.prod)).and_then(|r| r.derives) {
-            derives.extend(self.derive_at(node, base, k));
+            derives.extend(self.derive_at(node, base, k, under));
             return;
         }
         for (m, at) in child_nodes(node, base) {
-            self.derives_in(m, at, derives);
+            self.derives_in(m, at, under, derives);
         }
     }
 
     /// The path a `@derives` node (`node`, starting at `base`) names at its
     /// child `k`, and that child's span.
-    fn derive_at(&self, node: &GreenNode, base: u32, k: usize) -> Option<Derive> {
+    fn derive_at(
+        &self,
+        node: &GreenNode,
+        base: u32,
+        k: usize,
+        under: Option<&Condition>,
+    ) -> Option<Derive> {
         let path = Path::of_child(node, k, self.g.cfg)?;
-        Some((path, exact_span(node, base, k)?))
+        Some((path, exact_span(node, base, k)?, under.cloned()))
     }
 
     /// The name span of the definition the pattern `node` (starting at
@@ -1553,18 +1565,15 @@ pub(crate) fn child_text(n: &GreenNode, k: usize) -> Option<String> {
             }
         }
     }
-    n.children
-        .iter()
-        .zip(symbol_indices(n))
-        .find_map(|(c, index)| match (c, index == Some(k)) {
-            (GreenChild::Token(t), true) => Some(t.text.clone()),
-            (GreenChild::Node(m), true) => {
-                let mut text = String::new();
-                tokens(m, &mut text);
-                Some(text)
-            }
-            _ => None,
-        })
+    n.children.iter().zip(symbol_indices(n)).find_map(|(c, index)| match (c, index == Some(k)) {
+        (GreenChild::Token(t), true) => Some(t.text.clone()),
+        (GreenChild::Node(m), true) => {
+            let mut text = String::new();
+            tokens(m, &mut text);
+            Some(text)
+        }
+        _ => None,
+    })
 }
 
 /// The `k`th symbol child of `n`, when it is a node.

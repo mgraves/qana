@@ -106,9 +106,11 @@ pub struct CrateInfo {
     #[serde(default)]
     pub macro_prelude: Vec<crate::Path>,
     /// The attributes under which what they are said of may not be (Rust's
-    /// `cfg`, which a summary does not decide): a textual definition under
-    /// one does not hide an earlier one of its name, which may be the one
-    /// a name sees.
+    /// `cfg`): where a summary reads no condition for what one is said of
+    /// (a grammar that says no `@condition`), a textual definition under one
+    /// may not be, so does not hide an earlier one of its name, which may
+    /// be the one a name sees. Where it reads one, the crate's
+    /// [`configuration`](Self::configuration) decides.
     #[serde(default)]
     pub conditions: Vec<crate::Path>,
     /// The attributes that make a macro's definition the compiler's, its
@@ -247,6 +249,18 @@ impl UnitGraph {
     /// The crates, in the order they were added.
     pub fn crates(&self) -> &[CrateInfo] {
         &self.crates
+    }
+
+    /// The graph, each crate's [`configuration`](CrateInfo::configuration)
+    /// one that decides nothing: a resolver over it reads every condition as
+    /// one that may hold, as code that is not compiled is read (to go to
+    /// what it names, never to judge it).
+    pub fn undecided(&self) -> UnitGraph {
+        let mut graph = self.clone();
+        for krate in &mut graph.crates {
+            krate.configuration = crate::Configuration::default();
+        }
+        graph
     }
 
     /// Where `file` is: each crate it is in (an index into
